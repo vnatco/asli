@@ -34,11 +34,14 @@ pub enum SessionKind {
 
 /// The backend that will be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Backend {
     /// A Wayland data control protocol, chosen at connect time between ext and wlr.
     WaylandDataControl,
     /// `XFixes` on an X11 connection. Also the GNOME Wayland path, through `XWayland`.
     X11,
+    /// `AddClipboardFormatListener` on a message only window.
+    Windows,
 }
 
 /// The environment this decision is made from.
@@ -121,6 +124,21 @@ pub struct Plan {
 /// [`crate::Error::NoProtocol`] when a Wayland session offers no route to the clipboard and has
 /// no X11 fallback, which is the river case.
 pub fn plan(env: &Env) -> crate::Result<Plan> {
+    // Windows has no display server to detect: there is one clipboard and one way to watch it.
+    // Deciding by target before looking at the environment keeps the Linux branch below honest,
+    // since WAYLAND_DISPLAY and DISPLAY are both absent on Windows and it would otherwise be
+    // reported as a headless session.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = env;
+        return Ok(Plan {
+            backend: Backend::Windows,
+            degraded: false,
+            note: "using AddClipboardFormatListener on a message only window",
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
     match env.kind() {
         SessionKind::Wayland => {
             if env.is_gnome() {

@@ -19,9 +19,9 @@
 //!
 //! # Status
 //!
-//! Linux first, since that is where the hard problems are. The Linux session detection in
-//! [`session`] is implemented and tested. The X11 and Wayland watchers, and the Windows and macOS
-//! backends, are not written yet.
+//! Linux and Windows are implemented. The Linux backends are verified on real hardware; the
+//! Windows one is compile checked only, because it is written on Linux. macOS is not written yet,
+//! and carries open questions about the pasteboard permission alert that need real hardware.
 
 #![forbid(unsafe_code)]
 
@@ -32,6 +32,8 @@ pub mod session;
 pub mod linux_wayland;
 #[cfg(target_os = "linux")]
 pub mod linux_x11;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 pub use error::{Error, Result};
 pub use session::{Backend, Env, Plan, SessionKind};

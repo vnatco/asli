@@ -25,4 +25,11 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # request is noticed without blocking forever waiting for a clipboard event.
 rustix = { version = "1", features = ["event"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# The whole Win32 surface this backend needs, behind safe wrappers. The crate sets
+# forbid(unsafe_code), and the windows crate is unsafe at every call site, so clipboard-win is
+# not a convenience here, it is what makes the lint satisfiable.
+# The monitor feature is the message only window plus AddClipboardFormatListener.
+clipboard-win = { version = "5.4", features = ["monitor", "std"] }
+
 [dev-dependencies]

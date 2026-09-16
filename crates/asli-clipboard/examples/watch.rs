@@ -16,10 +16,15 @@
 //!
 //! Press Enter to stop.
 
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
-use asli_clipboard::session::{self, Backend, Env};
+#[cfg(target_os = "linux")]
+use asli_clipboard::session::Backend;
+use asli_clipboard::session::{self, Env};
+#[cfg(target_os = "linux")]
 use asli_clipboard::{ClipContent, ClipEvent, ClipboardWatcher};
 
 fn main() {
@@ -85,6 +90,13 @@ fn run_linux(backend: Backend, show_content: bool) {
             let handle = x11.shutdown_handle();
             (Box::new(x11), handle)
         }
+        // Backend is non_exhaustive, so a backend added later compiles here rather than breaking
+        // the build. This helper is Linux only by construction: the whole function is behind a
+        // target_os gate.
+        other => {
+            eprintln!("this example does not drive the {other:?} backend");
+            std::process::exit(1);
+        }
     };
 
     stop_on_enter(&shutdown);
@@ -107,6 +119,7 @@ fn run_linux(backend: Backend, show_content: bool) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn report(count: u32, event: &ClipEvent, show_content: bool) {
     if event.sensitive {
         println!("[{count}] skipped: the source marked this as a password");
@@ -135,6 +148,7 @@ fn report(count: u32, event: &ClipEvent, show_content: bool) {
 }
 
 /// Stops the watcher when a line arrives on stdin, so the example needs no signal handling crate.
+#[cfg(target_os = "linux")]
 fn stop_on_enter(flag: &Arc<AtomicBool>) {
     let flag = Arc::clone(flag);
     std::thread::spawn(move || {

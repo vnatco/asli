@@ -1,16 +1,17 @@
 //! The `asli` command.
 //!
-//! The tray is not wired yet, so this is the whole interface: create or join an account, run the
-//! daemon, ask what it thinks is going on, and start over if the key leaks.
+//! Create or join an account, run the daemon with or without a tray, ask what it thinks is going
+//! on, and start over if the key leaks.
 
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
 
 use asli_app::clipboard_io::log_line;
-use asli_app::config::Paths;
+use asli_app::config::{Config, Paths};
+use asli_app::daemon::Controls;
 use asli_app::error::{Error, Result};
-use asli_app::{daemon, qr, secrets};
+use asli_app::{autostart, daemon, qr, secrets, tray};
 use asli_crypto::{token, Identity};
 use clap::{Parser, Subcommand};
 
@@ -39,8 +40,15 @@ enum Command {
         /// The token from `asli create`, starting with `asli1_`.
         token: String,
     },
-    /// Run the daemon in the foreground.
+    /// Run the daemon in the foreground, with no tray.
     Run,
+    /// Run the daemon with a tray icon. This is what launching at login starts.
+    Tray,
+    /// Turn starting at login on or off.
+    Autostart {
+        /// `on` or `off`. Omit to show the current setting.
+        state: Option<String>,
+    },
     /// Show what this device is configured to do.
     Status,
     /// Forget the account on this device.
@@ -63,7 +71,9 @@ fn dispatch() -> Result<()> {
     match cli.command {
         Command::Create { force } => create(&paths, force),
         Command::Join { token } => join(&paths, &token),
-        Command::Run => run(&paths),
+        Command::Run => run(&paths, false),
+        Command::Tray => run(&paths, true),
+        Command::Autostart { state } => autostart_command(&paths, state.as_deref()),
         Command::Status => status(&paths),
         Command::Reset => reset(&paths),
         Command::Show => show(&paths),
@@ -174,7 +184,40 @@ fn reset(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn run(paths: &Paths) -> Result<()> {
+/// Turns starting at login on or off, and reports what actually happened.
+fn autostart_command(paths: &Paths, state: Option<&str>) -> Result<()> {
+    let mut config = paths.load_config()?;
+
+    match state {
+        None => {}
+        Some("on") => {
+            autostart::set_enabled(true)?;
+            config.autostart = true;
+            paths.save_config(&config)?;
+        }
+        Some("off") => {
+            autostart::set_enabled(false)?;
+            config.autostart = false;
+            paths.save_config(&config)?;
+        }
+        Some(other) => {
+            return Err(Error::Parse(format!(
+                "expected 'on' or 'off', got '{other}'"
+            )))
+        }
+    }
+
+    // Report the observed state, not the stored preference. Those disagree exactly when something
+    // went wrong, which is the moment it matters.
+    match autostart::is_enabled() {
+        Ok(enabled) => println!("Start at login: {}", if enabled { "on" } else { "off" }),
+        Err(err) => println!("Start at login: unknown ({err})"),
+    }
+    println!("Entry:         {}", autostart::describe_location()?);
+    Ok(())
+}
+
+fn run(paths: &Paths, with_tray: bool) -> Result<()> {
     let config = paths.load_config()?;
     let (secret, store) = secrets::load(paths)?.ok_or(Error::NoAccount)?;
     let identity = Identity::from_secret(&secret);
@@ -185,12 +228,26 @@ fn run(paths: &Paths) -> Result<()> {
     );
     eprintln!("{}", log_line("key_store", store.describe()));
 
+    // The stored preference is applied on every start, so an entry deleted by hand comes back and
+    // one turned off stays off. Failure is reported and not fatal: a machine that cannot write an
+    // autostart entry can still sync.
+    if let Err(err) = apply_autostart(&config) {
+        eprintln!("{}", log_line("autostart_failed", &err.to_string()));
+    }
+
     #[cfg(target_os = "linux")]
     {
         use asli_app::clipboard_io::ClipboardIo as _;
 
         let (clipboard, observed) = asli_app::clipboard_io::start()?;
         eprintln!("{}", log_line("clipboard", &clipboard.describe()));
+
+        let controls = Controls::default();
+        let io: Arc<dyn asli_app::clipboard_io::ClipboardIo> = Arc::new(clipboard);
+
+        if with_tray {
+            start_tray(paths, &config, &controls, &io)?;
+        }
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -199,7 +256,7 @@ fn run(paths: &Paths) -> Result<()> {
 
         runtime.block_on(async {
             tokio::select! {
-                result = daemon::run(paths, &config, identity, Arc::new(clipboard), observed) => result,
+                result = daemon::run(paths, &config, identity, Arc::clone(&io), observed, controls.clone()) => result,
                 _ = tokio::signal::ctrl_c() => {
                     eprintln!("{}", log_line("stopping", "interrupted"));
                     Ok(())
@@ -210,8 +267,166 @@ fn run(paths: &Paths) -> Result<()> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (config, identity);
+        let _ = (config, identity, with_tray);
         eprintln!("The daemon supports Linux only so far.");
         Ok(())
     }
+}
+
+/// Applies the stored autostart preference, if the platform supports it.
+fn apply_autostart(config: &Config) -> Result<()> {
+    match autostart::is_enabled() {
+        Ok(current) if current == config.autostart => Ok(()),
+        Ok(_) => autostart::set_enabled(config.autostart),
+        // Unsupported platforms report clearly rather than pretending, and must not stop the
+        // daemon from starting.
+        Err(err) => Err(err),
+    }
+}
+
+/// Builds the tray on a thread of its own and runs its menu loop there.
+///
+/// The tray must be constructed on the thread that owns it. `TrayIcon` and every `muda` menu item
+/// hold `Rc<RefCell<..>>` internally and are therefore not `Send`, so they cannot be built here
+/// and moved. Only `Send` values cross the boundary: the paths, the configuration, the pause flag
+/// and the status handle.
+///
+/// The ksni backend spawns its own service thread inside `TrayIcon::new`, so this thread exists
+/// only to poll menu events and refresh the labels. There is no GTK or winit event loop involved.
+#[cfg(target_os = "linux")]
+fn start_tray(
+    paths: &Paths,
+    config: &Config,
+    controls: &Controls,
+    io: &Arc<dyn asli_app::clipboard_io::ClipboardIo>,
+) -> Result<()> {
+    if !tray::host_present() {
+        // Refusing to start would be worse: syncing works perfectly well with no icon. Saying so
+        // is what stops this looking like a crash.
+        eprintln!(
+            "{}",
+            log_line("tray_host_missing", "no StatusNotifierItem host")
+        );
+        eprintln!("{}", tray::missing_host_advice());
+    }
+
+    let paths = paths.clone();
+    let config = config.clone();
+    let controls = controls.clone();
+    let io = Arc::clone(io);
+
+    // Construction happens on the worker, so its outcome has to come back over a channel for the
+    // caller to report a failed registration rather than discovering it never happened.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+
+    std::thread::Builder::new()
+        .name("asli-tray".to_owned())
+        .spawn(move || {
+            let tray = match tray::Tray::new(Arc::clone(&controls.paused)) {
+                Ok(tray) => {
+                    let _ = ready_tx.send(Ok(()));
+                    tray
+                }
+                Err(err) => {
+                    let _ = ready_tx.send(Err(err.to_string()));
+                    return;
+                }
+            };
+
+            let events = muda::MenuEvent::receiver();
+            loop {
+                let status = controls.status.get();
+                tray.refresh(&status, asli_net::client::now_ms());
+
+                // A timeout rather than a blocking receive, because the labels have to refresh
+                // even when nobody touches the menu.
+                if let Ok(event) = events.recv_timeout(tray::Tray::refresh_interval()) {
+                    if let Some(command) = tray.command_for(&event) {
+                        if handle_command(command, &paths, &config, &controls, io.as_ref()) {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .map_err(Error::Io)?;
+
+    match ready_rx.recv() {
+        Ok(Ok(())) => {
+            eprintln!("{}", log_line("tray", "registered"));
+            Ok(())
+        }
+        Ok(Err(detail)) => Err(Error::ConfigDir(detail)),
+        Err(_) => Err(Error::ConfigDir(
+            "the tray thread ended before it reported a result".to_owned(),
+        )),
+    }
+}
+
+/// Acts on a tray command. Returns true when the application should exit.
+#[cfg(target_os = "linux")]
+fn handle_command(
+    command: tray::Command,
+    paths: &Paths,
+    config: &Config,
+    controls: &Controls,
+    io: &dyn asli_app::clipboard_io::ClipboardIo,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
+    match command {
+        tray::Command::Pause => {
+            controls.paused.store(true, Ordering::Relaxed);
+            eprintln!("{}", log_line("paused", "by the tray menu"));
+        }
+        tray::Command::Resume => {
+            controls.paused.store(false, Ordering::Relaxed);
+            eprintln!("{}", log_line("resumed", "by the tray menu"));
+        }
+        tray::Command::PasteRetained => {
+            // Specified but not implemented: fetching the stored clip needs a request to the
+            // relay from the connection the daemon owns, which this thread cannot reach yet.
+            eprintln!(
+                "{}",
+                log_line(
+                    "paste_retained",
+                    "not implemented yet, see the protocol fetch_last message"
+                )
+            );
+        }
+        tray::Command::ShowToken => match secrets::load(paths) {
+            Ok(Some((secret, _))) => {
+                if let Err(err) = present_token(&secret) {
+                    eprintln!("{}", log_line("show_token_failed", &err.to_string()));
+                }
+            }
+            Ok(None) => eprintln!(
+                "{}",
+                log_line("show_token_failed", "no account on this device")
+            ),
+            Err(err) => eprintln!("{}", log_line("show_token_failed", &err.to_string())),
+        },
+        tray::Command::Settings => {
+            if let Err(err) = tray::open_settings(paths) {
+                eprintln!("{}", log_line("settings_failed", &err.to_string()));
+            }
+        }
+        tray::Command::Diagnostics => {
+            let text = tray::diagnostics(config, &controls.status.get(), paths);
+            // Diagnostics go onto the clipboard so they can be pasted into a bug report, which is
+            // the only reason this application ever writes something it did not receive.
+            if let Err(err) = io.write_text(&text) {
+                eprintln!("{}", log_line("diagnostics_failed", &err.to_string()));
+            } else {
+                eprintln!("{}", log_line("diagnostics", "copied to the clipboard"));
+            }
+        }
+        tray::Command::Quit => {
+            eprintln!("{}", log_line("stopping", "quit from the tray menu"));
+            // The daemon owns the process lifetime, and there is no clean cross thread shutdown
+            // path into its select loop yet, so this exits directly.
+            std::process::exit(0);
+        }
+    }
+    false
 }

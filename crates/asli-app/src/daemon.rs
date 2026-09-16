@@ -17,6 +17,7 @@
 //! it, and allocates from the block in memory. A crash loses the unused remainder of the block,
 //! which is harmless, and can never reuse a number, which is the part that matters.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -29,6 +30,30 @@ use tokio::sync::mpsc;
 use crate::clipboard_io::{log_line, ClipboardIo, Observed};
 use crate::config::{Config, Paths, State};
 use crate::error::Result;
+use crate::notify;
+use crate::tray::StatusHandle;
+
+/// Everything the tray shares with the daemon.
+///
+/// Pausing has to reach two places: the outbound path, so copies stop leaving this machine, and
+/// the inbound path, so arriving clips stop overwriting the local clipboard. A flag checked in
+/// both is the whole mechanism, and it is deliberately not a disconnect: staying connected means
+/// resuming is instant and the relay's connection count stays honest.
+#[derive(Debug, Clone, Default)]
+pub struct Controls {
+    /// Set while sync is paused.
+    pub paused: Arc<AtomicBool>,
+    /// Latest status, published for the tray menu.
+    pub status: StatusHandle,
+}
+
+impl Controls {
+    /// Whether sync is currently paused.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+}
 
 /// How many sequence numbers to reserve at a time.
 ///
@@ -133,8 +158,9 @@ pub fn on_client_event(
         }
         ClientEvent::ClipSkipped { got, limit } => {
             status.skipped = status.skipped.saturating_add(1);
-            // Never silent. A copy that vanished with no explanation is the single most common
-            // complaint against every tool in this category.
+            // Never silent, and never merely logged. A copy that vanished with no explanation is
+            // the single most common complaint against every tool in this category, and a log
+            // line is invisible to someone running this from a tray.
             eprintln!(
                 "{}",
                 log_line(
@@ -142,9 +168,50 @@ pub fn on_client_event(
                     &format!("{got} bytes exceeds the relay limit of {limit} bytes"),
                 )
             );
+            notify::clip_too_large(*got, *limit);
             false
         }
         _ => false,
+    }
+}
+
+/// One log line per protocol event worth knowing about. Sizes and counts only, never content.
+///
+/// The daemon previously logged four lines for an entire session, which made a stall impossible to
+/// diagnose after the fact.
+fn log_event(event: &ClientEvent) {
+    match event {
+        ClientEvent::Authenticated { peers, .. } => {
+            eprintln!(
+                "{}",
+                log_line("authenticated", &format!("{peers} connected in this room"))
+            );
+        }
+        ClientEvent::Clip(clip) => {
+            eprintln!(
+                "{}",
+                log_line(
+                    "clip_received",
+                    &format!(
+                        "{} bytes{}",
+                        clip.text.len(),
+                        if clip.retained { ", retained" } else { "" }
+                    )
+                )
+            );
+        }
+        ClientEvent::Presence { peers } => {
+            eprintln!("{}", log_line("presence", &format!("{peers} connected")));
+        }
+        _ => {}
+    }
+}
+
+/// Size of the clip an event carries, for the notification body. Never the content itself.
+fn clip_len(event: &ClientEvent) -> usize {
+    match event {
+        ClientEvent::Clip(clip) => clip.text.len(),
+        _ => 0,
     }
 }
 
@@ -205,23 +272,54 @@ pub async fn run(
     identity: Identity,
     io: Arc<dyn ClipboardIo>,
     observed: Receiver<Observed>,
+    controls: Controls,
 ) -> Result<()> {
     let device_id = config.device_id_bytes()?;
     let seq = reserve_sequence(paths)?;
-    let mut session = Session::new(identity, device_id, seq);
-    let mut backoff = Backoff::new();
-    let mut status = Status {
-        state: "Connecting".to_owned(),
-        ..Status::default()
-    };
+    let session = Session::new(identity, device_id, seq);
 
     // The watcher thread is blocking, so it gets its own bridge into the async side.
     let (local_tx, mut local_rx) = mpsc::channel::<String>(16);
-    let cap = config.max_content_bytes;
+    let notifications = config.notifications;
+    spawn_clipboard_bridge(
+        observed,
+        local_tx,
+        config.max_content_bytes,
+        Arc::clone(&controls.paused),
+    )?;
+
+    run_connection_loop(
+        paths,
+        config,
+        session,
+        controls,
+        io,
+        &mut local_rx,
+        notifications,
+    )
+    .await
+}
+
+/// Bridges the blocking watcher thread into the async side, dropping what must not be sent.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::Io`] if the thread could not be spawned.
+fn spawn_clipboard_bridge(
+    observed: Receiver<Observed>,
+    local_tx: mpsc::Sender<String>,
+    cap: usize,
+    paused: Arc<AtomicBool>,
+) -> Result<()> {
     std::thread::Builder::new()
         .name("asli-clip-bridge".to_owned())
         .spawn(move || {
             while let Ok(event) = observed.recv() {
+                // Pause stops copies leaving this machine at the earliest point they can be
+                // stopped, before they are sealed rather than after.
+                if paused.load(Ordering::Relaxed) {
+                    continue;
+                }
                 match event {
                     Observed::Text(text) => {
                         if text.len() > cap {
@@ -235,11 +333,14 @@ pub async fn run(
                                     ),
                                 )
                             );
+                            notify::clip_too_large(text.len(), cap);
                             continue;
                         }
+                        let bytes = text.len();
                         if local_tx.blocking_send(text).is_err() {
                             return;
                         }
+                        eprintln!("{}", log_line("clip_sent", &format!("{bytes} bytes")));
                     }
                     Observed::Sensitive => {
                         eprintln!(
@@ -249,20 +350,80 @@ pub async fn run(
                                 "the source marked it as a password"
                             )
                         );
+                        // Always notified. Being told once is how a person learns this is
+                        // deliberate rather than a bug.
+                        notify::clip_sensitive();
                     }
                 }
             }
         })
         .map_err(crate::Error::Io)?;
 
+    Ok(())
+}
+
+/// Connects, pumps, and reconnects forever.
+///
+/// Split from [`run`] so each half stays readable: this one owns the retry policy, the other owns
+/// setup.
+async fn run_connection_loop(
+    paths: &Paths,
+    config: &Config,
+    mut session: Session,
+    controls: Controls,
+    io: Arc<dyn ClipboardIo>,
+    local_rx: &mut mpsc::Receiver<String>,
+    notifications: bool,
+) -> Result<()> {
+    let mut backoff = Backoff::new();
+    let mut status = Status {
+        state: "Connecting".to_owned(),
+        ..Status::default()
+    };
+    // Shared rather than a local, because the event sink is a closure the borrow checker will not
+    // let write to a local this loop also reads.
+    let connected_once = Arc::new(AtomicBool::new(false));
+
     loop {
         let url = config.relay_url.clone();
         "Connecting".clone_into(&mut status.state);
-        eprintln!("{}", log_line("connecting", &url));
+        eprintln!(
+            "{}",
+            log_line(
+                if connected_once.load(Ordering::Relaxed) {
+                    "reconnecting"
+                } else {
+                    "connecting"
+                },
+                &url
+            )
+        );
 
-        let outcome = client::run_once(&url, &mut session, &mut local_rx, &mut |event| {
+        controls.status.set(status.clone());
+
+        let outcome = client::run_once(&url, &mut session, local_rx, &mut |event| {
             let now = client::now_ms();
-            on_client_event(&event, io.as_ref(), &mut status, now);
+
+            // Pausing must also stop arriving clips from overwriting the local clipboard.
+            // Dropping them here rather than disconnecting keeps resume instant.
+            if controls.is_paused() {
+                if let ClientEvent::Clip(_) = event {
+                    return;
+                }
+            }
+
+            log_event(&event);
+            if matches!(event, ClientEvent::Authenticated { .. }) {
+                // Recorded here, at the moment the handshake succeeds, so the next attempt after a
+                // drop is logged as a reconnection rather than a first connection.
+                connected_once.store(true, Ordering::Relaxed);
+            }
+
+            let wrote = on_client_event(&event, io.as_ref(), &mut status, now);
+            if wrote {
+                notify::clip_received(notifications, clip_len(&event));
+            }
+            controls.status.set(status.clone());
         })
         .await;
 
@@ -300,8 +461,18 @@ pub async fn run(
             }
         }
 
+        controls.status.set(status.clone());
+
         let delay = backoff.next_delay()?;
-        eprintln!("{}", log_line("retrying", &format!("in {delay} ms")));
+        // The reason and the delay together, because "it worked for a week then stopped" is the
+        // defining complaint in this category and a log that omits why is no help at all.
+        eprintln!(
+            "{}",
+            log_line(
+                "disconnected",
+                &format!("{}, retrying in {delay} ms", status.state)
+            )
+        );
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
     }
 }

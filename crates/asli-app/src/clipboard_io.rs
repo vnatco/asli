@@ -112,7 +112,7 @@ impl ClipboardIo for LinuxClipboard {
 ///
 /// Returns [`crate::Error::Clipboard`] if no backend can be started, which happens on GNOME
 /// Wayland without `XWayland` and on river, where no protocol exposes the clipboard at all.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
     use asli_clipboard::session::{self, Env};
 
@@ -173,7 +173,7 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
 }
 
 /// The writer thread: take ownership of the selection, then serve it until new content arrives.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<String>) {
     let interrupt = clipboard.shutdown_flag();
 
@@ -206,6 +206,46 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<String>) {
 enum AnyClipboard {
     Wayland(Box<asli_clipboard::linux_wayland::WaylandClipboard>),
     X11(Box<asli_clipboard::linux_x11::X11Clipboard>),
+}
+
+/// The same idea on Windows, where there is exactly one mechanism.
+#[cfg(target_os = "windows")]
+enum AnyClipboard {
+    Windows(Box<asli_clipboard::windows::WindowsClipboard>),
+}
+
+#[cfg(target_os = "windows")]
+impl AnyClipboard {
+    fn set_text(&mut self, text: &str) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Windows(clipboard) => clipboard.set_text(text).map(|_| ()),
+        }
+    }
+
+    fn run(&mut self, sink: &mut dyn FnMut(ClipEvent)) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Windows(clipboard) => clipboard.run(sink),
+        }
+    }
+
+    fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        match self {
+            Self::Windows(clipboard) => clipboard.shutdown_handle(),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn connect(backend: asli_clipboard::session::Backend) -> asli_clipboard::Result<AnyClipboard> {
+    use asli_clipboard::session::Backend;
+
+    match backend {
+        Backend::Windows => asli_clipboard::windows::WindowsClipboard::connect()
+            .map(|clipboard| AnyClipboard::Windows(Box::new(clipboard))),
+        other => Err(asli_clipboard::Error::NoBackend(format!(
+            "this build has no connector for the {other:?} backend on this platform"
+        ))),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -252,6 +292,12 @@ fn connect(backend: asli_clipboard::session::Backend) -> asli_clipboard::Result<
         }
         Backend::X11 => asli_clipboard::linux_x11::X11Clipboard::connect()
             .map(|clipboard| AnyClipboard::X11(Box::new(clipboard))),
+        // Backend is non exhaustive and gains a variant per platform. Anything this build has no
+        // connector for is named rather than quietly treated as X11, which would fail later and
+        // further from the cause.
+        other => Err(asli_clipboard::Error::NoBackend(format!(
+            "this build has no connector for the {other:?} backend on this platform"
+        ))),
     }
 }
 

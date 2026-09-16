@@ -19,6 +19,19 @@ use crate::error::{Error, Result};
 
 /// Keychain service name.
 const SERVICE: &str = "asli";
+
+/// The keychain service name, optionally suffixed.
+///
+/// `ASLI_CONFIG_DIR` isolates the configuration but not the account, because the keychain is
+/// global to the user. Without a matching override, two instances on one machine fight over the
+/// same entry, which blocks the multi instance testing that finds loop bugs and blocks anyone who
+/// wants a second account. The default is unchanged, so existing installs keep their key.
+fn service_name() -> String {
+    match std::env::var("ASLI_KEYRING_SUFFIX") {
+        Ok(suffix) if !suffix.is_empty() => format!("{SERVICE}-{suffix}"),
+        _ => SERVICE.to_owned(),
+    }
+}
 /// Keychain entry name within the service.
 const ACCOUNT: &str = "account";
 
@@ -59,7 +72,7 @@ impl Store {
 pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
     let encoded = Zeroizing::new(asli_crypto::base32::encode(secret));
 
-    if let Ok(entry) = keyring::Entry::new(SERVICE, ACCOUNT) {
+    if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
         if entry.set_password(&encoded).is_ok() {
             // A previous run may have left a file fallback behind. Two copies of the key is one
             // copy too many.
@@ -78,7 +91,7 @@ pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
 ///
 /// Returns [`Error::Parse`] if a stored value exists but is not a valid key.
 pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
-    if let Ok(entry) = keyring::Entry::new(SERVICE, ACCOUNT) {
+    if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
         if let Ok(encoded) = entry.get_password() {
             let secret = decode(&encoded)?;
             return Ok(Some((secret, Store::Keychain)));
@@ -104,7 +117,7 @@ pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
 ///
 /// Returns [`Error::Io`] if the fallback file exists and cannot be removed.
 pub fn wipe(paths: &Paths) -> Result<()> {
-    if let Ok(entry) = keyring::Entry::new(SERVICE, ACCOUNT) {
+    if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
         let _ = entry.delete_credential();
     }
     let path = paths.secret_file();
@@ -119,7 +132,7 @@ pub fn wipe(paths: &Paths) -> Result<()> {
 /// A keychain that answers "no such entry" has still answered, which is what we are asking.
 #[must_use]
 pub fn available_store() -> Store {
-    let keychain_answers = keyring::Entry::new(SERVICE, ACCOUNT)
+    let keychain_answers = keyring::Entry::new(&service_name(), ACCOUNT)
         .is_ok_and(|entry| matches!(entry.get_password(), Ok(_) | Err(keyring::Error::NoEntry)));
 
     if keychain_answers {

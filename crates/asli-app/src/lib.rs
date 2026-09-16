@@ -17,15 +17,20 @@
 //!
 //! Linux only so far, which is where the hard clipboard problems are. Adding macOS and Windows
 //! means adding a backend behind [`clipboard_io::ClipboardIo`], not restructuring anything here.
-//! The tray is not wired yet: the command line is the interface for now.
+//!
+//! The tray, autostart and notifications are wired. Autostart on Windows and macOS returns a
+//! clear error rather than reporting a success that will not survive a reboot.
 
 #![forbid(unsafe_code)]
 
+pub mod autostart;
 pub mod clipboard_io;
 pub mod config;
 pub mod daemon;
 pub mod error;
+pub mod notify;
 pub mod qr;
 pub mod secrets;
+pub mod tray;
 
 pub use error::{Error, Result};
