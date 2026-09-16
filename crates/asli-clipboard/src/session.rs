@@ -42,6 +42,8 @@ pub enum Backend {
     X11,
     /// `AddClipboardFormatListener` on a message only window.
     Windows,
+    /// Polling `NSPasteboard.changeCount`, because macOS has no change notification.
+    MacOs,
 }
 
 /// The environment this decision is made from.
@@ -131,14 +133,27 @@ pub fn plan(env: &Env) -> crate::Result<Plan> {
     #[cfg(target_os = "windows")]
     {
         let _ = env;
-        return Ok(Plan {
+        Ok(Plan {
             backend: Backend::Windows,
             degraded: false,
             note: "using AddClipboardFormatListener on a message only window",
-        });
+        })
     }
 
-    #[cfg(not(target_os = "windows"))]
+    // macOS has one pasteboard and no display server to detect, so the target decides this the
+    // same way it does on Windows. Without this branch a Mac would look headless, since neither
+    // WAYLAND_DISPLAY nor DISPLAY is set there.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = env;
+        Ok(Plan {
+            backend: Backend::MacOs,
+            degraded: false,
+            note: "polling the pasteboard change counter, which is the only mechanism macOS offers",
+        })
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     match env.kind() {
         SessionKind::Wayland => {
             if env.is_gnome() {

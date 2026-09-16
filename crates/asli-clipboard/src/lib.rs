@@ -19,9 +19,10 @@
 //!
 //! # Status
 //!
-//! Linux and Windows are implemented. The Linux backends are verified on real hardware; the
-//! Windows one is compile checked only, because it is written on Linux. macOS is not written yet,
-//! and carries open questions about the pasteboard permission alert that need real hardware.
+//! All three platforms are implemented. The Linux backends are verified on real hardware. The
+//! Windows and macOS ones are compile checked only, because both were written on Linux, and the
+//! macOS one additionally carries open questions about the pasteboard permission alert that only
+//! real hardware can settle.
 
 #![forbid(unsafe_code)]
 
@@ -32,6 +33,8 @@ pub mod session;
 pub mod linux_wayland;
 #[cfg(target_os = "linux")]
 pub mod linux_x11;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

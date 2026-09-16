@@ -32,4 +32,22 @@ rustix = { version = "1", features = ["event"] }
 # The monitor feature is the message only window plus AddClipboardFormatListener.
 clipboard-win = { version = "5.4", features = ["monitor", "std"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSPasteboard has no change notification, so this backend is a poller, and objc2 is the only
+# maintained way to talk to AppKit from Rust. Features are opt in per class in objc2-app-kit, so
+# only the handful this backend touches are enabled.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSArray",
+    "NSDate",
+    "NSProcessInfo",
+    "NSObjCRuntime",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSPasteboard",
+] }
+
 [dev-dependencies]
