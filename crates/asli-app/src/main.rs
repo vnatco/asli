@@ -57,6 +57,12 @@ enum Command {
     Show,
 }
 
+/// How long the join token stays on the clipboard before it clears itself.
+///
+/// Long enough to paste into another machine's prompt, short enough that it is not still sitting
+/// there an hour later.
+const TOKEN_CLEAR_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+
 fn main() {
     if let Err(err) = dispatch() {
         eprintln!("error: {err}");
@@ -127,7 +133,9 @@ fn present_token(secret: &[u8; 32]) -> Result<()> {
     println!();
     println!("Scan this on your other devices, or paste the token with 'asli join <token>'.");
     println!("Anyone who has it has your clipboard. Do not send it over chat or email.");
-    println!("Copying it puts it on the clipboard this app synchronises, so prefer the QR.");
+    println!("Scanning the QR is safest. Copying it from the tray marks it so clipboard");
+    println!("history and cloud sync skip it, and clears it after 90 seconds, but any");
+    println!("software that ignores those markers can still read it.");
     Ok(())
 }
 
@@ -405,6 +413,17 @@ fn handle_command(
             Ok(Some((secret, _))) => {
                 if let Err(err) = present_token(&secret) {
                     eprintln!("{}", log_line("show_token_failed", &err.to_string()));
+                }
+                // Copying the key is a deliberate action, so it is marked: out of clipboard
+                // history, out of cloud sync, ignored by other clipboard managers. It clears
+                // itself shortly afterwards, but only if it is still the thing on the clipboard.
+                let token = asli_crypto::token::encode(&secret);
+                match io.write_text_concealed(token.as_str(), TOKEN_CLEAR_AFTER) {
+                    Ok(()) => eprintln!(
+                        "{}",
+                        log_line("token_copied", "marked as concealed, clears in 90 seconds")
+                    ),
+                    Err(err) => eprintln!("{}", log_line("token_copy_failed", &err.to_string())),
                 }
             }
             Ok(None) => eprintln!(

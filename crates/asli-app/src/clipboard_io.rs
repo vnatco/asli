@@ -14,10 +14,11 @@
 //! The write side only runs its event loop while it owns the selection, so an idle device does no
 //! clipboard work at all on that connection.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use asli_clipboard::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions};
 
@@ -58,6 +59,22 @@ pub trait ClipboardIo: Send + Sync {
         )))
     }
 
+    /// Writes text marked so clipboard history, cloud sync and third party managers leave it
+    /// alone, then clears it after `clear_after` if it is still on the clipboard.
+    ///
+    /// Defaulted to a refusal. A caller that believes it wrote a protected secret and did not is
+    /// worse off than one told plainly that the platform cannot express it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the platform cannot mark content, or the write failed.
+    fn write_text_concealed(&self, text: &str, clear_after: Duration) -> Result<()> {
+        let _ = (text, clear_after);
+        Err(crate::Error::Clipboard(asli_clipboard::Error::NoBackend(
+            "this clipboard cannot mark content as concealed".to_owned(),
+        )))
+    }
+
     /// A short description for the status output.
     fn describe(&self) -> String;
 }
@@ -67,6 +84,7 @@ pub trait ClipboardIo: Send + Sync {
 pub struct StubClipboard {
     writes: Mutex<Vec<String>>,
     images: Mutex<Vec<Vec<u8>>>,
+    concealed: Mutex<Vec<String>>,
 }
 
 impl StubClipboard {
@@ -89,6 +107,16 @@ impl StubClipboard {
     pub fn images(&self) -> Vec<Vec<u8>> {
         self.images.lock().expect("stub clipboard lock").clone()
     }
+
+    /// Everything written with the concealment markers, oldest first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous test thread poisoned the lock.
+    #[must_use]
+    pub fn concealed(&self) -> Vec<String> {
+        self.concealed.lock().expect("stub clipboard lock").clone()
+    }
 }
 
 impl ClipboardIo for StubClipboard {
@@ -105,6 +133,14 @@ impl ClipboardIo for StubClipboard {
             .lock()
             .expect("stub clipboard lock")
             .push(png.to_vec());
+        Ok(())
+    }
+
+    fn write_text_concealed(&self, text: &str, _clear_after: Duration) -> Result<()> {
+        self.concealed
+            .lock()
+            .expect("stub clipboard lock")
+            .push(text.to_owned());
         Ok(())
     }
 
@@ -134,6 +170,14 @@ pub enum Observed {
 enum Write {
     Text(String),
     Image(Vec<u8>),
+    /// Text carrying the markers that keep it out of clipboard history, cloud sync and third
+    /// party managers. Used for the join token, which is the account key in full.
+    TextConcealed(String),
+    /// Clear the clipboard, but only if nothing has been copied since the given generation.
+    ///
+    /// The condition is the point: clearing unconditionally would destroy whatever the person
+    /// copied in the meantime.
+    ClearIfUnchanged(String, u64),
 }
 
 /// Handle to the writer thread.
@@ -141,6 +185,11 @@ pub struct LinuxClipboard {
     to_writer: Sender<Write>,
     interrupt: Arc<AtomicBool>,
     description: String,
+    /// Bumped by every clipboard change, ours or anyone else's.
+    ///
+    /// A scheduled clear carries the generation it was scheduled at, so anything copied since
+    /// makes it stale and it is dropped rather than destroying that copy.
+    generation: Arc<AtomicU64>,
 }
 
 impl LinuxClipboard {
@@ -149,6 +198,10 @@ impl LinuxClipboard {
     /// Queue first, then interrupt, so the writer always finds work waiting when its loop returns.
     /// The reverse order races: the loop could return, find nothing, and block again.
     fn queue(&self, work: Write) {
+        // A clear must not bump the generation, or it would invalidate itself in flight.
+        if !matches!(work, Write::ClearIfUnchanged(..)) {
+            self.generation.fetch_add(1, Ordering::Relaxed);
+        }
         let _ = self.to_writer.send(work);
         self.interrupt.store(true, Ordering::Relaxed);
     }
@@ -162,6 +215,27 @@ impl ClipboardIo for LinuxClipboard {
 
     fn write_image(&self, png: &[u8]) -> Result<()> {
         self.queue(Write::Image(png.to_vec()));
+        Ok(())
+    }
+
+    fn write_text_concealed(&self, text: &str, clear_after: Duration) -> Result<()> {
+        self.queue(Write::TextConcealed(text.to_owned()));
+
+        // A detached timer rather than a blocking wait: the caller is a tray menu handler and must
+        // return immediately.
+        let sender = self.to_writer.clone();
+        let interrupt = Arc::clone(&self.interrupt);
+        let owned = text.to_owned();
+        // Captured after the queue above bumped it, so this is the generation of our own write.
+        let scheduled_for = self.generation.load(Ordering::Relaxed);
+        thread::Builder::new()
+            .name("asli-token-clear".to_owned())
+            .spawn(move || {
+                thread::sleep(clear_after);
+                let _ = sender.send(Write::ClearIfUnchanged(owned, scheduled_for));
+                interrupt.store(true, Ordering::Relaxed);
+            })
+            .map_err(crate::Error::Io)?;
         Ok(())
     }
 
@@ -188,6 +262,11 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
     let (tx, rx) = mpsc::channel();
     let watcher_backend = plan.backend;
 
+    // Shared by the watcher and the writer. An external copy has to bump this too, or a pending
+    // clear would still fire and wipe out what the person just copied.
+    let generation = Arc::new(AtomicU64::new(0));
+    let watcher_generation = Arc::clone(&generation);
+
     thread::Builder::new()
         .name("asli-clipboard-watch".to_owned())
         .spawn(move || {
@@ -210,6 +289,8 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
                         _ => return,
                     }
                 };
+                // Someone copied, so any clear scheduled before now is stale.
+                watcher_generation.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(observed);
             });
             if let Err(err) = result {
@@ -224,9 +305,10 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
     let interrupt = writer.shutdown_flag();
     let (to_writer, from_daemon) = mpsc::channel::<Write>();
 
+    let writer_generation = Arc::clone(&generation);
     thread::Builder::new()
         .name("asli-clipboard-write".to_owned())
-        .spawn(move || writer_loop(writer, &from_daemon))
+        .spawn(move || writer_loop(writer, &from_daemon, &writer_generation))
         .map_err(crate::Error::Io)?;
 
     Ok((
@@ -234,6 +316,7 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
             to_writer,
             interrupt,
             description: format!("{:?} ({})", plan.backend, plan.note),
+            generation,
         },
         rx,
     ))
@@ -241,7 +324,7 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
 
 /// The writer thread: take ownership of the selection, then serve it until new content arrives.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>) {
+fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation: &Arc<AtomicU64>) {
     let interrupt = clipboard.shutdown_flag();
 
     while let Ok(work) = inbox.recv() {
@@ -253,10 +336,24 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>) {
             latest = newer;
         }
 
+        let generation = generation.load(Ordering::Relaxed);
         let outcome = match &latest {
             Write::Text(text) => clipboard.set_text(text),
             Write::Image(png) => clipboard.set_image(png),
+            Write::TextConcealed(text) => clipboard.set_text_concealed(text),
+            Write::ClearIfUnchanged(_, scheduled_for) => {
+                // Only clear if nothing has been copied since. The generation counter is the
+                // signal: every write bumps it, and the watcher bumps it when an external copy
+                // takes the selection away from us. A stale clear is dropped, because wrongly
+                // clearing someone's clipboard is far worse than a token lingering a while.
+                if *scheduled_for == generation {
+                    clipboard.set_text("")
+                } else {
+                    Ok(())
+                }
+            }
         };
+
         if let Err(err) = outcome {
             eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
             continue;
@@ -291,6 +388,15 @@ impl AnyClipboard {
     fn set_text(&mut self, text: &str) -> asli_clipboard::Result<()> {
         match self {
             Self::Windows(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
+        }
+    }
+
+    /// Writes text with the three Windows exclusion formats set.
+    fn set_text_concealed(&mut self, text: &str) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Windows(clipboard) => clipboard
+                .set_text(text, WriteOptions::concealed())
+                .map(|_| ()),
         }
     }
 
@@ -340,6 +446,18 @@ impl AnyClipboard {
         match self {
             Self::Wayland(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
             Self::X11(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
+        }
+    }
+
+    /// Writes text with the concealment markers the platform offers.
+    fn set_text_concealed(&mut self, text: &str) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Wayland(clipboard) => clipboard
+                .set_text(text, WriteOptions::concealed())
+                .map(|_| ()),
+            Self::X11(clipboard) => clipboard
+                .set_text(text, WriteOptions::concealed())
+                .map(|_| ()),
         }
     }
 
@@ -449,5 +567,44 @@ mod tests {
             "a newline would break line based logs"
         );
         assert!(line.contains("\\\""));
+    }
+}
+
+#[cfg(test)]
+mod conceal_tests {
+    use super::*;
+
+    #[test]
+    fn a_concealed_write_is_recorded_as_concealed_not_plain() {
+        let stub = StubClipboard::default();
+        stub.write_text_concealed("asli1_TOKEN", Duration::from_secs(90))
+            .expect("stub accepts concealed writes");
+
+        assert_eq!(stub.concealed(), vec!["asli1_TOKEN".to_owned()]);
+        assert!(
+            stub.writes().is_empty(),
+            "a concealed write must not fall back to a plain one, which is how a key ends up in \
+             clipboard history"
+        );
+    }
+
+    #[test]
+    fn the_default_refuses_rather_than_writing_unmarked() {
+        struct TextOnly;
+        impl ClipboardIo for TextOnly {
+            fn write_text(&self, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            fn describe(&self) -> String {
+                "text only".to_owned()
+            }
+        }
+
+        // The default must fail closed. Writing the key unmarked while reporting success is worse
+        // than reporting that the platform cannot do it.
+        let err = TextOnly
+            .write_text_concealed("asli1_TOKEN", Duration::from_secs(90))
+            .expect_err("the default implementation must refuse");
+        assert!(err.to_string().contains("concealed"));
     }
 }
