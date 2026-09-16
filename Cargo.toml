@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/asli-app", "crates/asli-clipboard", "crates/asli-core", "crates/asli-crypto", "crates/asli-net"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/asli-sync/asli"
+rust-version = "1.82"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

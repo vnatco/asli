@@ -1,0 +1,28 @@
+[package]
+name = "asli-clipboard"
+description = "Clipboard monitoring and writing for Asli, with one backend per platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+asli-core = { path = "../asli-core", version = "0.1.0" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14", features = ["xfixes"] }
+wayland-client = "0.31"
+# Both data control protocols are required, not one. KDE removed wlr-data-control in Plasma 6.4,
+# and older wlroots compositors predate ext-data-control, so supporting either alone breaks half
+# of the target desktops.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# Used only to poll the Wayland connection with a timeout, so that a shutdown
+# request is noticed without blocking forever waiting for a clipboard event.
+rustix = { version = "1", features = ["event"] }
+
+[dev-dependencies]

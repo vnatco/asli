@@ -1,0 +1,57 @@
+# The public relay runs this file unmodified. Self hosting is meant to be the same thing, not a
+# lesser variant, so if you change something here that the public relay needs, change it upstream
+# rather than keeping a private fork.
+
+services:
+  relay:
+    build: .
+    image: asli-relay:latest
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      LOG_LEVEL: info
+      # Caddy terminates TLS and is the only thing that should be trusted to set X-Forwarded-For.
+      # Without this the relay correctly ignores the header, and every connection then looks like
+      # it comes from the proxy, which turns per IP limits into global limits.
+      TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+    expose:
+      - '8080'
+    # Nothing is ever written to disk. That is a deliberate property: there is nothing to seize
+    # beyond what is in memory at that moment.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

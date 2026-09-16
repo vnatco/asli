@@ -1,0 +1,19 @@
+# Replace relay.example.com with your own hostname. Caddy obtains and renews the certificate on
+# its own, which is most of why it is here.
+relay.example.com {
+	# reverse_proxy handles the WebSocket upgrade with no extra configuration.
+	reverse_proxy relay:8080
+
+	# Keep this consistent with TRUSTED_PROXY_CIDRS in docker-compose.yml. If the two disagree,
+	# per IP rate limiting silently degrades into global rate limiting.
+	trusted_proxies static 172.16.0.0/12
+
+	# Compression is deliberately absent. The payload is ciphertext, which does not compress, so
+	# encoding it would spend CPU on both ends for nothing.
+
+	log {
+		# Request logs would record client addresses. The relay itself logs only aggregate
+		# counters and a salted room identifier, so leaving this at error keeps the two consistent.
+		level ERROR
+	}
+}

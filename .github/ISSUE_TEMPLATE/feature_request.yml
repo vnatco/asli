@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something Asli should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Asli is deliberately small. Clipboard history, file sync and mobile clients are out of
+        scope for version 1, and some of them permanently. See the architecture notes before
+        filing, so you know whether this is a "not yet" or a "no".
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting
+      description: Describe the situation, not the solution. What are you trying to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Asli to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead
+      description: Workarounds, other tools, or nothing.
+    validations:
+      required: false

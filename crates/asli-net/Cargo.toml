@@ -1,0 +1,36 @@
+[package]
+name = "asli-net"
+description = "Client transport for Asli: the wire envelope, the connection state machine and the protocol driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+asli-core = { path = "../asli-core", version = "0.1.0" }
+asli-crypto = { path = "../asli-crypto", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Standard base64 with padding, decoded strictly. The protocol specifies exactly one encoding for
+# binary fields, and data-encoding rejects non canonical padding by default, which is the behaviour
+# the spec requires.
+data-encoding = "2"
+# The driver in session.rs is sans I/O, so async appears only in client.rs.
+# "sync" is what provides the mpsc channel the client uses to receive local clipboard events.
+tokio = { version = "1", features = ["rt", "time", "macros", "net", "sync"] }
+# Native roots rather than a pinned Mozilla bundle, so a corporate MITM proxy with a locally
+# installed CA still works instead of failing with an opaque certificate error.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots", "connect"] }
+# rustls 0.23 refuses to pick a crypto backend for you: with none selected it panics at the first
+# handshake rather than failing to compile, which is exactly the failure a FakeTransport test
+# suite cannot see. ring is chosen over the aws-lc-rs default because aws-lc-rs needs cmake and a
+# C compiler, and this crate has to build from one setup script on Windows, macOS and Linux.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

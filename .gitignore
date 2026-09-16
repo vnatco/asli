@@ -1,0 +1,48 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Node (server only)
+node_modules/
+server/dist/
+npm-debug.log*
+
+# Build output and bundles
+/dist/
+*.AppImage
+*.deb
+*.rpm
+*.dmg
+*.msi
+*.exe.bak
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Deployment workspace. Holds server coordinates and a reference to the SSH key,
+# so it never belongs in a public repository.
+deploy/
+
+
+# The owner's brief and any working notes. Never published.
+IDEA.md
+HANDOFF.md
+
+# Internal working material. Useful locally, not the product.
+docs/research/
+docs/PLAN.md
+docs/NAMING.md

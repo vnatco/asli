@@ -1,0 +1,14 @@
+[package]
+name = "asli-core"
+description = "Normalization, loop prevention and replay defence for Asli, independent of any operating system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }

@@ -1,0 +1,795 @@
+//! The Wayland backend, built on the data control protocols.
+//!
+//! On Wayland an ordinary client cannot read the clipboard without keyboard focus, which is why
+//! clipboard managers use a privileged protocol instead. There are two, and both are required:
+//!
+//! - `ext-data-control-v1`, the standardized successor, in wayland-protocols since 1.39. KDE
+//!   Plasma 6.4 speaks only this one, having removed the older protocol entirely.
+//! - `wlr-data-control-unstable-v1`, the original wlroots protocol, now carrying a deprecation
+//!   notice in its own XML. Older wlroots compositors, including older Sway and Hyprland builds,
+//!   speak only this one.
+//!
+//! Supporting either alone breaks roughly half of the target desktops, so [`WaylandClipboard`]
+//! binds the ext protocol when the compositor offers it, falls back to the wlr protocol when it
+//! does not, and only reports [`Error::NoProtocol`] when neither exists.
+//!
+//! GNOME implements neither, as a deliberate and repeatedly restated policy, so it is handled by
+//! the X11 backend through `XWayland` instead. See [`crate::session`].
+//!
+//! # Why this is event driven
+//!
+//! The compositor sends a `selection` event whenever the clipboard changes, so there is no
+//! polling of clipboard content at all. The poll in the run loop is a wait on the Wayland socket
+//! with a timeout, purely so that a shutdown request is noticed promptly. This is the difference
+//! between this backend and the 500 ms full clipboard re-read that `clipboard-rs` performs.
+//!
+//! # How the two protocols share one implementation
+//!
+//! The wayland-rs proxies are distinct concrete types per protocol, so the manager, device,
+//! source and offer are each wrapped in a small enum that forwards the three or four calls we
+//! actually make. Everything that carries real logic (the baseline suppression, the sensitive
+//! marker check, the pipe read, normalization, and the run loop) exists once and is shared.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use wayland_client::globals::{registry_queue_init, GlobalList, GlobalListContents};
+use wayland_client::protocol::{wl_registry, wl_seat};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_protocols::ext::data_control::v1::client::{
+    ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
+    ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
+    ext_data_control_source_v1::{self, ExtDataControlSourceV1},
+};
+use wayland_protocols_wlr::data_control::v1::client::{
+    zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
+    zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
+    zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
+    zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
+};
+
+use crate::error::{Error, Result};
+use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
+
+/// The marker a password manager sets on Linux. `KeePassXC` writes it, Klipper honours it, and it
+/// travels through the data control path like any other MIME type, so we can see it in the offer
+/// before reading a single byte of content.
+const SENSITIVE_MIME: &str = "x-kde-passwordManagerHint";
+
+/// MIME types we accept for text, most specific first.
+const TEXT_MIMES: [&str; 4] = [
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "STRING",
+];
+
+/// How long to wait on the Wayland socket before checking the shutdown flag again.
+const POLL_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long to wait for the source client to write the selection into our pipe.
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Largest selection we will read, as a guard against a hostile or broken source.
+const MAX_READ_BYTES: usize = 8 * 1024 * 1024;
+
+/// Which protocol the compositor gave us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// `ext-data-control-v1`, the standardized protocol, preferred where it exists.
+    Ext,
+    /// `wlr-data-control-unstable-v1`, the deprecated wlroots protocol, used when the compositor
+    /// is too old to offer the standardized one.
+    Wlr,
+}
+
+impl Protocol {
+    /// A label for diagnostics and the tray.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ext => "ext-data-control-v1",
+            Self::Wlr => "wlr-data-control-unstable-v1",
+        }
+    }
+}
+
+/// A data control manager from either protocol.
+enum AnyManager {
+    /// The standardized protocol.
+    Ext(ExtDataControlManagerV1),
+    /// The deprecated wlroots protocol.
+    Wlr(ZwlrDataControlManagerV1),
+}
+
+impl AnyManager {
+    fn get_data_device(&self, seat: &wl_seat::WlSeat, qh: &QueueHandle<State>) -> AnyDevice {
+        match self {
+            Self::Ext(manager) => AnyDevice::Ext(manager.get_data_device(seat, qh, ())),
+            Self::Wlr(manager) => AnyDevice::Wlr(manager.get_data_device(seat, qh, ())),
+        }
+    }
+
+    fn create_data_source(&self, qh: &QueueHandle<State>) -> AnySource {
+        match self {
+            Self::Ext(manager) => AnySource::Ext(manager.create_data_source(qh, ())),
+            Self::Wlr(manager) => AnySource::Wlr(manager.create_data_source(qh, ())),
+        }
+    }
+}
+
+/// A data control device from either protocol.
+enum AnyDevice {
+    /// The standardized protocol.
+    Ext(ExtDataControlDeviceV1),
+    /// The deprecated wlroots protocol.
+    Wlr(ZwlrDataControlDeviceV1),
+}
+
+impl AnyDevice {
+    /// Announces a source as the clipboard contents, or clears the clipboard with `None`.
+    ///
+    /// A device and a source always come from the same manager, so the protocols never mix. If
+    /// they somehow did, clearing is the safe outcome rather than a panic in a background thread.
+    fn set_selection(&self, source: Option<&AnySource>) {
+        match self {
+            Self::Ext(device) => device.set_selection(source.and_then(AnySource::as_ext)),
+            Self::Wlr(device) => device.set_selection(source.and_then(AnySource::as_wlr)),
+        }
+    }
+}
+
+/// A data source from either protocol.
+enum AnySource {
+    /// The standardized protocol.
+    Ext(ExtDataControlSourceV1),
+    /// The deprecated wlroots protocol.
+    Wlr(ZwlrDataControlSourceV1),
+}
+
+impl AnySource {
+    fn offer(&self, mime_type: String) {
+        match self {
+            Self::Ext(source) => source.offer(mime_type),
+            Self::Wlr(source) => source.offer(mime_type),
+        }
+    }
+
+    fn as_ext(&self) -> Option<&ExtDataControlSourceV1> {
+        match self {
+            Self::Ext(source) => Some(source),
+            Self::Wlr(_) => None,
+        }
+    }
+
+    fn as_wlr(&self) -> Option<&ZwlrDataControlSourceV1> {
+        match self {
+            Self::Wlr(source) => Some(source),
+            Self::Ext(_) => None,
+        }
+    }
+}
+
+/// A data offer from either protocol.
+enum AnyOffer {
+    /// The standardized protocol.
+    Ext(ExtDataControlOfferV1),
+    /// The deprecated wlroots protocol.
+    Wlr(ZwlrDataControlOfferV1),
+}
+
+impl AnyOffer {
+    /// The Wayland object id, which is unique across every object on the connection and so is
+    /// safe to use as the key for both protocols at once.
+    fn protocol_id(&self) -> u32 {
+        match self {
+            Self::Ext(offer) => offer.id().protocol_id(),
+            Self::Wlr(offer) => offer.id().protocol_id(),
+        }
+    }
+
+    fn receive(&self, mime_type: String, fd: BorrowedFd<'_>) {
+        match self {
+            Self::Ext(offer) => offer.receive(mime_type, fd),
+            Self::Wlr(offer) => offer.receive(mime_type, fd),
+        }
+    }
+
+    fn destroy(&self) {
+        match self {
+            Self::Ext(offer) => offer.destroy(),
+            Self::Wlr(offer) => offer.destroy(),
+        }
+    }
+}
+
+/// What the compositor last told us about the selection.
+///
+/// Three states, and they are genuinely different: no news since we last looked, the clipboard
+/// was emptied, or there is a new offer waiting to be read.
+enum Pending {
+    /// Nothing new since the last pass.
+    Nothing,
+    /// The clipboard was cleared. There is nothing to sync and nothing to report.
+    Cleared,
+    /// A new selection is available.
+    Offer(AnyOffer),
+}
+
+/// State driven by the Wayland event queue.
+struct State {
+    /// MIME types offered, keyed by the offer that announced them.
+    offers: HashMap<u32, Vec<String>>,
+    /// The selection the compositor most recently announced.
+    pending: Pending,
+    /// Content we are currently offering to other clients.
+    serving: Option<Arc<String>>,
+    /// Set when the compositor tells us the device is finished, which is fatal for this
+    /// connection.
+    finished: bool,
+}
+
+impl State {
+    fn mimes_for(&self, offer: &AnyOffer) -> &[String] {
+        self.offers
+            .get(&offer.protocol_id())
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// A Wayland clipboard connection.
+pub struct WaylandClipboard {
+    /// Whether the first selection has been seen.
+    ///
+    /// The compositor announces the current selection as soon as the device is bound, so the
+    /// first event describes whatever was already on the clipboard before we started. Treating
+    /// that as a change would rebroadcast stale content on every launch and every reconnect,
+    /// which is both surprising and a good way to overwrite something a person just copied on
+    /// another machine. So the first selection sets the baseline and is not reported.
+    seen_initial_selection: bool,
+    conn: Connection,
+    queue: EventQueue<State>,
+    state: State,
+    device: AnyDevice,
+    manager: AnyManager,
+    protocol: Protocol,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl WaylandClipboard {
+    /// Connects to the compositor and binds a data control device.
+    ///
+    /// The standardized `ext-data-control-v1` protocol is preferred, with the deprecated
+    /// `wlr-data-control-unstable-v1` as the fallback for older wlroots compositors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Connect`] if there is no Wayland display, and [`Error::NoProtocol`] if the
+    /// compositor advertises neither data control protocol, which is the case on GNOME (by
+    /// policy) and on river (not implemented). The caller is expected to fall back to the X11
+    /// backend when that happens and an X display exists.
+    pub fn connect() -> Result<Self> {
+        let conn = Connection::connect_to_env()
+            .map_err(|e| Error::Connect(format!("could not reach the Wayland display: {e}")))?;
+
+        let (globals, queue): (GlobalList, EventQueue<State>) = registry_queue_init(&conn)
+            .map_err(|e| Error::Connect(format!("could not read the Wayland registry: {e}")))?;
+        let qh = queue.handle();
+
+        let seat: wl_seat::WlSeat = globals
+            .bind(&qh, 1..=9, ())
+            .map_err(|e| Error::Connect(format!("the compositor offered no usable seat: {e}")))?;
+
+        // Version 2 of the wlr protocol adds primary selection events, which we ignore, so
+        // accepting either version costs nothing and works with more compositors.
+        let (manager, protocol) =
+            if let Ok(ext) = globals.bind::<ExtDataControlManagerV1, _, _>(&qh, 1..=1, ()) {
+                (AnyManager::Ext(ext), Protocol::Ext)
+            } else if let Ok(wlr) = globals.bind::<ZwlrDataControlManagerV1, _, _>(&qh, 1..=2, ()) {
+                (AnyManager::Wlr(wlr), Protocol::Wlr)
+            } else {
+                return Err(Error::NoProtocol(
+                    "this compositor advertises neither ext-data-control-v1 nor \
+                 wlr-data-control-unstable-v1. GNOME declines to implement clipboard manager \
+                 protocols as a matter of policy, and river implements none, so there is no way \
+                 to watch the clipboard natively here"
+                        .to_owned(),
+                ));
+            };
+
+        let device = manager.get_data_device(&seat, &qh);
+        conn.flush()
+            .map_err(|e| Error::Connect(format!("could not flush: {e}")))?;
+
+        Ok(Self {
+            seen_initial_selection: false,
+            conn,
+            queue,
+            state: State {
+                offers: HashMap::new(),
+                pending: Pending::Nothing,
+                serving: None,
+                finished: false,
+            },
+            device,
+            manager,
+            protocol,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Which protocol this connection is using.
+    #[must_use]
+    pub const fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    /// A handle that can ask the watch loop to stop from another thread.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
+    /// Offers `text` to other clients as the clipboard contents.
+    ///
+    /// Wayland has no clipboard storage either: we announce a data source, and the compositor
+    /// asks us to write the bytes into a pipe whenever something pastes. That means this
+    /// connection must keep running for the content to stay available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Write`] if the compositor connection cannot be flushed.
+    pub fn set_text(&mut self, text: &str) -> Result<WriteReceipt> {
+        let qh = self.queue.handle();
+        let source = self.manager.create_data_source(&qh);
+        for mime in TEXT_MIMES {
+            source.offer(mime.to_owned());
+        }
+        self.state.serving = Some(Arc::new(text.to_owned()));
+        self.device.set_selection(Some(&source));
+        self.conn
+            .flush()
+            .map_err(|e| Error::Write(format!("could not flush: {e}")))?;
+
+        // Wayland offers no clipboard sequence number, so loop prevention here rests on the
+        // content hash guard in asli-core rather than on a platform counter.
+        Ok(WriteReceipt { seq: None })
+    }
+
+    /// Reads an offer as text, after checking it is not marked sensitive.
+    fn read_offer(&self, offer: &AnyOffer) -> Result<Option<ClipEvent>> {
+        let mimes = self.state.mimes_for(offer);
+
+        if mimes.iter().any(|m| m == SENSITIVE_MIME) {
+            return Ok(Some(ClipEvent {
+                content: ClipContent::Text(String::new()),
+                sensitive: true,
+            }));
+        }
+
+        let Some(mime) = TEXT_MIMES
+            .iter()
+            .find(|candidate| mimes.iter().any(|m| m == *candidate))
+        else {
+            // No text on the clipboard: an image or a file list, which v1 does not sync.
+            return Ok(None);
+        };
+
+        let (mut read_end, write_end) = UnixStream::pair()
+            .map_err(|e| Error::Read(format!("could not create a transfer pipe: {e}")))?;
+
+        offer.receive((*mime).to_owned(), write_end.as_fd());
+        self.conn
+            .flush()
+            .map_err(|e| Error::Read(format!("could not flush: {e}")))?;
+
+        // Our copy of the write end must go, or the read below never sees end of file.
+        drop(write_end);
+
+        read_end
+            .set_read_timeout(Some(RECEIVE_TIMEOUT))
+            .map_err(|e| Error::Read(format!("could not set a read timeout: {e}")))?;
+
+        let mut buf = Vec::new();
+        // UnixStream implements both Read and Write, so by_ref must be disambiguated.
+        Read::by_ref(&mut read_end)
+            .take(u64::try_from(MAX_READ_BYTES).unwrap_or(u64::MAX))
+            .read_to_end(&mut buf)
+            .map_err(|e| Error::Read(format!("the source did not send the selection: {e}")))?;
+
+        let raw = String::from_utf8(buf).map_err(|_| Error::NotUtf8)?;
+
+        // Normalize at exactly one boundary, here, so that the same text copied on Linux, macOS
+        // and Windows produces identical bytes and therefore an identical hash. Skipping this is
+        // how clipboard tools end up in a loop that grows the text on every hop.
+        let text = asli_core::normalize(&raw).into_owned();
+        if !asli_core::is_syncable(&text) {
+            // Empty or whitespace only, which is nearly always an intermediate state while an
+            // application sets several formats rather than something a person copied.
+            return Ok(None);
+        }
+
+        Ok(Some(ClipEvent {
+            content: ClipContent::Text(text),
+            sensitive: false,
+        }))
+    }
+
+    /// Waits for Wayland activity, with a timeout so shutdown stays responsive.
+    fn wait_for_activity(&mut self) -> Result<()> {
+        self.conn
+            .flush()
+            .map_err(|e| Error::ConnectionLost(format!("could not flush: {e}")))?;
+
+        let Some(guard) = self.conn.prepare_read() else {
+            // Events are already queued, so dispatch them without waiting.
+            return Ok(());
+        };
+
+        // The backend must outlive the borrowed file descriptor taken from it.
+        let backend = self.conn.backend();
+        let fd = backend.poll_fd();
+        let mut fds = [PollFd::from_borrowed_fd(fd.as_fd(), PollFlags::IN)];
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: POLL_TIMEOUT.subsec_nanos().into(),
+        };
+
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(0) => {
+                // Nothing arrived before the timeout. Cancel the read so the guard does not hold
+                // the queue, and let the caller check the shutdown flag.
+                drop(guard);
+                Ok(())
+            }
+            Ok(_) => {
+                guard
+                    .read()
+                    .map_err(|e| Error::ConnectionLost(format!("{e}")))?;
+                Ok(())
+            }
+            Err(rustix::io::Errno::INTR) => {
+                drop(guard);
+                Ok(())
+            }
+            Err(e) => Err(Error::ConnectionLost(format!("poll failed: {e}"))),
+        }
+    }
+}
+
+impl ClipboardWatcher for WaylandClipboard {
+    fn run(&mut self, sink: &mut dyn FnMut(ClipEvent)) -> Result<()> {
+        loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            self.wait_for_activity()?;
+
+            self.queue
+                .dispatch_pending(&mut self.state)
+                .map_err(|e| Error::ConnectionLost(format!("{e}")))?;
+
+            if self.state.finished {
+                return Err(Error::ConnectionLost(
+                    "the compositor closed the data control device".to_owned(),
+                ));
+            }
+
+            // Selection handling happens out here rather than inside the dispatch callback,
+            // because reading an offer needs the connection and blocks on a pipe.
+            match std::mem::replace(&mut self.state.pending, Pending::Nothing) {
+                Pending::Offer(offer) if !self.seen_initial_selection => {
+                    // The clipboard as it was before we started. Baseline only, never reported.
+                    self.seen_initial_selection = true;
+                    self.state.offers.remove(&offer.protocol_id());
+                    offer.destroy();
+                }
+                Pending::Offer(offer) => {
+                    match self.read_offer(&offer) {
+                        Ok(Some(event)) => sink(event),
+                        // Either there is no text on the clipboard, or the read failed because
+                        // the source exited between announcing the selection and our request.
+                        // Both are routine and neither should stop the watcher.
+                        Ok(None) | Err(Error::Read(_) | Error::NotUtf8) => {}
+                        Err(other) => return Err(other),
+                    }
+                    self.state.offers.remove(&offer.protocol_id());
+                    offer.destroy();
+                }
+                Pending::Cleared => {
+                    // The clipboard was emptied. There is nothing to sync, but it still counts as
+                    // the baseline having been established.
+                    self.seen_initial_selection = true;
+                }
+                Pending::Nothing => {}
+            }
+        }
+    }
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_seat::WlSeat,
+        _: wl_seat::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ExtDataControlManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ExtDataControlManagerV1,
+        _: <ExtDataControlManagerV1 as Proxy>::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ExtDataControlDeviceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtDataControlDeviceV1,
+        event: ext_data_control_device_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_data_control_device_v1::Event::DataOffer { id } => {
+                // The MIME types arrive as separate events on the offer itself.
+                state.offers.insert(id.id().protocol_id(), Vec::new());
+            }
+            ext_data_control_device_v1::Event::Selection { id } => {
+                state.pending = match id {
+                    Some(offer) => Pending::Offer(AnyOffer::Ext(offer)),
+                    None => Pending::Cleared,
+                };
+            }
+            ext_data_control_device_v1::Event::Finished => {
+                state.finished = true;
+            }
+            // Primary selection is the middle click selection. Syncing it would fire on every
+            // text selection, so it is deliberately ignored.
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(State, ExtDataControlDeviceV1, [
+        ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<ExtDataControlOfferV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        offer: &ExtDataControlOfferV1,
+        event: ext_data_control_offer_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
+            state
+                .offers
+                .entry(offer.id().protocol_id())
+                .or_default()
+                .push(mime_type);
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlSourceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        source: &ExtDataControlSourceV1,
+        event: ext_data_control_source_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_data_control_source_v1::Event::Send { mime_type: _, fd } => {
+                // Something is pasting. Write the content we are serving into the pipe the
+                // compositor handed us, then close it so the reader sees end of file.
+                if let Some(text) = state.serving.clone() {
+                    write_all_to(fd, text.as_bytes());
+                }
+            }
+            ext_data_control_source_v1::Event::Cancelled => {
+                // Another client took the clipboard, so we stop serving and release the source.
+                state.serving = None;
+                source.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrDataControlManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrDataControlManagerV1,
+        _: <ZwlrDataControlManagerV1 as Proxy>::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwlrDataControlDeviceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrDataControlDeviceV1,
+        event: zwlr_data_control_device_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_data_control_device_v1::Event::DataOffer { id } => {
+                state.offers.insert(id.id().protocol_id(), Vec::new());
+            }
+            zwlr_data_control_device_v1::Event::Selection { id } => {
+                state.pending = match id {
+                    Some(offer) => Pending::Offer(AnyOffer::Wlr(offer)),
+                    None => Pending::Cleared,
+                };
+            }
+            zwlr_data_control_device_v1::Event::Finished => {
+                state.finished = true;
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(State, ZwlrDataControlDeviceV1, [
+        zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ZwlrDataControlOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwlrDataControlOfferV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        offer: &ZwlrDataControlOfferV1,
+        event: zwlr_data_control_offer_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
+            state
+                .offers
+                .entry(offer.id().protocol_id())
+                .or_default()
+                .push(mime_type);
+        }
+    }
+}
+
+impl Dispatch<ZwlrDataControlSourceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        source: &ZwlrDataControlSourceV1,
+        event: zwlr_data_control_source_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_data_control_source_v1::Event::Send { mime_type: _, fd } => {
+                if let Some(text) = state.serving.clone() {
+                    write_all_to(fd, text.as_bytes());
+                }
+            }
+            zwlr_data_control_source_v1::Event::Cancelled => {
+                state.serving = None;
+                source.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Writes a payload into a pipe the compositor supplied, ignoring a broken pipe.
+///
+/// A client that asks for the selection and then exits before reading is normal, and it must not
+/// take the watcher down with it.
+fn write_all_to(fd: OwnedFd, bytes: &[u8]) {
+    let mut file = std::fs::File::from(fd);
+    let _ = file.write_all(bytes);
+    let _ = file.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wayland_available() -> bool {
+        std::env::var("WAYLAND_DISPLAY").is_ok_and(|d| !d.is_empty())
+    }
+
+    #[test]
+    fn connects_when_a_compositor_offers_data_control() {
+        if !wayland_available() {
+            eprintln!("skipping: no WAYLAND_DISPLAY");
+            return;
+        }
+        match WaylandClipboard::connect() {
+            Ok(clipboard) => {
+                // Either protocol is a success. Which one depends on the compositor, and both are
+                // supported precisely because no single one covers the target desktops.
+                let protocol = clipboard.protocol();
+                assert!(matches!(protocol, Protocol::Ext | Protocol::Wlr));
+                eprintln!("bound {}", protocol.label());
+            }
+            // GNOME and river legitimately have no protocol. That is a supported outcome here,
+            // and the session layer routes those to the X11 backend instead.
+            Err(Error::NoProtocol(message)) => {
+                eprintln!("no data control protocol on this compositor: {message}");
+            }
+            Err(other) => panic!("unexpected failure: {other}"),
+        }
+    }
+
+    #[test]
+    fn shutdown_handle_stops_the_loop() {
+        if !wayland_available() {
+            eprintln!("skipping: no WAYLAND_DISPLAY");
+            return;
+        }
+        let Ok(mut clipboard) = WaylandClipboard::connect() else {
+            eprintln!("skipping: no data control protocol");
+            return;
+        };
+        clipboard.shutdown_handle().store(true, Ordering::Relaxed);
+        let mut seen = 0;
+        clipboard
+            .run(&mut |_| seen += 1)
+            .expect("returns cleanly when asked to stop");
+        assert_eq!(seen, 0);
+    }
+
+    #[test]
+    fn text_mime_preference_is_most_specific_first() {
+        assert_eq!(TEXT_MIMES[0], "text/plain;charset=utf-8");
+        assert!(TEXT_MIMES.contains(&"text/plain"));
+    }
+
+    #[test]
+    fn each_protocol_has_a_distinct_label() {
+        assert_eq!(Protocol::Ext.label(), "ext-data-control-v1");
+        assert_eq!(Protocol::Wlr.label(), "wlr-data-control-unstable-v1");
+        assert_ne!(Protocol::Ext.label(), Protocol::Wlr.label());
+    }
+}

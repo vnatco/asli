@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/asli-sync/asli/security/advisories/new
+    about: >
+      Report privately, never as a public issue. See SECURITY.md for what is in scope and what to
+      expect.
+  - name: Question or idea
+    url: https://github.com/asli-sync/asli/discussions
+    about: >
+      Ask here rather than opening an issue. Placeholder link: enable Discussions on the repository
+      before publishing, or remove this entry.
