@@ -88,10 +88,12 @@ component NavItem inherits Rectangle {
 export component AppWindow inherits Window {
     title: "Asli";
     background: Palette.bg;
-    min-width: 560px;
-    min-height: 480px;
-    preferred-width: 620px;
-    preferred-height: 560px;
+    min-width: 720px;
+    min-height: 460px;
+    // Landscape. A list of clipboard entries is read across, not down: a portrait window made
+    // every row short and left the screen half empty under a single card.
+    preferred-width: 980px;
+    preferred-height: 620px;
 
     // Which screen is showing, and whether this device has an account at all. With no account
     // there is nothing to navigate between, so the rail is hidden and first run takes the window.
@@ -262,7 +264,7 @@ export component AppWindow inherits Window {
             if root.screen == Screen.FirstRun: first-run := VerticalLayout {
                 padding: 28px;
                 spacing: Metrics.gap;
-                alignment: center;
+                alignment: start;
 
                 Heading { text: "One clipboard, every machine."; }
                 Body {
@@ -377,14 +379,14 @@ export component AppWindow inherits Window {
                 Rectangle { vertical-stretch: 1; }
             }
 
-            if root.screen == Screen.Token: VerticalLayout {
+            // Two columns, because the window is wider than it is tall. Stacked down the middle
+            // the symbol pushed its own explanation off the bottom of the screen.
+            if root.screen == Screen.Token: HorizontalLayout {
                 padding: 28px;
-                spacing: Metrics.gap;
+                spacing: 24px;
+                alignment: start;
 
-                Heading { text: "Scan this on your other device"; }
-
-                HorizontalLayout {
-                    alignment: center;
+                VerticalLayout {
                     // A white plate under the symbol, because a QR inverted by a dark theme is
                     // unreadable to roughly every camera.
                     Rectangle {
@@ -401,40 +403,48 @@ export component AppWindow inherits Window {
                             image-rendering: pixelated;
                         }
                     }
+                    Rectangle { vertical-stretch: 1; }
                 }
 
-                Card {
-                    VerticalLayout {
-                        padding: 14px;
-                        Text {
-                            text: root.token;
-                            color: Palette.text;
-                            font-size: 12px;
-                            font-family: "monospace";
-                            wrap: char-wrap;
-                            horizontal-alignment: center;
+                VerticalLayout {
+                    spacing: Metrics.gap;
+                    horizontal-stretch: 1;
+
+                    Heading { text: "Scan this on your other device"; }
+
+                    Card {
+                        vertical-stretch: 0;
+                        VerticalLayout {
+                            padding: 14px;
+                            Text {
+                                text: root.token;
+                                color: Palette.text;
+                                font-size: 12px;
+                                font-family: "monospace";
+                                wrap: char-wrap;
+                            }
                         }
                     }
-                }
 
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 8px;
-                    Button {
-                        text: "Copy join string";
-                        primary: true;
-                        clicked => { root.copy-token(); }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Button {
+                            text: "Copy join string";
+                            primary: true;
+                            clicked => { root.copy-token(); }
+                        }
                     }
-                }
 
-                Body {
-                    text: "Anyone who has this has your clipboard. Do not send it over chat or "
-                        + "email. Scanning the QR is safest. Copying it marks it so clipboard "
-                        + "history and cloud sync skip it, and clears it after 90 seconds, but "
-                        + "software that ignores those markers can still read it.";
-                }
+                    Body {
+                        text: "Anyone who has this has your clipboard. Do not send it over chat or "
+                            + "email. Scanning the QR is safest. Copying it marks it so clipboard "
+                            + "history and cloud sync skip it, and clears it after 90 seconds, but "
+                            + "software that ignores those markers can still read it.";
+                    }
 
-                Rectangle { vertical-stretch: 1; }
+                    Rectangle { vertical-stretch: 1; }
+                }
             }
 
             if root.screen == Screen.History: VerticalLayout {
@@ -456,7 +466,11 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // Pinned to its own height. A card left to stretch shares out the leftover space
+                // and drifts into the middle of the screen, taking its own contents apart as it
+                // goes, which is what happened to the empty state here.
                 if !root.history-enabled: Card {
+                    vertical-stretch: 0;
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 8px;
@@ -473,6 +487,7 @@ export component AppWindow inherits Window {
                 }
 
                 if root.history-enabled && root.history.length == 0: Card {
+                    vertical-stretch: 0;
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 6px;
@@ -537,9 +552,11 @@ export component AppWindow inherits Window {
                                 }
 
                                 // Revealed on hover, so the list stays quiet until pointed at.
+                                // No width of its own: the component measures its own label, and
+                                // pinning a number here is what squeezed the text against the edges.
                                 Button {
                                     text: "Forget";
-                                    min-width: 74px;
+                                    h-pad: 12px;
                                     height: 30px;
                                     y: (parent.height - self.height) / 2;
                                     visible: entry-touch.has-hover;
@@ -556,6 +573,11 @@ export component AppWindow inherits Window {
                 }
 
                 if root.history-note != "": Body { text: root.history-note; }
+
+                // Takes the leftover height so nothing else has to. Only when the list is empty:
+                // with rows present the Flickable already absorbs it, and two stretching children
+                // would split the space and shrink the list for no reason.
+                if root.history.length == 0: Rectangle { vertical-stretch: 1; }
             }
 
             if root.screen == Screen.Settings: Flickable {
@@ -719,10 +741,14 @@ export component AppWindow inherits Window {
 
                         Rectangle { height: 1px; background: Palette.line; }
 
+                        // Each column packs to the top. Left to fill the row's height instead, a
+                        // label and its own value drifted a hundred pixels apart and stopped
+                        // reading as a pair.
                         HorizontalLayout {
                             spacing: Metrics.gap;
                             VerticalLayout {
                                 spacing: 3px;
+                                alignment: start;
                                 horizontal-stretch: 1;
                                 Body { text: "Connected"; }
                                 Text {
@@ -736,6 +762,7 @@ export component AppWindow inherits Window {
                             }
                             VerticalLayout {
                                 spacing: 3px;
+                                alignment: start;
                                 horizontal-stretch: 1;
                                 Body { text: "Last sync"; }
                                 Text {
@@ -747,6 +774,7 @@ export component AppWindow inherits Window {
                             }
                             VerticalLayout {
                                 spacing: 3px;
+                                alignment: start;
                                 horizontal-stretch: 1;
                                 Body { text: "Skipped"; }
                                 Text {
@@ -797,21 +825,29 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         Heading { text: "This device"; secondary: true; }
 
+                        // The label column has a fixed width and the value starts immediately
+                        // after it. Pushing the value to the right edge instead put a whole
+                        // screen of empty between a label and the thing it names once the
+                        // window went landscape.
                         HorizontalLayout {
-                            Body { text: "Relay"; horizontal-stretch: 1; }
-                            Body { text: root.relay-host; strong: true; }
+                            spacing: Metrics.gap;
+                            Body { text: "Relay"; width: 110px; }
+                            Body { text: root.relay-host; strong: true; horizontal-stretch: 1; }
                         }
                         HorizontalLayout {
-                            Body { text: "Room"; horizontal-stretch: 1; }
-                            Body { text: root.room-id; strong: true; }
+                            spacing: Metrics.gap;
+                            Body { text: "Room"; width: 110px; }
+                            Body { text: root.room-id; strong: true; horizontal-stretch: 1; }
                         }
                         HorizontalLayout {
-                            Body { text: "Device"; horizontal-stretch: 1; }
-                            Body { text: root.device-id; strong: true; }
+                            spacing: Metrics.gap;
+                            Body { text: "Device"; width: 110px; }
+                            Body { text: root.device-id; strong: true; horizontal-stretch: 1; }
                         }
                         HorizontalLayout {
-                            Body { text: "Clipboard"; horizontal-stretch: 1; }
-                            Body { text: root.clipboard-backend; strong: true; }
+                            spacing: Metrics.gap;
+                            Body { text: "Clipboard"; width: 110px; }
+                            Body { text: root.clipboard-backend; strong: true; horizontal-stretch: 1; }
                         }
 
                         HorizontalLayout {
