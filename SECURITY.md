@@ -10,7 +10,7 @@ features.
 |---|---|
 | Unreleased (`main`) | Yes |
 
-There is no release yet. The project is at M0 (plan and skeleton). This table is
+There is no tagged release yet, so `main` is the only thing to report against. This table is
 updated when the first version is tagged, and the policy from that point is that only the latest
 minor release receives security fixes.
 

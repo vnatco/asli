@@ -54,10 +54,11 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-## 4. The setup scripts (not yet)
+## 4. The setup scripts
 
-Planned: one command per operating system, identical flags, identical output, idempotent, and loud
-about anything missing with the exact command that fixes it.
+One command per operating system, identical flags, identical output, idempotent, and loud about
+anything missing with the exact command that fixes it. `./setup.sh` on macOS and Linux,
+`.\setup.ps1` on Windows.
 
 ```
 ./setup.sh          # macOS and Linux
@@ -77,9 +78,9 @@ Rules the scripts follow: never install a package manager, never invoke `sudo` w
 exactly what is about to run and why, never leave a half finished state, and detect the distribution
 rather than guessing.
 
-## 5. Building the client manually (not yet)
+## 5. Building the client manually
 
-Once `asli-app` exists:
+The binary is `asli`, from `crates/asli-app`:
 
 ```
 cargo build --release -p asli-app
@@ -100,9 +101,9 @@ and Linux artifacts are built on Ubuntu 22.04 for the glibc baseline, never on `
 | `cargo test -p asli-crypto` | Key derivation, room binding, join token parsing failures, AEAD tamper detection, padding buckets | Works today |
 | `python3 scripts/interop-libsodium.py` | Verifies our ciphertext with libsodium, so the "libsodium compatible" claim is proven rather than assumed. Needs PyNaCl | **Not yet** |
 | `testdata/vectors.json` | The frozen known answer vectors, shared by the Rust tests and the interop script. Any change to a label, a length prefix or a field order breaks these loudly, which is the point | **Not yet** |
-| Integration test | Starts the relay and two headless clients, asserts a round trip and asserts the sender does not receive its own message | **Not yet** |
+| Integration test | Starts the relay and two headless clients, asserts a round trip and asserts the sender does not receive its own message | Yes |
 
-## 7. Running the relay locally (not yet)
+## 7. Running the relay locally
 
 With Docker, which is how the public relay runs and how self hosters are expected to run it:
 

@@ -3,9 +3,10 @@
 Everything awkward about clipboards, per operating system, written for someone whose clipboard is
 not syncing. If you are reading this because something is broken, start at section 7.
 
-> **Status.** The client is **not yet implemented**. This document records the mechanism each
-> platform will use and the limits that are already known. It
-> is written so that nothing here has to be discovered twice.
+> **Status.** Linux is implemented and verified on real hardware, for text and for images, over
+> both X11 and Wayland. The Windows and macOS backends are written and cross compile, but no Win32
+> or AppKit call in either has ever executed, so treat those sections as the mechanism they will
+> use rather than as observed behaviour.
 
 ## 1. Support matrix
 
