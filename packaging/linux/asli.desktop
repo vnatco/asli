@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Asli
+GenericName=Clipboard Sync
+Comment=Keep the clipboard in sync across your own machines, end to end encrypted
+Exec=asli run
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;sync;copy;paste;
+# Tray applications have no window to restore, so nothing should try to give them one.
+StartupNotify=false
+# Copied into ~/.config/autostart by the installer, which is the autostart path that works on every
+# desktop environment. The systemd user unit beside this file is the alternative for people who
+# prefer their session services in systemd.
+X-GNOME-Autostart-enabled=true

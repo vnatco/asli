@@ -1,0 +1,32 @@
+# Maintainer: vnatco <contact@vnat.co>
+#
+# Publish this as asli-bin. Rename it to PKGBUILD in the asli-bin AUR repository.
+
+pkgname=asli-bin
+_pkgname=asli
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="One clipboard, every machine. Zero knowledge clipboard sync over an encrypted relay (binary release)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vnatco/asli"
+license=('MIT')
+# Same single runtime requirement as the source package: a D-Bus session, nothing else.
+depends=('dbus')
+provides=('asli')
+conflicts=('asli')
+
+source_x86_64=("$_pkgname-$pkgver-x86_64-linux.tar.gz::$url/releases/download/v$pkgver/$_pkgname-$pkgver-x86_64-linux.tar.gz")
+source_aarch64=("$_pkgname-$pkgver-aarch64-linux.tar.gz::$url/releases/download/v$pkgver/$_pkgname-$pkgver-aarch64-linux.tar.gz")
+# Replace both with the real sums from the release's SHA256SUMS before publishing.
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  local stage="$_pkgname-$pkgver-${CARCH}-linux"
+  cd "$stage"
+  install -Dm755 asli "$pkgdir/usr/bin/asli"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+  install -Dm644 asli.desktop "$pkgdir/usr/share/applications/asli.desktop"
+  install -Dm644 asli.service "$pkgdir/usr/lib/systemd/user/asli.service"
+}

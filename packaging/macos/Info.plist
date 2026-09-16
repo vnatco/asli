@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Asli</string>
+	<key>CFBundleDisplayName</key>
+	<string>Asli</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.asli</string>
+	<key>CFBundleExecutable</key>
+	<string>asli</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<!-- A menu bar application: no Dock icon, no entry in the application switcher, no main
+	     window. Without this the app appears in the Dock, which is the single most upvoted
+	     complaint on at least one comparable tool. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT licensed</string>
+</dict>
+</plist>

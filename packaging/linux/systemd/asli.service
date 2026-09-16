@@ -1,0 +1,29 @@
+# A user unit, never a system one: the clipboard belongs to a login session, and this needs the
+# session D-Bus socket and the display server connection that only the user's own session has.
+#
+#   systemctl --user enable --now asli.service
+#
+# The desktop entry beside this file is the primary autostart path, because it works on every
+# desktop environment without assuming systemd. This unit exists for people who would rather manage
+# session services in one place, and the two should not both be enabled at once.
+
+[Unit]
+Description=Asli clipboard sync
+Documentation=https://github.com/vnatco/asli
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/asli run
+# on-failure rather than always: a clean exit means the user quit from the tray, and restarting
+# then would make quitting impossible.
+Restart=on-failure
+RestartSec=3
+# The relay connection reconnects on its own with backoff, so repeated crashes are a real fault
+# rather than a transient network problem, and should not be retried forever.
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Install]
+WantedBy=graphical-session.target

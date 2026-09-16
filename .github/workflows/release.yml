@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, for a manual rerun"
+        required: true
+
+# Not cancel-in-progress: cancelling half way through a release leaves a partial set of assets
+# attached to a published release, which is worse than two runs finishing in sequence.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on 22.04 rather than ubuntu-latest so the glibc baseline is old enough for the
+          # distributions people actually run. Artifacts built against a newer glibc refuse to
+          # start on anything older, with an error that tells the user nothing useful.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release -p asli-app
+
+      - name: Tarball
+        run: |
+          set -euo pipefail
+          stage="asli-${{ steps.v.outputs.version }}-${{ matrix.arch }}-linux"
+          mkdir -p "dist/${stage}"
+          cp target/release/asli "dist/${stage}/"
+          cp README.md LICENSE "dist/${stage}/"
+          cp packaging/linux/asli.desktop "dist/${stage}/"
+          cp packaging/linux/systemd/asli.service "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          rm -rf "dist/${stage}"
+
+      - name: Debian package
+        # --no-build reuses the binary from the step above rather than compiling a second time with
+        # different flags. cargo-deb derives its metadata from the crate manifest, so the package
+        # id is asli-app while the binary it installs is asli.
+        run: cargo deb -p asli-app --no-build --output dist/
+
+      - name: RPM package
+        # The metadata lives in packaging/ rather than in the crate manifest, so that packaging
+        # concerns stay out of the code tree.
+        run: cargo generate-rpm -p crates/asli-app --metadata-overwrite packaging/linux/rpm-metadata.toml --output dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release -p asli-app
+
+      - name: Portable zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="asli-${{ steps.v.outputs.version }}-x86_64-windows"
+          mkdir -p "dist/${stage}"
+          cp target/release/asli.exe "dist/${stage}/"
+          cp README.md LICENSE "dist/${stage}/"
+          cp packaging/windows/README.md "dist/${stage}/SMARTSCREEN.md"
+          7z a -tzip "dist/${stage}.zip" "./dist/${stage}/*"
+          rm -rf "dist/${stage}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release -p asli-app --target ${{ matrix.target }}
+
+      # One binary per architecture rather than a universal one. A universal binary is the sum of
+      # both, and small download size is a stated goal of this project.
+      - name: Tarball
+        run: |
+          set -euo pipefail
+          stage="asli-${{ steps.v.outputs.version }}-${{ matrix.arch }}-macos"
+          mkdir -p "dist/${stage}"
+          cp "target/${{ matrix.target }}/release/asli" "dist/${stage}/"
+          cp README.md LICENSE "dist/${stage}/"
+          cp packaging/macos/README.md "dist/${stage}/GATEKEEPER.md"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          rm -rf "dist/${stage}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+
+      - name: Collect and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staging -type f -exec cp {} dist/ \;
+          cd dist
+          sha256sum * > SHA256SUMS
+          echo "Artifacts:"
+          ls -lh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            Verify a download before running it:
+
+                sha256sum -c SHA256SUMS --ignore-missing
+
+            Windows and macOS builds are unsigned. See `packaging/README.md` for what that means
+            and how to get past the warnings.

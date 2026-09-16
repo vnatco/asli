@@ -1,0 +1,38 @@
+# RPM metadata for cargo-generate-rpm, passed with --metadata-overwrite.
+#
+# It lives here rather than in crates/asli-app/Cargo.toml so that packaging details stay out of the
+# code tree, where they would otherwise sit in the middle of the dependency list.
+
+[package.metadata.generate-rpm]
+name = "asli"
+summary = "One clipboard, every machine"
+# Only a D-Bus session is needed at runtime. There is no GTK, no appindicator and no webview, which
+# is the whole reason this package is small and the dependency list is one line.
+requires = { dbus = "*" }
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/asli"
+dest = "/usr/bin/asli"
+mode = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE"
+dest = "/usr/share/licenses/asli/LICENSE"
+mode = "644"
+doc = true
+
+[[package.metadata.generate-rpm.assets]]
+source = "README.md"
+dest = "/usr/share/doc/asli/README.md"
+mode = "644"
+doc = true
+
+[[package.metadata.generate-rpm.assets]]
+source = "packaging/linux/asli.desktop"
+dest = "/usr/share/applications/asli.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "packaging/linux/systemd/asli.service"
+dest = "/usr/lib/systemd/user/asli.service"
+mode = "644"

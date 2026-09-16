@@ -1,0 +1,49 @@
+# Maintainer: vnatco <contact@vnat.co>
+
+pkgname=asli
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="One clipboard, every machine. Zero knowledge clipboard sync over an encrypted relay"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vnatco/asli"
+license=('MIT')
+# The tray speaks StatusNotifierItem over D-Bus directly, so there is no GTK, no appindicator and no
+# webview to depend on. A running D-Bus session is the only runtime requirement, which is unusual
+# in this category and is the reason this package is as small as it is.
+depends=('dbus')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# Replace with real sums before publishing: run updpkgsums in this directory.
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # Vendor into the build directory so the build itself needs no network, which is what makes a
+  # clean chroot build reproducible.
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p asli-app
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  # The clipboard tests detect a missing display server and skip rather than fail, so this is safe
+  # in a headless chroot.
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/asli" "$pkgdir/usr/bin/asli"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 packaging/linux/asli.desktop "$pkgdir/usr/share/applications/asli.desktop"
+  install -Dm644 packaging/linux/systemd/asli.service "$pkgdir/usr/lib/systemd/user/asli.service"
+}
