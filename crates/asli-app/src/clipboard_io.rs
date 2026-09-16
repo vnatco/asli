@@ -337,6 +337,7 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation:
         }
 
         let generation = generation.load(Ordering::Relaxed);
+        let mut released = false;
         let outcome = match &latest {
             Write::Text(text) => clipboard.set_text(text),
             Write::Image(png) => clipboard.set_image(png),
@@ -347,7 +348,10 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation:
                 // takes the selection away from us. A stale clear is dropped, because wrongly
                 // clearing someone's clipboard is far worse than a token lingering a while.
                 if *scheduled_for == generation {
-                    clipboard.set_text("")
+                    // Release, never write an empty string. Writing empty keeps us owning the
+                    // selection, so the clipboard still advertises text while serving zero bytes.
+                    released = true;
+                    clipboard.release()
                 } else {
                     Ok(())
                 }
@@ -356,6 +360,13 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation:
 
         if let Err(err) = outcome {
             eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
+            continue;
+        }
+
+        // After a release there is nothing to serve, and re-entering the loop would keep us
+        // registered as the owner, which is the other half of why an emptied clipboard still
+        // advertised four text types.
+        if released {
             continue;
         }
 
@@ -462,6 +473,13 @@ impl AnyClipboard {
     }
 
     /// Writes a PNG, offering it as `image/png` for as long as this connection owns the selection.
+    fn release(&mut self) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Wayland(clipboard) => clipboard.release_selection(),
+            Self::X11(clipboard) => clipboard.release_selection(),
+        }
+    }
+
     fn set_image(&mut self, png: &[u8]) -> asli_clipboard::Result<()> {
         match self {
             Self::Wayland(clipboard) => clipboard.set_image(png, WriteOptions::plain()).map(|_| ()),

@@ -389,6 +389,20 @@ impl WaylandClipboard {
         Ok(WriteReceipt { seq: None })
     }
 
+    /// Gives up the selection, so the clipboard is genuinely empty rather than empty looking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Write`] if the compositor connection cannot be flushed.
+    pub fn release_selection(&mut self) -> Result<()> {
+        self.state.serving = None;
+        self.device.set_selection(None);
+        self.conn
+            .flush()
+            .map_err(|e| Error::Write(format!("could not flush: {e}")))?;
+        Ok(())
+    }
+
     /// Offers `png` to other clients as the clipboard contents.
     ///
     /// # Errors

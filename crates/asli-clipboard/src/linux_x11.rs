@@ -230,6 +230,23 @@ impl X11Clipboard {
         self.own_selection(Owned::Image(png.to_vec()))
     }
 
+    /// Gives up `CLIPBOARD`, so the clipboard is genuinely empty rather than empty looking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Write`] if the selection could not be released.
+    pub fn release_selection(&mut self) -> Result<()> {
+        self.owned = None;
+        self.concealed = false;
+        self.conn
+            .set_selection_owner(NONE, self.atoms.CLIPBOARD, CURRENT_TIME)
+            .map_err(|e| Error::Write(format!("could not release the selection: {e}")))?;
+        self.conn
+            .flush()
+            .map_err(|e| Error::Write(format!("could not flush: {e}")))?;
+        Ok(())
+    }
+
     fn own_selection(&mut self, content: Owned) -> Result<WriteReceipt> {
         self.owned = Some(content);
 

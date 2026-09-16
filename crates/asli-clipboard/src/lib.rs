@@ -176,6 +176,24 @@ pub trait ClipboardWriter: Send {
     /// cannot express it. A caller that believes it wrote a protected secret and did not is worse
     /// off than one told plainly that it failed.
     fn write_with(&self, content: &ClipContent, options: WriteOptions) -> Result<WriteReceipt>;
+
+    /// Gives up ownership of the clipboard entirely.
+    ///
+    /// This is not the same as writing an empty string. Writing empty keeps us owning the
+    /// selection, so the clipboard still advertises every type we offer while handing back zero
+    /// bytes, which reads to other applications as "there is text here, and it is nothing". A
+    /// release removes us as the owner, so the clipboard is genuinely empty, or falls back to
+    /// whatever the previous owner still serves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on platforms that cannot express this, rather than reporting a success
+    /// that did not happen.
+    fn release(&self) -> Result<()> {
+        Err(Error::Write(
+            "releasing the clipboard is not implemented on this platform".to_owned(),
+        ))
+    }
 }
 
 #[cfg(test)]
