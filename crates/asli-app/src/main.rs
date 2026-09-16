@@ -444,6 +444,10 @@ fn start_tray(
     std::thread::Builder::new()
         .name("asli-tray".to_owned())
         .spawn(move || {
+            // Short enough that a click feels immediate, long enough that an idle tray is not
+            // spinning. The labels are still refreshed once per interval, not once per tick.
+            const POLL: std::time::Duration = std::time::Duration::from_millis(80);
+
             let tray = match tray::Tray::new(Arc::clone(&controls.paused)) {
                 Ok(tray) => {
                     let _ = ready_tx.send(Ok(()));
@@ -455,17 +459,32 @@ fn start_tray(
                 }
             };
 
-            let events = muda::MenuEvent::receiver();
+            let menu_events = muda::MenuEvent::receiver();
+            // Clicking the icon arrives here, not on the menu channel. Nothing read this before,
+            // which is why a left click did nothing at all.
+            let icon_events = tray_icon::TrayIconEvent::receiver();
+
             loop {
                 let status = controls.status.get();
                 tray.refresh(&status, asli_net::client::now_ms());
 
-                // A timeout rather than a blocking receive, because the labels have to refresh
-                // even when nobody touches the menu.
-                if let Ok(event) = events.recv_timeout(tray::Tray::refresh_interval()) {
-                    if let Some(command) = tray.command_for(&event) {
-                        if handle_command(command, &paths, &config, &controls, io.as_ref()) {
-                            return;
+                // Both channels are drained on a short tick. Blocking on the menu channel for a
+                // whole interval, which is what this did before, would leave a click on the icon
+                // unread until somebody happened to open the menu.
+                let deadline = std::time::Instant::now() + tray::Tray::refresh_interval();
+                while std::time::Instant::now() < deadline {
+                    if let Ok(event) = menu_events.recv_timeout(POLL) {
+                        if let Some(command) = tray.command_for(&event) {
+                            if handle_command(command, &paths, &config, &controls, io.as_ref()) {
+                                return;
+                            }
+                        }
+                    }
+                    if let Ok(event) = icon_events.try_recv() {
+                        if let Some(command) = tray::Tray::command_for_icon(&event) {
+                            if handle_command(command, &paths, &config, &controls, io.as_ref()) {
+                                return;
+                            }
                         }
                     }
                 }
@@ -506,6 +525,9 @@ fn handle_command(
     }
 
     match command {
+        // The window decides which screen this lands on, because only it knows whether an account
+        // exists yet, and that changes while the process is running: first run creates one.
+        tray::Command::Open => asli_app::window::open_default(),
         tray::Command::Pause => {
             controls.paused.store(true, Ordering::Relaxed);
             eprintln!("{}", log_line("paused", "by the tray menu"));
