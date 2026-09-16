@@ -32,7 +32,7 @@ use clipboard_win::{raw, Clipboard, EnumFormats};
 
 use crate::error::{Error, Result};
 use crate::image_bytes;
-use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
+use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions, WriteReceipt};
 
 /// How long to coalesce a burst of clipboard changes before reading.
 ///
@@ -421,7 +421,7 @@ impl WindowsClipboard {
     /// # Errors
     ///
     /// Returns [`Error::Write`] if the clipboard cannot be opened or written.
-    pub fn set_text(&mut self, text: &str) -> Result<WriteReceipt> {
+    pub fn set_text(&mut self, text: &str, options: WriteOptions) -> Result<WriteReceipt> {
         let native = asli_core::to_platform(text, asli_core::LineEnding::Crlf);
 
         let seq = {
@@ -433,6 +433,13 @@ impl WindowsClipboard {
             raw::set_string(&native)
                 .map_err(|e| Error::Write(format!("could not set clipboard text: {e}")))?;
 
+            // The markers have to follow the text, in this same session, because set_string
+            // empties the clipboard and would take them with it. set_without_clear is what keeps
+            // them alongside the content rather than replacing it.
+            if options.concealed {
+                write_exclusion_markers(&self.formats)?;
+            }
+
             raw::seq_num().map(Into::into)
         };
 
@@ -440,6 +447,51 @@ impl WindowsClipboard {
         Ok(WriteReceipt {
             seq: seq.map(u64::from),
         })
+    }
+}
+
+/// A serialized `DWORD` of zero, which is how Windows spells "no" for these two formats.
+const DWORD_ZERO: [u8; 4] = [0, 0, 0, 0];
+
+/// Places the three formats that ask Windows and other applications to leave content alone.
+///
+/// Must be called with the clipboard already open and the content already set, because
+/// `set_string` empties the clipboard and would discard anything written before it.
+///
+/// A format that failed to register is skipped rather than treated as fatal: two of the three
+/// markers are still worth setting if the third is unavailable, and registration only fails in
+/// conditions where the write itself is about to fail anyway.
+fn write_exclusion_markers(formats: &ExclusionFormats) -> Result<()> {
+    let mut wrote_any = false;
+
+    if let Some(id) = formats.exclude_from_monitors {
+        // Presence alone is the signal here, so the payload is irrelevant. Microsoft documents it
+        // that way, and a single zero byte is the smallest thing that can be present.
+        raw::set_without_clear(id, &[0u8])
+            .map_err(|e| Error::Write(format!("could not exclude from clipboard monitors: {e}")))?;
+        wrote_any = true;
+    }
+    if let Some(id) = formats.can_include_in_history {
+        raw::set_without_clear(id, &DWORD_ZERO)
+            .map_err(|e| Error::Write(format!("could not exclude from clipboard history: {e}")))?;
+        wrote_any = true;
+    }
+    if let Some(id) = formats.can_upload_to_cloud {
+        raw::set_without_clear(id, &DWORD_ZERO)
+            .map_err(|e| Error::Write(format!("could not exclude from cloud clipboard: {e}")))?;
+        wrote_any = true;
+    }
+
+    if wrote_any {
+        Ok(())
+    } else {
+        // Silently writing an unmarked secret is worse than failing: the caller believes it is
+        // protected and it is not.
+        Err(Error::Write(
+            "none of the clipboard exclusion formats could be registered, so the content would \
+             have been written unmarked"
+                .to_owned(),
+        ))
     }
 }
 

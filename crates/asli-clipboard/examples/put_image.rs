@@ -36,7 +36,7 @@ fn main() {
             }
         };
 
-        if let Err(err) = clipboard.set_image(&png) {
+        if let Err(err) = clipboard.set_image(&png, asli_clipboard::WriteOptions::plain()) {
             eprintln!("could not offer the image: {err}");
             std::process::exit(1);
         }

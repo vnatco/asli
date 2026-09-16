@@ -96,6 +96,37 @@ pub struct ClipEvent {
     pub sensitive: bool,
 }
 
+/// How a write should be marked.
+///
+/// The one case this exists for is the join token. That token is the account key in full, so a
+/// Copy button that offers it must not let it land in Windows Clipboard History, must not let it
+/// sync to Microsoft's cloud clipboard, and must not let a third party clipboard manager store it
+/// on disk. Every platform has a convention for saying so, and this is the write side of the same
+/// convention the read side already honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WriteOptions {
+    /// Mark the content so clipboard managers, history and cloud sync leave it alone.
+    ///
+    /// This is a request to other software, not an enforcement mechanism. Software that ignores
+    /// the convention will still see the content, which is why the join token is better scanned
+    /// as a QR than copied at all.
+    pub concealed: bool,
+}
+
+impl WriteOptions {
+    /// Ordinary content, carrying no markers.
+    #[must_use]
+    pub const fn plain() -> Self {
+        Self { concealed: false }
+    }
+
+    /// Content that must stay out of history, cloud sync and clipboard managers.
+    #[must_use]
+    pub const fn concealed() -> Self {
+        Self { concealed: true }
+    }
+}
+
 /// What the platform gave us to recognise our own write later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WriteReceipt {
@@ -132,7 +163,19 @@ pub trait ClipboardWriter: Send {
     ///
     /// Returns an error if the clipboard could not be written, for example because another
     /// application holds it open.
-    fn write(&self, content: &ClipContent) -> Result<WriteReceipt>;
+    fn write(&self, content: &ClipContent) -> Result<WriteReceipt> {
+        self.write_with(content, WriteOptions::plain())
+    }
+
+    /// Puts content on the clipboard, marked according to `options`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clipboard could not be written, and specifically returns an error
+    /// rather than writing unmarked content when `options.concealed` is set and the platform
+    /// cannot express it. A caller that believes it wrote a protected secret and did not is worse
+    /// off than one told plainly that it failed.
+    fn write_with(&self, content: &ClipContent, options: WriteOptions) -> Result<WriteReceipt>;
 }
 
 #[cfg(test)]

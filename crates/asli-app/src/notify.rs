@@ -48,6 +48,20 @@ pub fn clip_received(enabled: bool, bytes: usize) {
     );
 }
 
+/// An image arrived from another device.
+///
+/// Separate from [`clip_received`] because "12073 bytes" reads as meaningless for an image, while
+/// "an image" tells a person what is now on their clipboard without revealing anything about it.
+pub fn image_received(enabled: bool, bytes: usize) {
+    if !enabled {
+        return;
+    }
+    send(
+        "Clipboard updated",
+        &format!("An image of {bytes} bytes from another device"),
+    );
+}
+
 /// A local copy was not sent because it exceeded the size limit.
 ///
 /// Always notified, regardless of the setting.

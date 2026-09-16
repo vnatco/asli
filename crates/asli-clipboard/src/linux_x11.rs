@@ -39,7 +39,7 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 
 use crate::error::{Error, Result};
 use crate::image_bytes::{self, MAX_IMAGE_BYTES};
-use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
+use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions, WriteReceipt};
 
 /// How long to coalesce a burst of selection changes before reading.
 ///
@@ -113,6 +113,9 @@ enum Owned {
     Image(Vec<u8>),
 }
 
+/// The value Klipper and `KeePassXC` agree on for the hint.
+const SENSITIVE_VALUE: &[u8] = b"secret";
+
 /// An X11 clipboard connection: watches `CLIPBOARD` and can own it.
 pub struct X11Clipboard {
     conn: RustConnection,
@@ -121,6 +124,11 @@ pub struct X11Clipboard {
     shutdown: Arc<AtomicBool>,
     /// Content we currently own the selection for, served on request.
     owned: Option<Owned>,
+    /// Whether what we own is marked as not for clipboard managers.
+    ///
+    /// Held beside the content rather than inside `Owned`, because it applies to whatever is
+    /// being served and the hint is answered the same way for text and for an image.
+    concealed: bool,
 }
 
 impl X11Clipboard {
@@ -186,6 +194,7 @@ impl X11Clipboard {
             atoms,
             shutdown: Arc::new(AtomicBool::new(false)),
             owned: None,
+            concealed: false,
         })
     }
 
@@ -204,7 +213,8 @@ impl X11Clipboard {
     /// # Errors
     ///
     /// Returns [`Error::Write`] if ownership could not be taken.
-    pub fn set_text(&mut self, text: &str) -> Result<WriteReceipt> {
+    pub fn set_text(&mut self, text: &str, options: WriteOptions) -> Result<WriteReceipt> {
+        self.concealed = options.concealed;
         self.own_selection(Owned::Text(text.to_owned()))
     }
 
@@ -214,8 +224,9 @@ impl X11Clipboard {
     ///
     /// Returns [`Error::Read`] if the bytes are not a PNG or exceed the cap, and [`Error::Write`]
     /// if ownership could not be taken.
-    pub fn set_image(&mut self, png: &[u8]) -> Result<WriteReceipt> {
+    pub fn set_image(&mut self, png: &[u8], options: WriteOptions) -> Result<WriteReceipt> {
         image_bytes::validate_png(png)?;
+        self.concealed = options.concealed;
         self.own_selection(Owned::Image(png.to_vec()))
     }
 
@@ -464,6 +475,61 @@ impl X11Clipboard {
     }
 
     /// Answers another client's request for the selection we own.
+    /// Answers a TARGETS request with the list that matches what is actually held.
+    ///
+    /// Both content types answer the same way, so the only thing that varies is the list itself,
+    /// and the hint is appended when the content is concealed so a clipboard manager can see the
+    /// marker before it asks for anything.
+    fn serve_targets(
+        &self,
+        request: &SelectionRequestEvent,
+        property: Atom,
+        owned: &Owned,
+    ) -> Result<()> {
+        let mut targets = match owned {
+            Owned::Text(_) => vec![
+                self.atoms.TARGETS,
+                self.atoms.UTF8_STRING,
+                self.atoms.TEXT_PLAIN_UTF8,
+                self.atoms.TEXT_PLAIN,
+                self.atoms.STRING,
+                self.atoms.TEXT,
+            ],
+            Owned::Image(_) => vec![self.atoms.TARGETS, self.atoms.IMAGE_PNG],
+        };
+        if self.concealed {
+            targets.push(self.atoms.KDE_PASSWORD_HINT);
+        }
+
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                request.requestor,
+                property,
+                AtomEnum::ATOM,
+                &targets,
+            )
+            .map_err(|e| Error::Write(format!("could not answer a TARGETS request: {e}")))?;
+        Ok(())
+    }
+
+    /// Answers a direct request for the password manager hint.
+    ///
+    /// Klipper asks for this type by name to decide whether to store an item at all, so the
+    /// answer has to be served like any other target rather than merely advertised.
+    fn serve_hint(&self, request: &SelectionRequestEvent, property: Atom) -> Result<()> {
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                request.requestor,
+                property,
+                request.target,
+                SENSITIVE_VALUE,
+            )
+            .map_err(|e| Error::Write(format!("could not answer a hint request: {e}")))?;
+        Ok(())
+    }
+
     fn serve_selection_request(&self, request: &SelectionRequestEvent) -> Result<()> {
         let Some(owned) = self.owned.as_ref() else {
             self.refuse(request)?;
@@ -481,43 +547,9 @@ impl X11Clipboard {
         // serving an image would make every paste fail in a way the other application reports as
         // our fault.
         if request.target == self.atoms.TARGETS {
-            match owned {
-                Owned::Text(_) => {
-                    let targets = [
-                        self.atoms.TARGETS,
-                        self.atoms.UTF8_STRING,
-                        self.atoms.TEXT_PLAIN_UTF8,
-                        self.atoms.TEXT_PLAIN,
-                        self.atoms.STRING,
-                        self.atoms.TEXT,
-                    ];
-                    self.conn
-                        .change_property32(
-                            PropMode::REPLACE,
-                            request.requestor,
-                            property,
-                            AtomEnum::ATOM,
-                            &targets,
-                        )
-                        .map_err(|e| {
-                            Error::Write(format!("could not answer a TARGETS request: {e}"))
-                        })?;
-                }
-                Owned::Image(_) => {
-                    let targets = [self.atoms.TARGETS, self.atoms.IMAGE_PNG];
-                    self.conn
-                        .change_property32(
-                            PropMode::REPLACE,
-                            request.requestor,
-                            property,
-                            AtomEnum::ATOM,
-                            &targets,
-                        )
-                        .map_err(|e| {
-                            Error::Write(format!("could not answer a TARGETS request: {e}"))
-                        })?;
-                }
-            }
+            self.serve_targets(request, property, owned)?;
+        } else if request.target == self.atoms.KDE_PASSWORD_HINT && self.concealed {
+            self.serve_hint(request, property)?;
         } else if let (Owned::Text(text), true) = (
             owned,
             request.target == self.atoms.UTF8_STRING
@@ -681,7 +713,7 @@ mod tests {
         }
         let mut clipboard = X11Clipboard::connect().expect("connects");
         let receipt = clipboard
-            .set_text("asli round trip")
+            .set_text("asli round trip", WriteOptions::plain())
             .expect("takes ownership");
         assert_eq!(receipt.seq, None, "X11 has no sequence counter");
         assert!(matches!(clipboard.owned, Some(Owned::Text(ref t)) if t == "asli round trip"));
@@ -696,7 +728,9 @@ mod tests {
         let mut clipboard = X11Clipboard::connect().expect("connects");
         let mut png = crate::image_bytes::PNG_MAGIC.to_vec();
         png.extend_from_slice(b"IHDR stand in for a real image");
-        clipboard.set_image(&png).expect("takes ownership");
+        clipboard
+            .set_image(&png, WriteOptions::plain())
+            .expect("takes ownership");
         assert!(matches!(clipboard.owned, Some(Owned::Image(ref bytes)) if bytes == &png));
     }
 
@@ -709,7 +743,9 @@ mod tests {
         let mut clipboard = X11Clipboard::connect().expect("connects");
         // Putting a mislabelled payload on the clipboard would fail on the other side rather than
         // here, which is the worse place to find out.
-        assert!(clipboard.set_image(b"BM this is a bitmap").is_err());
+        assert!(clipboard
+            .set_image(b"BM this is a bitmap", WriteOptions::plain())
+            .is_err());
     }
 
     #[test]

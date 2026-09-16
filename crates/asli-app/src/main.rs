@@ -384,15 +384,22 @@ fn handle_command(
             eprintln!("{}", log_line("resumed", "by the tray menu"));
         }
         tray::Command::PasteRetained => {
-            // Specified but not implemented: fetching the stored clip needs a request to the
-            // relay from the connection the daemon owns, which this thread cannot reach yet.
-            eprintln!(
-                "{}",
-                log_line(
-                    "paste_retained",
-                    "not implemented yet, see the protocol fetch_last message"
-                )
-            );
+            // The relay holds the stored clip, and only the daemon's connection can ask for it, so
+            // this raises a request the daemon picks up on its next pass rather than reaching into
+            // a socket owned by another thread.
+            //
+            // It is an explicit action on purpose. The protocol delivers a retained clip with
+            // retained set, and writing that automatically on connect would overwrite something
+            // copied on this machine seconds earlier.
+            if controls.status.get().has_retained {
+                controls.request_retained();
+                eprintln!("{}", log_line("paste_retained", "requested from the relay"));
+            } else {
+                eprintln!(
+                    "{}",
+                    log_line("paste_retained", "the relay is not holding a stored clip")
+                );
+            }
         }
         tray::Command::ShowToken => match secrets::load(paths) {
             Ok(Some((secret, _))) => {

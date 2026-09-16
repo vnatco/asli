@@ -137,6 +137,22 @@ pub fn bmp_file_header_for_dib(dib: &[u8]) -> Result<[u8; 14]> {
     Ok(header)
 }
 
+/// A serialized `DWORD` of zero, the payload Windows reads as "no" for the two history and cloud
+/// clipboard formats.
+///
+/// Defined here rather than in the Windows backend so the byte layout is exercised by tests that
+/// run on every platform, instead of only compiling on one.
+pub const DWORD_ZERO: [u8; 4] = [0, 0, 0, 0];
+
+/// Whether a write carrying these options needs the platform concealment markers.
+///
+/// Trivial today, but it is the single place that decides, so a backend cannot drift into writing
+/// an unmarked secret by reading the flag slightly differently.
+#[must_use]
+pub const fn needs_concealment(concealed: bool) -> bool {
+    concealed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +277,24 @@ mod tests {
         let mut dib = info_header(32, 0);
         dib[0..4].copy_from_slice(&9999u32.to_le_bytes());
         assert!(bmp_file_header_for_dib(&dib).is_err());
+    }
+
+    #[test]
+    fn a_dword_of_zero_is_four_zero_bytes() {
+        // Windows reads this payload as "do not include" for CanIncludeInClipboardHistory and
+        // CanUploadToCloudClipboard. Any other length or value means something else entirely.
+        assert_eq!(DWORD_ZERO.len(), 4);
+        assert_eq!(u32::from_le_bytes(DWORD_ZERO), 0);
+        assert_eq!(
+            u32::from_be_bytes(DWORD_ZERO),
+            0,
+            "zero reads the same either way"
+        );
+    }
+
+    #[test]
+    fn concealment_is_decided_in_one_place() {
+        assert!(needs_concealment(true));
+        assert!(!needs_concealment(false));
     }
 }

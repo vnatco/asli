@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use asli_clipboard::{ClipContent, ClipEvent, ClipboardWatcher};
+use asli_clipboard::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions};
 
 use crate::error::Result;
 
@@ -38,6 +38,26 @@ pub trait ClipboardIo: Send + Sync {
     /// Returns an error if the write could not be handed to the platform.
     fn write_text(&self, text: &str) -> Result<()>;
 
+    /// Writes a PNG image to the system clipboard.
+    ///
+    /// Same contract as [`ClipboardIo::write_text`]: the hash is already in the echo guard, so the
+    /// clipboard change this causes will be recognised as ours and not sent back out.
+    ///
+    /// Defaulted so a platform without image support, or a test double that only cares about
+    /// text, does not have to implement it. The default refuses rather than silently succeeding,
+    /// because a write that reports success and does nothing is how a person ends up pasting the
+    /// wrong thing with no idea why.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write could not be handed to the platform.
+    fn write_image(&self, png: &[u8]) -> Result<()> {
+        let _ = png;
+        Err(crate::Error::Clipboard(asli_clipboard::Error::NoBackend(
+            "this clipboard has no image support".to_owned(),
+        )))
+    }
+
     /// A short description for the status output.
     fn describe(&self) -> String;
 }
@@ -46,6 +66,7 @@ pub trait ClipboardIo: Send + Sync {
 #[derive(Debug, Default)]
 pub struct StubClipboard {
     writes: Mutex<Vec<String>>,
+    images: Mutex<Vec<Vec<u8>>>,
 }
 
 impl StubClipboard {
@@ -58,6 +79,16 @@ impl StubClipboard {
     pub fn writes(&self) -> Vec<String> {
         self.writes.lock().expect("stub clipboard lock").clone()
     }
+
+    /// Every image written so far, oldest first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous test thread poisoned the lock.
+    #[must_use]
+    pub fn images(&self) -> Vec<Vec<u8>> {
+        self.images.lock().expect("stub clipboard lock").clone()
+    }
 }
 
 impl ClipboardIo for StubClipboard {
@@ -66,6 +97,14 @@ impl ClipboardIo for StubClipboard {
             .lock()
             .expect("stub clipboard lock")
             .push(text.to_owned());
+        Ok(())
+    }
+
+    fn write_image(&self, png: &[u8]) -> Result<()> {
+        self.images
+            .lock()
+            .expect("stub clipboard lock")
+            .push(png.to_vec());
         Ok(())
     }
 
@@ -79,23 +118,50 @@ impl ClipboardIo for StubClipboard {
 pub enum Observed {
     /// Someone copied text.
     Text(String),
+    /// Someone copied an image, already normalized to PNG by the backend.
+    Image(Vec<u8>),
     /// Someone copied content their application marked as a password, and it was not read.
     Sensitive,
 }
 
+/// Work handed to the writer thread.
+///
+/// The writer used to take a plain `String`. It cannot any more: an image is bytes, and encoding
+/// it into a string to fit the old channel would mean guessing at the other end whether a payload
+/// was text or an encoded image, which is exactly the sort of ambiguity that produces a corrupted
+/// paste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Write {
+    Text(String),
+    Image(Vec<u8>),
+}
+
 /// Handle to the writer thread.
 pub struct LinuxClipboard {
-    to_writer: Sender<String>,
+    to_writer: Sender<Write>,
     interrupt: Arc<AtomicBool>,
     description: String,
 }
 
+impl LinuxClipboard {
+    /// Queues one write and wakes the writer.
+    ///
+    /// Queue first, then interrupt, so the writer always finds work waiting when its loop returns.
+    /// The reverse order races: the loop could return, find nothing, and block again.
+    fn queue(&self, work: Write) {
+        let _ = self.to_writer.send(work);
+        self.interrupt.store(true, Ordering::Relaxed);
+    }
+}
+
 impl ClipboardIo for LinuxClipboard {
     fn write_text(&self, text: &str) -> Result<()> {
-        // Queue first, then interrupt, so the writer always finds work waiting when its loop
-        // returns. The reverse order races: the loop could return, find nothing, and block again.
-        let _ = self.to_writer.send(text.to_owned());
-        self.interrupt.store(true, Ordering::Relaxed);
+        self.queue(Write::Text(text.to_owned()));
+        Ok(())
+    }
+
+    fn write_image(&self, png: &[u8]) -> Result<()> {
+        self.queue(Write::Image(png.to_vec()));
         Ok(())
     }
 
@@ -138,8 +204,9 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
                 } else {
                     match event.content {
                         ClipContent::Text(text) => Observed::Text(text),
-                        // Images are v1.1. Ignoring them here keeps the daemon honest about what
-                        // it supports rather than sending an empty clip.
+                        ClipContent::ImagePng(png) => Observed::Image(png),
+                        // ClipContent is non exhaustive. A content type added later is dropped
+                        // here rather than sent as something it is not.
                         _ => return,
                     }
                 };
@@ -155,7 +222,7 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
     // clipboard's own shutdown flag: that is the only flag its run loop checks.
     let writer = connect(watcher_backend)?;
     let interrupt = writer.shutdown_flag();
-    let (to_writer, from_daemon) = mpsc::channel::<String>();
+    let (to_writer, from_daemon) = mpsc::channel::<Write>();
 
     thread::Builder::new()
         .name("asli-clipboard-write".to_owned())
@@ -174,18 +241,23 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
 
 /// The writer thread: take ownership of the selection, then serve it until new content arrives.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<String>) {
+fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>) {
     let interrupt = clipboard.shutdown_flag();
 
-    while let Ok(text) = inbox.recv() {
+    while let Ok(work) = inbox.recv() {
         // Drain anything queued behind it: the clipboard is last write wins, so only the newest
-        // matters.
-        let mut latest = text;
+        // matters. This is also why a large image queued behind a newer text copy is discarded
+        // rather than written and immediately overwritten.
+        let mut latest = work;
         while let Ok(newer) = inbox.try_recv() {
             latest = newer;
         }
 
-        if let Err(err) = clipboard.set_text(&latest) {
+        let outcome = match &latest {
+            Write::Text(text) => clipboard.set_text(text),
+            Write::Image(png) => clipboard.set_image(png),
+        };
+        if let Err(err) = outcome {
             eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
             continue;
         }
@@ -218,7 +290,21 @@ enum AnyClipboard {
 impl AnyClipboard {
     fn set_text(&mut self, text: &str) -> asli_clipboard::Result<()> {
         match self {
-            Self::Windows(clipboard) => clipboard.set_text(text).map(|_| ()),
+            Self::Windows(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
+        }
+    }
+
+    /// Writes an image, where the platform backend supports it.
+    ///
+    /// The Windows backend reads images but does not yet offer a write path, so this reports that
+    /// plainly instead of dropping the clip. A received image that silently never appears is worse
+    /// than one that explains itself in the log.
+    fn set_image(&mut self, png: &[u8]) -> asli_clipboard::Result<()> {
+        let _ = png;
+        match self {
+            Self::Windows(_) => Err(asli_clipboard::Error::Write(
+                "writing images is not implemented on Windows yet".to_owned(),
+            )),
         }
     }
 
@@ -252,8 +338,16 @@ fn connect(backend: asli_clipboard::session::Backend) -> asli_clipboard::Result<
 impl AnyClipboard {
     fn set_text(&mut self, text: &str) -> asli_clipboard::Result<()> {
         match self {
-            Self::Wayland(clipboard) => clipboard.set_text(text).map(|_| ()),
-            Self::X11(clipboard) => clipboard.set_text(text).map(|_| ()),
+            Self::Wayland(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
+            Self::X11(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
+        }
+    }
+
+    /// Writes a PNG, offering it as `image/png` for as long as this connection owns the selection.
+    fn set_image(&mut self, png: &[u8]) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Wayland(clipboard) => clipboard.set_image(png, WriteOptions::plain()).map(|_| ()),
+            Self::X11(clipboard) => clipboard.set_image(png, WriteOptions::plain()).map(|_| ()),
         }
     }
 

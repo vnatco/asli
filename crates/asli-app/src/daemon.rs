@@ -45,6 +45,11 @@ pub struct Controls {
     pub paused: Arc<AtomicBool>,
     /// Latest status, published for the tray menu.
     pub status: StatusHandle,
+    /// Set when the person asks for the relay's stored clip.
+    ///
+    /// A flag rather than a channel because the request has no payload and only the most recent
+    /// one matters: asking twice before the daemon looks should fetch once, not twice.
+    pub retained_wanted: Arc<AtomicBool>,
 }
 
 impl Controls {
@@ -52,6 +57,17 @@ impl Controls {
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Asks the daemon to fetch the relay's stored clip on its next pass.
+    pub fn request_retained(&self) {
+        self.retained_wanted.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes the pending request, if there is one, clearing it.
+    #[must_use]
+    pub fn take_retained_request(&self) -> bool {
+        self.retained_wanted.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -109,6 +125,7 @@ pub fn on_action(action: &Action, io: &dyn ClipboardIo, status: &mut Status, now
             retained,
             ts_ms,
         } => apply_clip(text, *retained, *ts_ms, io, status, now_ms),
+        Action::Image { png, ts_ms } => apply_image(png, *ts_ms, io, status, now_ms),
         Action::Presence { peers } => {
             status.peers = *peers;
             false
@@ -148,6 +165,7 @@ pub fn on_client_event(
         ClientEvent::Clip(clip) => {
             apply_clip(&clip.text, clip.retained, clip.ts_ms, io, status, now_ms)
         }
+        ClientEvent::Image { png, ts_ms } => apply_image(png, *ts_ms, io, status, now_ms),
         ClientEvent::Presence { peers } => {
             status.peers = *peers;
             false
@@ -200,6 +218,12 @@ fn log_event(event: &ClientEvent) {
                 )
             );
         }
+        ClientEvent::Image { png, .. } => {
+            eprintln!(
+                "{}",
+                log_line("image_received", &format!("{} bytes", png.len()))
+            );
+        }
         ClientEvent::Presence { peers } => {
             eprintln!("{}", log_line("presence", &format!("{peers} connected")));
         }
@@ -211,7 +235,96 @@ fn log_event(event: &ClientEvent) {
 fn clip_len(event: &ClientEvent) -> usize {
     match event {
         ClientEvent::Clip(clip) => clip.text.len(),
+        ClientEvent::Image { png, .. } => png.len(),
         _ => 0,
+    }
+}
+
+/// Whether an event carried an image, so the right notification wording is used.
+const fn is_image(event: &ClientEvent) -> bool {
+    matches!(event, ClientEvent::Image { .. })
+}
+
+/// Handles one event from a live connection.
+///
+/// Extracted from the connection loop because judging an event is a different job from deciding
+/// when to reconnect, and keeping them together made the loop long enough to hide either one.
+fn on_live_event(
+    event: &ClientEvent,
+    io: &dyn ClipboardIo,
+    controls: &Controls,
+    status: &mut Status,
+    connected_once: &Arc<AtomicBool>,
+    notifications: bool,
+) {
+    let now = client::now_ms();
+
+    // Drained here because this is the only place the connection is known to be live. The frame
+    // itself cannot be sent from here: run_once owns the socket and exposes no way to hand it one,
+    // so the request is reported rather than silently discarded.
+    if controls.take_retained_request() {
+        eprintln!(
+            "{}",
+            log_line("paste_retained_failed", session_fetch_last_unavailable())
+        );
+    }
+
+    // Pausing must also stop arriving content from overwriting the local clipboard. Dropping it
+    // here rather than disconnecting keeps resume instant. Images are paused too: an image that
+    // landed while paused would be just as unwelcome as text.
+    if controls.is_paused() && matches!(event, ClientEvent::Clip(_) | ClientEvent::Image { .. }) {
+        return;
+    }
+
+    log_event(event);
+    if matches!(event, ClientEvent::Authenticated { .. }) {
+        // Recorded at the moment the handshake succeeds, so the next attempt after a drop is
+        // logged as a reconnection rather than a first connection.
+        connected_once.store(true, Ordering::Relaxed);
+    }
+
+    if on_client_event(event, io, status, now) {
+        if is_image(event) {
+            notify::image_received(notifications, clip_len(event));
+        } else {
+            notify::clip_received(notifications, clip_len(event));
+        }
+    }
+    controls.status.set(status.clone());
+}
+
+/// Why a retained fetch cannot be sent from here.
+///
+/// `Session::fetch_last_frame` produces exactly the right frame, and the relay implements the
+/// request, but `client::run_once` owns the socket for the life of the connection and takes only
+/// text from a channel. There is no seam to hand it one frame. Closing this needs a change in
+/// `asli-net`, so it is named rather than papered over.
+const fn session_fetch_last_unavailable() -> &'static str {
+    "the transport has no way to send a fetch_last frame from outside its own loop"
+}
+
+/// The one place a received image reaches the clipboard.
+///
+/// A chunked image only ever arrives fully reassembled and verified, so there is no partial state
+/// to handle here. There is also no retained variant: the relay does not store anything above its
+/// retain cap, and an image is far above it.
+fn apply_image(
+    png: &[u8],
+    ts_ms: u64,
+    io: &dyn ClipboardIo,
+    status: &mut Status,
+    now_ms: u64,
+) -> bool {
+    match io.write_image(png) {
+        Ok(()) => {
+            status.last_sync_ms = Some(now_ms.max(ts_ms));
+            true
+        }
+        Err(err) => {
+            status.last_error = Some(err.to_string());
+            eprintln!("{}", log_line("image_write_failed", &err.to_string()));
+            false
+        }
     }
 }
 
@@ -342,6 +455,37 @@ fn spawn_clipboard_bridge(
                         }
                         eprintln!("{}", log_line("clip_sent", &format!("{bytes} bytes")));
                     }
+                    Observed::Image(png) => {
+                        if png.len() > cap {
+                            eprintln!(
+                                "{}",
+                                log_line(
+                                    "image_skipped_too_large",
+                                    &format!(
+                                        "{} bytes exceeds the local cap of {cap} bytes",
+                                        png.len()
+                                    ),
+                                )
+                            );
+                            notify::clip_too_large(png.len(), cap);
+                            continue;
+                        }
+                        // Sending images needs a route into the session that owns the socket, and
+                        // the only one that exists carries text. Saying so is the point: an image
+                        // that vanishes with no explanation is precisely the complaint this
+                        // project exists to avoid, and a person watching the log can now tell the
+                        // difference between "not supported yet" and "broken".
+                        eprintln!(
+                            "{}",
+                            log_line(
+                                "image_not_sent",
+                                &format!(
+                                    "{} bytes captured, but sending images needs a transport path that does not exist yet",
+                                    png.len()
+                                ),
+                            )
+                        );
+                    }
                     Observed::Sensitive => {
                         eprintln!(
                             "{}",
@@ -401,29 +545,28 @@ async fn run_connection_loop(
 
         controls.status.set(status.clone());
 
+        // A request raised by the tray while the previous connection was down cannot be carried
+        // over: the relay tells us on each handshake whether it still holds anything, so a stale
+        // request would ask for something that may no longer exist.
+        if controls.take_retained_request() {
+            eprintln!(
+                "{}",
+                log_line(
+                    "paste_retained",
+                    "dropped because the connection restarted before it could be sent"
+                )
+            );
+        }
+
         let outcome = client::run_once(&url, &mut session, local_rx, &mut |event| {
-            let now = client::now_ms();
-
-            // Pausing must also stop arriving clips from overwriting the local clipboard.
-            // Dropping them here rather than disconnecting keeps resume instant.
-            if controls.is_paused() {
-                if let ClientEvent::Clip(_) = event {
-                    return;
-                }
-            }
-
-            log_event(&event);
-            if matches!(event, ClientEvent::Authenticated { .. }) {
-                // Recorded here, at the moment the handshake succeeds, so the next attempt after a
-                // drop is logged as a reconnection rather than a first connection.
-                connected_once.store(true, Ordering::Relaxed);
-            }
-
-            let wrote = on_client_event(&event, io.as_ref(), &mut status, now);
-            if wrote {
-                notify::clip_received(notifications, clip_len(&event));
-            }
-            controls.status.set(status.clone());
+            on_live_event(
+                &event,
+                io.as_ref(),
+                &controls,
+                &mut status,
+                &connected_once,
+                notifications,
+            );
         })
         .await;
 
@@ -511,6 +654,68 @@ mod tests {
             "a stored clip must not clobber the local clipboard"
         );
         assert!(status.has_retained);
+    }
+
+    #[test]
+    fn a_received_image_reaches_the_clipboard() {
+        let stub = StubClipboard::default();
+        let mut status = Status::default();
+        let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        let action = Action::Image {
+            png: png.clone(),
+            ts_ms: 1_000,
+        };
+        assert!(on_action(&action, &stub, &mut status, 2_000));
+        assert_eq!(stub.images(), vec![png]);
+        assert!(
+            stub.writes().is_empty(),
+            "an image must not be written through the text path"
+        );
+        assert!(status.last_sync_ms.is_some());
+    }
+
+    #[test]
+    fn a_failed_image_write_is_recorded_rather_than_swallowed() {
+        struct Failing;
+        impl ClipboardIo for Failing {
+            fn write_text(&self, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            fn write_image(&self, _png: &[u8]) -> Result<()> {
+                Err(crate::Error::SecretStore("no image support".to_owned()))
+            }
+            fn describe(&self) -> String {
+                "failing".to_owned()
+            }
+        }
+
+        let mut status = Status::default();
+        let action = Action::Image {
+            png: vec![1, 2, 3],
+            ts_ms: 0,
+        };
+        assert!(!on_action(&action, &Failing, &mut status, 0));
+        assert!(status.last_error.is_some());
+    }
+
+    #[test]
+    fn a_retained_request_is_taken_exactly_once() {
+        let controls = Controls::default();
+        assert!(
+            !controls.take_retained_request(),
+            "nothing is pending until it is asked for"
+        );
+
+        controls.request_retained();
+        // Asking twice before the daemon looks must still fetch once, which is the whole reason
+        // this is a flag rather than a queue.
+        controls.request_retained();
+
+        assert!(controls.take_retained_request());
+        assert!(
+            !controls.take_retained_request(),
+            "taking it must clear it, or the daemon would refetch on every pass"
+        );
     }
 
     #[test]

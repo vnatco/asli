@@ -36,7 +36,7 @@ use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSActivityOptions, NSData, NSProcessInfo, NSString};
 
 use crate::error::{Error, Result};
-use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
+use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions, WriteReceipt};
 
 /// How often the change counter is read.
 ///
@@ -306,12 +306,15 @@ impl MacosClipboard {
     ///
     /// Returns [`Error::Read`] if the bytes are not a PNG or exceed the cap, and [`Error::Write`]
     /// if the pasteboard refuses the write.
-    pub fn set_image(&mut self, png: &[u8]) -> Result<WriteReceipt> {
+    pub fn set_image(&mut self, png: &[u8], options: WriteOptions) -> Result<WriteReceipt> {
         crate::image_bytes::validate_png(png)?;
 
         let pasteboard = NSPasteboard::generalPasteboard();
         let seq = pasteboard.clearContents();
 
+        if options.concealed {
+            return Err(concealed_unsupported());
+        }
         let data = NSData::with_bytes(png);
         let png_type = NSString::from_str(UTI_PNG);
         if !pasteboard.setData_forType(Some(&data), &png_type) {
@@ -333,7 +336,7 @@ impl MacosClipboard {
     /// # Errors
     ///
     /// Returns [`Error::Write`] if the pasteboard refuses the write.
-    pub fn set_text(&mut self, text: &str) -> Result<WriteReceipt> {
+    pub fn set_text(&mut self, text: &str, options: WriteOptions) -> Result<WriteReceipt> {
         let pasteboard = NSPasteboard::generalPasteboard();
 
         // clearContents returns the change count its own change produced, which is what makes
@@ -343,6 +346,9 @@ impl MacosClipboard {
         let native = asli_core::to_platform(text, asli_core::LineEnding::Lf);
         let value = NSString::from_str(&native);
 
+        if options.concealed {
+            return Err(concealed_unsupported());
+        }
         let text_type = NSString::from_str(UTI_UTF8_TEXT);
         if !pasteboard.setString_forType(&value, &text_type) {
             return Err(Error::Write("the pasteboard refused the write".to_owned()));
@@ -412,6 +418,24 @@ impl ClipboardWatcher for MacosClipboard {
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
+}
+
+/// Why a concealed write is refused on this platform.
+///
+/// Declaring extra pasteboard types needs `declareTypes:owner:`, which `objc2-app-kit` exposes as
+/// an `unsafe fn`. This crate carries `#![forbid(unsafe_code)]` and holds it with no exceptions on
+/// Linux, Windows and macOS, and a clipboard tool that handles passwords is the last place to
+/// start making exceptions quietly.
+///
+/// So a concealed write fails here instead of succeeding without the marker. A caller that
+/// believes it protected a secret and did not is worse off than one told plainly that it could
+/// not, which is why this returns an error rather than writing the content unmarked.
+fn concealed_unsupported() -> Error {
+    Error::Write(
+        "marking pasteboard content as concealed is not supported on macOS yet, so the content \
+         was not written: declaring the marker requires an unsafe AppKit call this crate forbids"
+            .to_owned(),
+    )
 }
 
 #[cfg(test)]

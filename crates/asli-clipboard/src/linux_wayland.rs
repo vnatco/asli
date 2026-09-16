@@ -57,7 +57,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
 
 use crate::error::{Error, Result};
 use crate::image_bytes::{self, MAX_IMAGE_BYTES};
-use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
+use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions, WriteReceipt};
 
 /// The marker a password manager sets on Linux. `KeePassXC` writes it, Klipper honours it, and it
 /// travels through the data control path like any other MIME type, so we can see it in the offer
@@ -244,7 +244,12 @@ struct State {
     ///
     /// Text and images are both just bytes once they reach the pipe, and the compositor tells us
     /// which MIME type it wants when it asks, so one buffer serves both.
-    serving: Option<Arc<Vec<u8>>>,
+    /// What to send for each MIME type we offered.
+    ///
+    /// One payload for every type will not do once a concealment hint is offered alongside the
+    /// content: a paste asks for `text/plain` and expects the text, while Klipper asks for
+    /// `x-kde-passwordManagerHint` and expects `secret`.
+    serving: Option<Arc<OfferTable>>,
     /// Set when the compositor tells us the device is finished, which is fatal for this
     /// connection.
     finished: bool,
@@ -360,13 +365,20 @@ impl WaylandClipboard {
     /// # Errors
     ///
     /// Returns [`Error::Write`] if the compositor connection cannot be flushed.
-    pub fn set_text(&mut self, text: &str) -> Result<WriteReceipt> {
+    pub fn set_text(&mut self, text: &str, options: WriteOptions) -> Result<WriteReceipt> {
         let qh = self.queue.handle();
         let source = self.manager.create_data_source(&qh);
         for mime in TEXT_MIMES {
             source.offer(mime.to_owned());
         }
-        self.state.serving = Some(Arc::new(text.as_bytes().to_vec()));
+        if options.concealed {
+            source.offer(SENSITIVE_MIME.to_owned());
+        }
+        self.state.serving = Some(Arc::new(offer_table(
+            TEXT_MIMES.iter().copied(),
+            text.as_bytes(),
+            options.concealed,
+        )));
         self.device.set_selection(Some(&source));
         self.conn
             .flush()
@@ -384,7 +396,7 @@ impl WaylandClipboard {
     /// Returns [`Error::Read`] if the bytes are not a PNG or exceed the cap, because putting a
     /// mislabelled or absurd payload on the clipboard would fail on the other side instead of
     /// here, and [`Error::Write`] if the compositor connection cannot be flushed.
-    pub fn set_image(&mut self, png: &[u8]) -> Result<WriteReceipt> {
+    pub fn set_image(&mut self, png: &[u8], options: WriteOptions) -> Result<WriteReceipt> {
         image_bytes::validate_png(png)?;
 
         let qh = self.queue.handle();
@@ -392,7 +404,11 @@ impl WaylandClipboard {
         for mime in IMAGE_MIMES {
             source.offer((*mime).to_owned());
         }
-        self.state.serving = Some(Arc::new(png.to_vec()));
+        self.state.serving = Some(Arc::new(offer_table(
+            IMAGE_MIMES.iter().copied(),
+            png,
+            options.concealed,
+        )));
         self.device.set_selection(Some(&source));
         self.conn
             .flush()
@@ -687,11 +703,13 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            ext_data_control_source_v1::Event::Send { mime_type: _, fd } => {
-                // Something is pasting. Write the content we are serving into the pipe the
-                // compositor handed us, then close it so the reader sees end of file.
-                if let Some(bytes) = state.serving.clone() {
-                    write_all_to(fd, &bytes);
+            ext_data_control_source_v1::Event::Send { mime_type, fd } => {
+                // Something is pasting. Write whatever belongs to the type it asked for, then
+                // close the pipe so the reader sees end of file.
+                if let Some(table) = state.serving.clone() {
+                    if let Some(bytes) = payload_for(&table, &mime_type) {
+                        write_all_to(fd, bytes);
+                    }
                 }
             }
             ext_data_control_source_v1::Event::Cancelled => {
@@ -776,9 +794,11 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_data_control_source_v1::Event::Send { mime_type: _, fd } => {
-                if let Some(bytes) = state.serving.clone() {
-                    write_all_to(fd, &bytes);
+            zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
+                if let Some(table) = state.serving.clone() {
+                    if let Some(bytes) = payload_for(&table, &mime_type) {
+                        write_all_to(fd, bytes);
+                    }
                 }
             }
             zwlr_data_control_source_v1::Event::Cancelled => {
@@ -788,6 +808,38 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for State {
             _ => {}
         }
     }
+}
+
+/// The value Klipper and `KeePassXC` agree on for the hint.
+const SENSITIVE_VALUE: &[u8] = b"secret";
+
+/// What to send for each MIME type a data source offered.
+type OfferTable = Vec<(String, Vec<u8>)>;
+
+/// Builds the per MIME payload table a data source answers from.
+///
+/// The hint is offered last so that a client picking the first type it recognises still gets the
+/// content rather than the marker.
+fn offer_table<'a>(
+    mimes: impl Iterator<Item = &'a str>,
+    content: &[u8],
+    concealed: bool,
+) -> OfferTable {
+    let mut table: OfferTable = mimes
+        .map(|mime| (mime.to_owned(), content.to_vec()))
+        .collect();
+    if concealed {
+        table.push((SENSITIVE_MIME.to_owned(), SENSITIVE_VALUE.to_vec()));
+    }
+    table
+}
+
+/// Finds the payload for the type a client asked for.
+fn payload_for<'a>(table: &'a [(String, Vec<u8>)], mime: &str) -> Option<&'a [u8]> {
+    table
+        .iter()
+        .find(|(offered, _)| offered == mime)
+        .map(|(_, bytes)| bytes.as_slice())
 }
 
 /// Writes a payload into a pipe the compositor supplied, ignoring a broken pipe.
