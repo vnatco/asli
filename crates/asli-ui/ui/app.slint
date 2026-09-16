@@ -226,7 +226,7 @@ export component AppWindow inherits Window {
                     clicked => { root.open-screen(Screen.History); }
                 }
                 NavItem {
-                    text: "Join string";
+                    text: "Join String";
                     selected: root.screen == Screen.Token;
                     clicked => { root.open-screen(Screen.Token); }
                 }
@@ -278,12 +278,12 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 8px;
-                        Heading { text: "Start here"; }
+                        Heading { text: "Start Here"; }
                         Body { text: "Create an account on this device. You get one join string to paste on your other machines."; }
                         HorizontalLayout {
                             alignment: start;
                             Button {
-                                text: "Create account";
+                                text: "Create Account";
                                 primary: true;
                                 clicked => { root.create-account(); }
                             }
@@ -295,12 +295,12 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 8px;
-                        Heading { text: "Already have one"; }
-                        Body { text: "Open Asli on the device that has the account, choose Join string, and paste it here."; }
+                        Heading { text: "Already Have One"; }
+                        Body { text: "Open Asli on the device that has the account, choose Join String, and paste it here."; }
                         HorizontalLayout {
                             alignment: start;
                             Button {
-                                text: "Join existing";
+                                text: "Join Existing";
                                 clicked => { root.open-screen(Screen.Join); }
                             }
                         }
@@ -312,7 +312,7 @@ export component AppWindow inherits Window {
                 padding: 28px;
                 spacing: Metrics.gap;
 
-                Heading { text: "Join another account"; }
+                Heading { text: "Join Another Account"; }
                 Body {
                     text: "Paste the join string from your other device with Ctrl+V. It starts "
                         + "with asli1_ and is shown there under Join string.";
@@ -324,7 +324,7 @@ export component AppWindow inherits Window {
                         spacing: 10px;
 
                         Row {
-                            label: "Join string";
+                            label: "Join String";
                             join-field := Field {
                                 placeholder: "asli1_...";
                                 monospace: true;
@@ -430,7 +430,7 @@ export component AppWindow inherits Window {
                         alignment: start;
                         spacing: 8px;
                         Button {
-                            text: "Copy join string";
+                            text: "Copy Join String";
                             primary: true;
                             clicked => { root.copy-token(); }
                         }
@@ -460,7 +460,7 @@ export component AppWindow inherits Window {
                         Body { text: "Click an entry to put it back on the clipboard of every device."; }
                     }
                     if root.history.length > 0: Button {
-                        text: "Clear all";
+                        text: "Clear All";
                         danger: true;
                         clicked => { root.clear-history(); }
                     }
@@ -474,12 +474,12 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 8px;
-                        Heading { text: "History is off"; }
+                        Heading { text: "History is Off"; }
                         Body { text: "Turn it on in Settings to keep a local, encrypted list of what you copied."; }
                         HorizontalLayout {
                             alignment: start;
                             Button {
-                                text: "Open settings";
+                                text: "Open Settings";
                                 clicked => { root.open-screen(Screen.Settings); }
                             }
                         }
@@ -491,7 +491,7 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 6px;
-                        Heading { text: "Nothing yet"; }
+                        Heading { text: "Nothing Yet"; }
                         Body { text: "Copy something and it appears here."; }
                     }
                 }
@@ -604,7 +604,7 @@ export component AppWindow inherits Window {
                             }
 
                             Row {
-                                label: "Largest clip to sync";
+                                label: "Largest Clip to Sync";
                                 detail: "Anything bigger is skipped rather than sent.";
                                 Select {
                                     options: ["256 KB", "700 KB", "1 MB", "4 MB"];
@@ -629,7 +629,7 @@ export component AppWindow inherits Window {
                             Rectangle { height: 1px; background: Palette.line; }
 
                             Switch {
-                                text: "Start at login";
+                                text: "Start at Login";
                                 detail: root.autostart-detail;
                                 checked <=> root.autostart;
                                 toggled(on) => { root.set-autostart(on); }
@@ -643,14 +643,14 @@ export component AppWindow inherits Window {
                             spacing: 14px;
 
                             Switch {
-                                text: "Keep history";
+                                text: "Keep History";
                                 detail: "Stored on this device only, encrypted with your account key. Anything marked as a password is never recorded.";
                                 checked <=> root.keep-history;
                                 toggled(on) => { root.set-keep-history(on); }
                             }
 
                             Row {
-                                label: "Keep at most";
+                                label: "Keep at Most";
                                 detail: "Older entries are dropped first.";
                                 Select {
                                     options: ["25 entries", "50 entries", "100 entries", "250 entries"];
@@ -695,7 +695,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 alignment: start;
                                 Button {
-                                    text: "Join another account";
+                                    text: "Join Another Account";
                                     danger: true;
                                     clicked => { root.open-screen(Screen.Join); }
                                 }
@@ -764,7 +764,7 @@ export component AppWindow inherits Window {
                                 spacing: 3px;
                                 alignment: start;
                                 horizontal-stretch: 1;
-                                Body { text: "Last sync"; }
+                                Body { text: "Last Sync"; }
                                 Text {
                                     text: root.last-sync;
                                     color: Palette.text;
@@ -801,7 +801,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             alignment: start;
                             Button {
-                                text: "Paste it here";
+                                text: "Paste It Here";
                                 primary: true;
                                 clicked => { root.request-retained(); }
                             }
@@ -814,7 +814,7 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 6px;
-                        Heading { text: "Last problem"; secondary: true; }
+                        Heading { text: "Last Problem"; secondary: true; }
                         Body { text: root.last-error; strong: true; }
                     }
                 }
@@ -823,7 +823,7 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: Metrics.pad;
                         spacing: 10px;
-                        Heading { text: "This device"; secondary: true; }
+                        Heading { text: "This Device"; secondary: true; }
 
                         // The label column has a fixed width and the value starts immediately
                         // after it. Pushing the value to the right edge instead put a whole
@@ -853,7 +853,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             alignment: start;
                             Button {
-                                text: "Copy diagnostics";
+                                text: "Copy Diagnostics";
                                 clicked => { root.copy-diagnostics(); }
                             }
                         }

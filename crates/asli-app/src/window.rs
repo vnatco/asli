@@ -327,6 +327,16 @@ pub fn open(screen: Screen) {
     }
 }
 
+/// Opens the window where a person most likely wants it, which is the list of what they copied.
+///
+/// Raised by clicking the tray icon rather than by a menu item, so it names no screen of its own
+/// beyond that. It does not check whether an account exists either: [`show`] already sends
+/// everything to first run while there is none, and duplicating that rule here would mean two
+/// places to disagree.
+pub fn open_default() {
+    open(Screen::History);
+}
+
 /// Which screen a tray menu item leads to.
 #[must_use]
 pub const fn screen_for(command: tray::Command) -> Option<Screen> {
