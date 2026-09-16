@@ -289,8 +289,19 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
                         _ => return,
                     }
                 };
+
                 // Someone copied, so any clear scheduled before now is stale.
-                watcher_generation.fetch_add(1, Ordering::Relaxed);
+                //
+                // Concealed content is the exception, and it has to be, or the token clear can
+                // never fire. Copying the token writes it marked, the compositor hands it
+                // straight back through this watcher as sensitive, and bumping here would
+                // invalidate the clear that was scheduled microseconds earlier. The token then
+                // sits on the clipboard forever, which is exactly the leak the clear exists to
+                // close. A concealed observation is either our own marked write or a password
+                // manager's copy, and neither is a user copy that a pending clear would destroy.
+                if !matches!(observed, Observed::Sensitive) {
+                    watcher_generation.fetch_add(1, Ordering::Relaxed);
+                }
                 let _ = tx.send(observed);
             });
             if let Err(err) = result {
