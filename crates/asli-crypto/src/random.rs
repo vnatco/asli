@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 ///
 /// Returns [`Error::Rng`] if the operating system generator is unavailable. Treat this as fatal.
 pub fn fill(buf: &mut [u8]) -> Result<()> {
-    getrandom::getrandom(buf).map_err(|_| Error::Rng)
+    getrandom::fill(buf).map_err(|_| Error::Rng)
 }
 
 /// Returns `N` fresh bytes from the operating system CSPRNG.

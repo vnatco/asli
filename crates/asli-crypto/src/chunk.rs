@@ -270,10 +270,10 @@ pub fn seal_chunk_with_nonce(
         msg_id,
         pos,
     );
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(enc_key));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*enc_key));
     cipher
         .encrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::from(*nonce),
             Payload {
                 msg: piece,
                 aad: &aad,
@@ -307,10 +307,10 @@ pub fn open_chunk(
         msg_id,
         pos,
     );
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(enc_key));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*enc_key));
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::from(*nonce),
             Payload {
                 msg: ciphertext,
                 aad: &aad,

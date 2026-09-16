@@ -310,10 +310,10 @@ pub fn seal_with_nonce(
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
     let aad = build_aad(PROTOCOL_VERSION, TYPE_CLIP, epoch, room_id_bytes, msg_id);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(enc_key));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*enc_key));
     cipher
         .encrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::from(*nonce),
             Payload {
                 msg: plaintext,
                 aad: &aad,
@@ -337,11 +337,11 @@ pub fn open(
     ciphertext: &[u8],
 ) -> Result<Inner> {
     let aad = build_aad(PROTOCOL_VERSION, TYPE_CLIP, epoch, room_id_bytes, msg_id);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(enc_key));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*enc_key));
     let plaintext = Zeroizing::new(
         cipher
             .decrypt(
-                XNonce::from_slice(nonce),
+                &XNonce::from(*nonce),
                 Payload {
                     msg: ciphertext,
                     aad: &aad,
