@@ -21,9 +21,14 @@
 //!
 //! # Handling of the file
 //!
-//! Written to the cache directory with owner only permissions, and deleted after a short delay.
-//! The token is the account key in full, so it is never written world readable and never left
-//! behind.
+//! Written to the cache directory with owner only permissions, then removed three ways, because
+//! one way was not enough. A page was once found on disk five minutes after it was written, still
+//! holding a real token: the removal was a detached thread, the process restarted, and the thread
+//! died while the file did not.
+//!
+//! So the timer is now the weakest of three. The file is swept at startup, swept again before a
+//! new page is written, and the timer remains as best effort for the common case where the
+//! process keeps running. Only the sweeps survive a crash, a kill, or a reboot.
 
 use std::fs;
 use std::io::Write as _;
@@ -34,11 +39,37 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::qr;
 
+/// The single name a reveal page ever has, so a sweep knows exactly what to look for.
+const PAGE_NAME: &str = "join.html";
+
 /// How long the page stays on disk before it is removed.
 ///
 /// Long enough to scan a QR without hurrying, short enough that a forgotten file is not a
 /// permanent copy of the key.
 const LIFETIME: Duration = Duration::from_secs(180);
+
+/// Removes any reveal page left in the cache directory.
+///
+/// Called at startup and again before writing a new page. This is the part that actually holds:
+/// a timer inside a process cannot clean up after that process is killed, so something has to
+/// run on the way in rather than only on the way out.
+///
+/// A missing file is success, not an error. There is nothing to report to a user about a file
+/// that is already absent.
+pub fn sweep(cache_dir: &Path) {
+    let path = cache_dir.join(PAGE_NAME);
+    match fs::remove_file(&path) {
+        Ok(()) => eprintln!(
+            "{}",
+            crate::clipboard_io::log_line("reveal_swept", "removed a join page left from before")
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => eprintln!(
+            "{}",
+            crate::clipboard_io::log_line("reveal_sweep_failed", &err.to_string())
+        ),
+    }
+}
 
 /// Builds the page, opens it, and schedules its removal.
 ///
@@ -51,7 +82,11 @@ pub fn show_token(token: &str, cache_dir: &Path) -> Result<PathBuf> {
     let page = page_html(token, &svg);
 
     fs::create_dir_all(cache_dir).map_err(Error::Io)?;
-    let path = cache_dir.join("join.html");
+
+    // Never leave two pages behind. If an earlier one survived, it goes before this one lands.
+    sweep(cache_dir);
+
+    let path = cache_dir.join(PAGE_NAME);
     write_owner_only(&path, page.as_bytes())?;
 
     open(&path)?;
@@ -78,7 +113,11 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     file.flush().map_err(Error::Io)
 }
 
-/// Removes the page after [`LIFETIME`], so the key is not left on disk.
+/// Removes the page after [`LIFETIME`], for the common case where nothing interrupts us.
+///
+/// Best effort, deliberately. This thread dies with the process, so a restart, a crash, or a
+/// kill leaves the file behind, which is exactly the bug that made the sweeps necessary. Treat
+/// [`sweep`] as the guarantee and this as the convenience.
 fn schedule_removal(path: PathBuf) {
     let _ = thread::Builder::new()
         .name("asli-reveal-cleanup".to_owned())
@@ -138,8 +177,8 @@ fn page_html(token: &str, qr_svg: &str) -> String {
 chat or email. Scanning the QR is safest. Copying it marks it so clipboard history and cloud sync\n\
 skip it, but software that ignores those markers can still read it.</p>\n\
 <p class=\"warn\">On the other device, open the Asli tray menu and choose\n\
-<strong>Join another account</strong>, then paste this string. This page deletes itself in three\n\
-minutes.</p>\n\
+<strong>Join another account</strong>, then paste this string. This page is removed a few minutes\n\
+from now, and again next time Asli starts. Close the tab when you are done with it.</p>\n\
 </body>\n\
 </html>\n"
     )
@@ -184,6 +223,44 @@ mod tests {
             "nothing is loaded into the page"
         );
         assert!(!fetching.contains("@import"), "no imported stylesheets");
+    }
+
+    #[test]
+    fn a_page_left_behind_is_swept_on_the_next_start() {
+        // The actual bug: a page written, the process restarted before its timer fired, and the
+        // file still on disk holding a real token. A sweep at startup is what closes that, so
+        // this asserts the sweep and not the timer.
+        let dir = std::env::temp_dir().join(format!("asli-sweep-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(PAGE_NAME);
+
+        write_owner_only(&path, b"a page from a previous run").expect("writes");
+        assert!(path.exists(), "the page should exist before the sweep");
+
+        sweep(&dir);
+        assert!(!path.exists(), "a leftover page must not survive a start");
+
+        // Sweeping an empty directory is a normal startup, not a failure.
+        sweep(&dir);
+
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn writing_a_page_removes_the_previous_one() {
+        let dir = std::env::temp_dir().join(format!("asli-sweep-write-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(PAGE_NAME);
+
+        write_owner_only(&path, b"stale").expect("writes");
+        sweep(&dir);
+        write_owner_only(&path, b"fresh").expect("writes");
+
+        let contents = fs::read_to_string(&path).expect("read");
+        assert_eq!(contents, "fresh", "two pages must never coexist");
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
     }
 
     #[test]

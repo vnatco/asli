@@ -74,6 +74,11 @@ fn dispatch() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
 
+    // Before anything else. The join page holds the account key in plain text, and its removal
+    // timer is a thread that dies with the process, so a restart used to orphan the file
+    // indefinitely. Sweeping on the way in is the part that survives a kill or a reboot.
+    asli_app::reveal::sweep(&paths.cache_dir());
+
     match cli.command {
         Command::Create { force } => create(&paths, force),
         Command::Join { token } => join(&paths, &token),
