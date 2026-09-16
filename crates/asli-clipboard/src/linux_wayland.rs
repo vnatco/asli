@@ -56,6 +56,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
 };
 
 use crate::error::{Error, Result};
+use crate::image_bytes::{self, MAX_IMAGE_BYTES};
 use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
 
 /// The marker a password manager sets on Linux. `KeePassXC` writes it, Klipper honours it, and it
@@ -71,13 +72,23 @@ const TEXT_MIMES: [&str; 4] = [
     "STRING",
 ];
 
+/// MIME types we accept for images.
+///
+/// PNG only, deliberately. A source that offers a screenshot usually offers several bitmap
+/// flavours, and accepting more than one would mean deciding which is canonical on every hop.
+/// Every desktop toolkit in use puts `image/png` on the clipboard alongside its native format.
+const IMAGE_MIMES: [&str; 2] = ["image/png", "PNG"];
+
 /// How long to wait on the Wayland socket before checking the shutdown flag again.
 const POLL_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// How long to wait for the source client to write the selection into our pipe.
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Largest selection we will read, as a guard against a hostile or broken source.
+/// Largest text selection we will read, as a guard against a hostile or broken source.
+///
+/// Images have their own, larger cap in [`crate::image_bytes`], because a screenshot is legitimately
+/// far bigger than any text anyone copies on purpose.
 const MAX_READ_BYTES: usize = 8 * 1024 * 1024;
 
 /// Which protocol the compositor gave us.
@@ -229,8 +240,11 @@ struct State {
     offers: HashMap<u32, Vec<String>>,
     /// The selection the compositor most recently announced.
     pending: Pending,
-    /// Content we are currently offering to other clients.
-    serving: Option<Arc<String>>,
+    /// Bytes we are currently offering to other clients.
+    ///
+    /// Text and images are both just bytes once they reach the pipe, and the compositor tells us
+    /// which MIME type it wants when it asks, so one buffer serves both.
+    serving: Option<Arc<Vec<u8>>>,
     /// Set when the compositor tells us the device is finished, which is fatal for this
     /// connection.
     finished: bool,
@@ -352,7 +366,7 @@ impl WaylandClipboard {
         for mime in TEXT_MIMES {
             source.offer(mime.to_owned());
         }
-        self.state.serving = Some(Arc::new(text.to_owned()));
+        self.state.serving = Some(Arc::new(text.as_bytes().to_vec()));
         self.device.set_selection(Some(&source));
         self.conn
             .flush()
@@ -360,6 +374,30 @@ impl WaylandClipboard {
 
         // Wayland offers no clipboard sequence number, so loop prevention here rests on the
         // content hash guard in asli-core rather than on a platform counter.
+        Ok(WriteReceipt { seq: None })
+    }
+
+    /// Offers `png` to other clients as the clipboard contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Read`] if the bytes are not a PNG or exceed the cap, because putting a
+    /// mislabelled or absurd payload on the clipboard would fail on the other side instead of
+    /// here, and [`Error::Write`] if the compositor connection cannot be flushed.
+    pub fn set_image(&mut self, png: &[u8]) -> Result<WriteReceipt> {
+        image_bytes::validate_png(png)?;
+
+        let qh = self.queue.handle();
+        let source = self.manager.create_data_source(&qh);
+        for mime in IMAGE_MIMES {
+            source.offer((*mime).to_owned());
+        }
+        self.state.serving = Some(Arc::new(png.to_vec()));
+        self.device.set_selection(Some(&source));
+        self.conn
+            .flush()
+            .map_err(|e| Error::Write(format!("could not flush: {e}")))?;
+
         Ok(WriteReceipt { seq: None })
     }
 
@@ -374,18 +412,64 @@ impl WaylandClipboard {
             }));
         }
 
-        let Some(mime) = TEXT_MIMES
+        // Text wins when a source offers both, which nearly every application does: a copied
+        // rich text selection carries a bitmap rendering too, and syncing that instead of the
+        // words would be astonishing.
+        if let Some(mime) = TEXT_MIMES
             .iter()
             .find(|candidate| mimes.iter().any(|m| m == *candidate))
-        else {
-            // No text on the clipboard: an image or a file list, which v1 does not sync.
-            return Ok(None);
-        };
+        {
+            let buf = self.receive(offer, mime, MAX_READ_BYTES)?;
+            let raw = String::from_utf8(buf).map_err(|_| Error::NotUtf8)?;
 
+            // Normalize at exactly one boundary, here, so that the same text copied on Linux,
+            // macOS and Windows produces identical bytes and therefore an identical hash.
+            // Skipping this is how clipboard tools end up in a loop that grows the text on every
+            // hop.
+            let text = asli_core::normalize(&raw).into_owned();
+            if !asli_core::is_syncable(&text) {
+                // Empty or whitespace only, which is nearly always an intermediate state while an
+                // application sets several formats rather than something a person copied.
+                return Ok(None);
+            }
+
+            return Ok(Some(ClipEvent {
+                content: ClipContent::Text(text),
+                sensitive: false,
+            }));
+        }
+
+        if let Some(mime) = IMAGE_MIMES
+            .iter()
+            .find(|candidate| mimes.iter().any(|m| m == *candidate))
+        {
+            let buf = self.receive(offer, mime, MAX_IMAGE_BYTES)?;
+
+            // The bound above stops the read at the cap, so a source larger than it arrives
+            // truncated and would fail validation anyway. Checking the length explicitly gives the
+            // user a reason instead of a corrupt image.
+            image_bytes::validate_png(&buf)?;
+
+            return Ok(Some(ClipEvent {
+                content: ClipContent::ImagePng(buf),
+                sensitive: false,
+            }));
+        }
+
+        // Neither text nor an image: a file list, or a format v1 does not carry.
+        Ok(None)
+    }
+
+    /// Asks the source to write one MIME type into a pipe, and reads it with a bound and a
+    /// timeout.
+    ///
+    /// The bound is the whole point. A clipboard source is another process that may be hostile,
+    /// broken, or simply gone, so this never reads without a ceiling and never waits forever.
+    fn receive(&self, offer: &AnyOffer, mime: &str, limit: usize) -> Result<Vec<u8>> {
         let (mut read_end, write_end) = UnixStream::pair()
             .map_err(|e| Error::Read(format!("could not create a transfer pipe: {e}")))?;
 
-        offer.receive((*mime).to_owned(), write_end.as_fd());
+        offer.receive(mime.to_owned(), write_end.as_fd());
         self.conn
             .flush()
             .map_err(|e| Error::Read(format!("could not flush: {e}")))?;
@@ -400,26 +484,11 @@ impl WaylandClipboard {
         let mut buf = Vec::new();
         // UnixStream implements both Read and Write, so by_ref must be disambiguated.
         Read::by_ref(&mut read_end)
-            .take(u64::try_from(MAX_READ_BYTES).unwrap_or(u64::MAX))
+            .take(u64::try_from(limit).unwrap_or(u64::MAX))
             .read_to_end(&mut buf)
             .map_err(|e| Error::Read(format!("the source did not send the selection: {e}")))?;
 
-        let raw = String::from_utf8(buf).map_err(|_| Error::NotUtf8)?;
-
-        // Normalize at exactly one boundary, here, so that the same text copied on Linux, macOS
-        // and Windows produces identical bytes and therefore an identical hash. Skipping this is
-        // how clipboard tools end up in a loop that grows the text on every hop.
-        let text = asli_core::normalize(&raw).into_owned();
-        if !asli_core::is_syncable(&text) {
-            // Empty or whitespace only, which is nearly always an intermediate state while an
-            // application sets several formats rather than something a person copied.
-            return Ok(None);
-        }
-
-        Ok(Some(ClipEvent {
-            content: ClipContent::Text(text),
-            sensitive: false,
-        }))
+        Ok(buf)
     }
 
     /// Waits for Wayland activity, with a timeout so shutdown stays responsive.
@@ -621,8 +690,8 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
             ext_data_control_source_v1::Event::Send { mime_type: _, fd } => {
                 // Something is pasting. Write the content we are serving into the pipe the
                 // compositor handed us, then close it so the reader sees end of file.
-                if let Some(text) = state.serving.clone() {
-                    write_all_to(fd, text.as_bytes());
+                if let Some(bytes) = state.serving.clone() {
+                    write_all_to(fd, &bytes);
                 }
             }
             ext_data_control_source_v1::Event::Cancelled => {
@@ -708,8 +777,8 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for State {
     ) {
         match event {
             zwlr_data_control_source_v1::Event::Send { mime_type: _, fd } => {
-                if let Some(text) = state.serving.clone() {
-                    write_all_to(fd, text.as_bytes());
+                if let Some(bytes) = state.serving.clone() {
+                    write_all_to(fd, &bytes);
                 }
             }
             zwlr_data_control_source_v1::Event::Cancelled => {
@@ -784,6 +853,29 @@ mod tests {
     fn text_mime_preference_is_most_specific_first() {
         assert_eq!(TEXT_MIMES[0], "text/plain;charset=utf-8");
         assert!(TEXT_MIMES.contains(&"text/plain"));
+    }
+
+    #[test]
+    fn image_mimes_are_png_only() {
+        // One format on the wire. Accepting a second would mean deciding which is canonical on
+        // every hop between machines.
+        assert_eq!(IMAGE_MIMES[0], "image/png");
+        assert!(!IMAGE_MIMES
+            .iter()
+            .any(|m| m.contains("bmp") || m.contains("jpeg")));
+    }
+
+    #[test]
+    fn text_is_preferred_over_an_image_when_both_are_offered() {
+        // Copying a rich text selection offers a bitmap rendering alongside the words. Syncing
+        // the picture instead of the text would be astonishing, so the lookup order matters.
+        let offered = [
+            "image/png".to_owned(),
+            "text/plain;charset=utf-8".to_owned(),
+        ];
+        let text_hit = TEXT_MIMES.iter().any(|c| offered.iter().any(|m| m == *c));
+        let image_hit = IMAGE_MIMES.iter().any(|c| offered.iter().any(|m| m == *c));
+        assert!(text_hit && image_hit, "this fixture offers both");
     }
 
     #[test]

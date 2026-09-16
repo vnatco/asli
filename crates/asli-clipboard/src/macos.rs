@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use objc2_app_kit::NSPasteboard;
-use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+use objc2_foundation::{NSActivityOptions, NSData, NSProcessInfo, NSString};
 
 use crate::error::{Error, Result};
 use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
@@ -57,6 +57,9 @@ pub const POLL_TOLERANCE: Duration = Duration::from_millis(100);
 /// `unsafe` block. Building the string here instead keeps `forbid(unsafe_code)` intact across the
 /// crate, at the cost of one small allocation per read, which is the better trade.
 pub const UTI_UTF8_TEXT: &str = "public.utf8-plain-text";
+
+/// The uniform type identifier for PNG, and the only image type carried.
+pub const UTI_PNG: &str = "public.png";
 
 /// Marks content the source application considers confidential.
 ///
@@ -265,23 +268,64 @@ impl MacosClipboard {
             }));
         }
 
+        // Text wins when a source offers both, which nearly every application does: copying a
+        // rich text selection also puts a bitmap rendering on the pasteboard, and syncing the
+        // picture instead of the words would be astonishing.
         let text_type = NSString::from_str(UTI_UTF8_TEXT);
-        let Some(raw) = pasteboard.stringForType(&text_type) else {
-            // An image or a file promise, which v1 does not sync.
-            return Ok(None);
-        };
+        if let Some(raw) = pasteboard.stringForType(&text_type) {
+            // Normalize at exactly one boundary, here, so the same text hashes identically on
+            // every platform. Skipping this is how two machines grow the text on every hop.
+            let text = asli_core::normalize(&raw.to_string()).into_owned();
+            if !asli_core::is_syncable(&text) {
+                return Ok(None);
+            }
 
-        // Normalize at exactly one boundary, here, so the same text hashes identically on every
-        // platform. Skipping this is how two machines grow the text on every hop.
-        let text = asli_core::normalize(&raw.to_string()).into_owned();
-        if !asli_core::is_syncable(&text) {
-            return Ok(None);
+            return Ok(Some(ClipEvent {
+                content: ClipContent::Text(text),
+                sensitive: false,
+            }));
         }
 
-        Ok(Some(ClipEvent {
-            content: ClipContent::Text(text),
-            sensitive: false,
-        }))
+        let png_type = NSString::from_str(UTI_PNG);
+        if let Some(data) = pasteboard.dataForType(&png_type) {
+            let bytes = data.to_vec();
+            crate::image_bytes::validate_png(&bytes)?;
+            return Ok(Some(ClipEvent {
+                content: ClipContent::ImagePng(bytes),
+                sensitive: false,
+            }));
+        }
+
+        // A file promise, or a format v1 does not carry.
+        Ok(None)
+    }
+
+    /// Puts a PNG on the pasteboard and records the counter value it produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Read`] if the bytes are not a PNG or exceed the cap, and [`Error::Write`]
+    /// if the pasteboard refuses the write.
+    pub fn set_image(&mut self, png: &[u8]) -> Result<WriteReceipt> {
+        crate::image_bytes::validate_png(png)?;
+
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let seq = pasteboard.clearContents();
+
+        let data = NSData::with_bytes(png);
+        let png_type = NSString::from_str(UTI_PNG);
+        if !pasteboard.setData_forType(Some(&data), &png_type) {
+            return Err(Error::Write(
+                "the pasteboard refused the image write".to_owned(),
+            ));
+        }
+
+        self.last_written = Some(seq);
+        self.last_seen = Some(seq);
+
+        Ok(WriteReceipt {
+            seq: u64::try_from(seq).ok(),
+        })
     }
 
     /// Puts text on the pasteboard and records the counter value it produced.

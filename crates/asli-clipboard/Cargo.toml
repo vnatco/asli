@@ -31,6 +31,10 @@ rustix = { version = "1", features = ["event"] }
 # not a convenience here, it is what makes the lint satisfiable.
 # The monitor feature is the message only window plus AddClipboardFormatListener.
 clipboard-win = { version = "5.4", features = ["monitor", "std"] }
+# Windows puts a device independent bitmap on the clipboard when a source offers no PNG, and PNG
+# is the only image format this project carries. Decoding that one case is the only reason this
+# dependency exists, so it is scoped to Windows and to two formats rather than pulled in whole.
+image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # NSPasteboard has no change notification, so this backend is a poller, and objc2 is the only
@@ -40,6 +44,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
+    "NSData",
     "NSArray",
     "NSDate",
     "NSProcessInfo",

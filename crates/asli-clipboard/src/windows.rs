@@ -31,6 +31,7 @@ use clipboard_win::monitor::{Monitor, Shutdown};
 use clipboard_win::{raw, Clipboard, EnumFormats};
 
 use crate::error::{Error, Result};
+use crate::image_bytes;
 use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
 
 /// How long to coalesce a burst of clipboard changes before reading.
@@ -63,22 +64,67 @@ const CAN_INCLUDE_IN_HISTORY: &str = "CanIncludeInClipboardHistory";
 /// which is precisely what this application does.
 const CAN_UPLOAD_TO_CLOUD: &str = "CanUploadToCloudClipboard";
 
+/// The registered name Windows applications use for PNG on the clipboard.
+///
+/// Modern applications offer this alongside their bitmap, and it is preferred because it needs no
+/// conversion and carries an alpha channel that a DIB round trip can lose.
+const PNG_FORMAT: &str = "PNG";
+
+/// `CF_DIBV5`, the device independent bitmap with an alpha channel.
+const CF_DIBV5: u32 = 17;
+
+/// `CF_DIB`, the older device independent bitmap.
+const CF_DIB: u32 = 8;
+
 /// `CF_UNICODETEXT`, the only text format worth reading.
 ///
 /// `CF_TEXT` is the ANSI one and Windows synthesizes it from this, so reading it would only lose
 /// information for content outside the active code page.
 const CF_UNICODETEXT: u32 = 13;
 
-/// The registered ids of the exclusion formats, resolved once at startup.
+/// Converts a device independent bitmap into PNG.
+///
+/// Windows hands out a DIB with no file header, because inside a clipboard there is no file. The
+/// header is reconstructed by [`crate::image_bytes::bmp_file_header_for_dib`], which is pure byte
+/// arithmetic and tested on every platform, and only the decode and re-encode happen here.
+///
+/// This is the single conversion boundary in the whole project. Carrying a second image format on
+/// the wire instead is what makes Deskflow's macOS to Windows image paste fail.
+///
+/// # Errors
+///
+/// Returns [`Error::Read`] if the bitmap is malformed or cannot be re-encoded.
+fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
+    image_bytes::check_size(dib.len())?;
+
+    let header = image_bytes::bmp_file_header_for_dib(dib)?;
+    let mut bmp = Vec::with_capacity(header.len() + dib.len());
+    bmp.extend_from_slice(&header);
+    bmp.extend_from_slice(dib);
+
+    let decoded = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp)
+        .map_err(|e| Error::Read(format!("could not decode the clipboard bitmap: {e}")))?;
+
+    let mut png = std::io::Cursor::new(Vec::new());
+    decoded
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| Error::Read(format!("could not re-encode the bitmap as PNG: {e}")))?;
+
+    Ok(png.into_inner())
+}
+
+/// The registered ids of the formats resolved once at startup: the three exclusion markers, and
+/// PNG.
 #[derive(Debug, Clone, Copy, Default)]
 struct ExclusionFormats {
     exclude_from_monitors: Option<u32>,
     can_include_in_history: Option<u32>,
     can_upload_to_cloud: Option<u32>,
+    png: Option<u32>,
 }
 
 impl ExclusionFormats {
-    /// Registers the three format names.
+    /// Registers the format names this backend needs.
     ///
     /// `RegisterClipboardFormat` returning `None` is not fatal: it means this Windows build does
     /// not know the name, in which case no application can be marking content with it either.
@@ -87,6 +133,7 @@ impl ExclusionFormats {
             exclude_from_monitors: raw::register_format(EXCLUDE_FROM_MONITORS).map(Into::into),
             can_include_in_history: raw::register_format(CAN_INCLUDE_IN_HISTORY).map(Into::into),
             can_upload_to_cloud: raw::register_format(CAN_UPLOAD_TO_CLOUD).map(Into::into),
+            png: raw::register_format(PNG_FORMAT).map(Into::into),
         }
     }
 }
@@ -297,7 +344,7 @@ impl WindowsClipboard {
     ///
     /// Returns [`Error::Read`] if the clipboard cannot be opened or the read fails, and
     /// [`Error::NotUtf8`] if the conversion produces invalid UTF-8.
-    pub fn read_text(&self) -> Result<Option<ClipEvent>> {
+    pub fn read_clipboard(&self) -> Result<Option<ClipEvent>> {
         let _guard = Self::open_with_backoff()?;
 
         let offer = self.collect_offer();
@@ -309,29 +356,64 @@ impl WindowsClipboard {
             }));
         }
 
-        if !offer.formats.contains(&CF_UNICODETEXT) {
-            // An image or a file list, which v1 does not sync.
-            return Ok(None);
+        // Text wins when a source offers both, which nearly every application does: copying a
+        // rich text selection also puts a bitmap rendering on the clipboard, and syncing the
+        // picture instead of the words would be astonishing.
+        if offer.formats.contains(&CF_UNICODETEXT) {
+            let mut buf = Vec::new();
+            raw::get_string(&mut buf)
+                .map_err(|e| Error::Read(format!("could not read clipboard text: {e}")))?;
+
+            let raw_text = String::from_utf8(buf).map_err(|_| Error::NotUtf8)?;
+
+            // Normalize at exactly one boundary, here, so the same text hashes identically on
+            // every platform. Windows text arrives CRLF terminated and with a trailing NUL, both
+            // of which this strips. Skipping it is how two machines end up growing the text on
+            // every hop.
+            let text = asli_core::normalize(&raw_text).into_owned();
+            if !asli_core::is_syncable(&text) {
+                return Ok(None);
+            }
+
+            return Ok(Some(ClipEvent {
+                content: ClipContent::Text(text),
+                sensitive: false,
+            }));
         }
 
-        let mut buf = Vec::new();
-        raw::get_string(&mut buf)
-            .map_err(|e| Error::Read(format!("could not read clipboard text: {e}")))?;
-
-        let raw_text = String::from_utf8(buf).map_err(|_| Error::NotUtf8)?;
-
-        // Normalize at exactly one boundary, here, so the same text hashes identically on every
-        // platform. Windows text arrives CRLF terminated and with a trailing NUL, both of which
-        // this strips. Skipping it is how two machines end up growing the text on every hop.
-        let text = asli_core::normalize(&raw_text).into_owned();
-        if !asli_core::is_syncable(&text) {
-            return Ok(None);
+        // A source that offers PNG directly is preferred: no conversion, and the alpha channel
+        // survives, which a DIB round trip can lose.
+        if let Some(png_id) = self.formats.png {
+            if offer.formats.contains(&png_id) {
+                let mut buf = Vec::new();
+                raw::get_vec(png_id, &mut buf)
+                    .map_err(|e| Error::Read(format!("could not read the clipboard image: {e}")))?;
+                image_bytes::validate_png(&buf)?;
+                return Ok(Some(ClipEvent {
+                    content: ClipContent::ImagePng(buf),
+                    sensitive: false,
+                }));
+            }
         }
 
-        Ok(Some(ClipEvent {
-            content: ClipContent::Text(text),
-            sensitive: false,
-        }))
+        // Older applications offer only a device independent bitmap, so it is converted here,
+        // at the single conversion boundary in the project.
+        for dib_format in [CF_DIBV5, CF_DIB] {
+            if offer.formats.contains(&dib_format) {
+                let mut buf = Vec::new();
+                raw::get_vec(dib_format, &mut buf).map_err(|e| {
+                    Error::Read(format!("could not read the clipboard bitmap: {e}"))
+                })?;
+                let png = dib_to_png(&buf)?;
+                return Ok(Some(ClipEvent {
+                    content: ClipContent::ImagePng(png),
+                    sensitive: false,
+                }));
+            }
+        }
+
+        // A file list, or a format v1 does not carry.
+        Ok(None)
     }
 
     /// Puts text on the clipboard and records the sequence number it produced.
@@ -406,7 +488,7 @@ impl ClipboardWatcher for WindowsClipboard {
                 self.seen_first_event = true;
             }
 
-            match self.read_text() {
+            match self.read_clipboard() {
                 Ok(Some(event)) => sink(event),
                 // Either there is no text on the clipboard, or the read lost the race for the
                 // lock. Both are routine and neither should stop the watcher.

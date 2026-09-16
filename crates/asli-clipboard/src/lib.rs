@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod image_bytes;
 pub mod session;
 
 #[cfg(target_os = "linux")]
@@ -47,7 +48,11 @@ pub use session::{Backend, Env, Plan, SessionKind};
 pub enum ClipContent {
     /// UTF-8 text, already normalized by `asli_core::normalize`.
     Text(String),
-    /// A PNG image. Specified for v1.1, not yet produced by any backend.
+    /// A PNG image, and only ever a PNG.
+    ///
+    /// One format on the wire, converted at exactly one boundary if a platform offers something
+    /// else. Deskflow carries BMP and that is why images pasted from macOS arrive corrupted on
+    /// Windows, so this stays a single format on purpose.
     ImagePng(Vec<u8>),
 }
 

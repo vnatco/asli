@@ -38,6 +38,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 
 use crate::error::{Error, Result};
+use crate::image_bytes::{self, MAX_IMAGE_BYTES};
 use crate::{ClipContent, ClipEvent, ClipboardWatcher, WriteReceipt};
 
 /// How long to coalesce a burst of selection changes before reading.
@@ -59,6 +60,12 @@ const IDLE_POLL: Duration = Duration::from_millis(20);
 
 /// Largest property chunk we request in one round trip, in 32 bit units (1 MiB).
 const MAX_PROPERTY_WORDS: u32 = 256 * 1024;
+
+/// Largest text selection we will accept.
+///
+/// Images have their own, larger cap in [`crate::image_bytes`], because a screenshot is
+/// legitimately far bigger than any text a person copies on purpose.
+const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
 mod atoms {
     // The atom_manager macro generates a struct, its fields, and its methods, and none of them
@@ -87,11 +94,24 @@ mod atoms {
             ASLI_WAKE,
             TEXT_PLAIN_UTF8: b"text/plain;charset=utf-8",
             TEXT_PLAIN: b"text/plain",
+            // PNG is the only image format carried, so this is the only image atom needed.
+            IMAGE_PNG: b"image/png",
         }
     }
 }
 
 use atoms::Atoms;
+
+/// What this client is currently serving as the selection owner.
+///
+/// X11 has no clipboard storage: the owner answers conversion requests on demand, so the content
+/// has to be kept here for as long as the selection is held.
+enum Owned {
+    /// UTF-8 text, already normalized.
+    Text(String),
+    /// PNG bytes, already validated as PNG.
+    Image(Vec<u8>),
+}
 
 /// An X11 clipboard connection: watches `CLIPBOARD` and can own it.
 pub struct X11Clipboard {
@@ -100,7 +120,7 @@ pub struct X11Clipboard {
     atoms: Atoms,
     shutdown: Arc<AtomicBool>,
     /// Content we currently own the selection for, served on request.
-    owned: Option<String>,
+    owned: Option<Owned>,
 }
 
 impl X11Clipboard {
@@ -185,7 +205,22 @@ impl X11Clipboard {
     ///
     /// Returns [`Error::Write`] if ownership could not be taken.
     pub fn set_text(&mut self, text: &str) -> Result<WriteReceipt> {
-        self.owned = Some(text.to_owned());
+        self.own_selection(Owned::Text(text.to_owned()))
+    }
+
+    /// Takes ownership of `CLIPBOARD` and serves `png` to anyone who asks for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Read`] if the bytes are not a PNG or exceed the cap, and [`Error::Write`]
+    /// if ownership could not be taken.
+    pub fn set_image(&mut self, png: &[u8]) -> Result<WriteReceipt> {
+        image_bytes::validate_png(png)?;
+        self.own_selection(Owned::Image(png.to_vec()))
+    }
+
+    fn own_selection(&mut self, content: Owned) -> Result<WriteReceipt> {
+        self.owned = Some(content);
 
         self.conn
             .set_selection_owner(self.window, self.atoms.CLIPBOARD, CURRENT_TIME)
@@ -213,7 +248,8 @@ impl X11Clipboard {
         Ok(WriteReceipt { seq: None })
     }
 
-    /// Reads `CLIPBOARD` as text, and reports whether it is marked sensitive.
+    /// Reads `CLIPBOARD`, as text if there is text and as a PNG otherwise, and reports whether it
+    /// is marked sensitive.
     ///
     /// The marker check happens first, over `TARGETS`, so content a password manager flagged is
     /// never read into our memory at all.
@@ -222,7 +258,7 @@ impl X11Clipboard {
     ///
     /// Returns [`Error::Read`] on a timeout or protocol failure, and [`Error::NotUtf8`] if the
     /// owner handed us bytes that are not valid UTF-8.
-    pub fn read_text(&self) -> Result<Option<ClipEvent>> {
+    pub fn read_clipboard(&self) -> Result<Option<ClipEvent>> {
         let targets = self.request_targets()?;
 
         if targets.contains(&self.atoms.KDE_PASSWORD_HINT) {
@@ -241,29 +277,42 @@ impl X11Clipboard {
         .into_iter()
         .find(|t| targets.contains(t));
 
-        let Some(target) = target else {
-            // No text on the clipboard. An image or a file list, which v1 does not sync.
-            return Ok(None);
-        };
+        // Text wins when both are offered, which is the common case: copying a rich text
+        // selection also puts a bitmap rendering on the clipboard, and syncing the picture
+        // instead of the words would be astonishing.
+        if let Some(target) = target {
+            let bytes = self.convert_and_read(target, MAX_TEXT_BYTES)?;
+            let raw = String::from_utf8(bytes).map_err(|_| Error::NotUtf8)?;
 
-        let bytes = self.convert_and_read(target)?;
-        let raw = String::from_utf8(bytes).map_err(|_| Error::NotUtf8)?;
+            // Normalize at exactly one boundary, here, so the same text hashes identically on
+            // every platform. See asli_core::normalize for why this is not optional.
+            let text = asli_core::normalize(&raw).into_owned();
+            if !asli_core::is_syncable(&text) {
+                return Ok(None);
+            }
 
-        // Normalize at exactly one boundary, here, so the same text hashes identically on every
-        // platform. See asli_core::normalize for why this is not optional.
-        let text = asli_core::normalize(&raw).into_owned();
-        if !asli_core::is_syncable(&text) {
-            return Ok(None);
+            return Ok(Some(ClipEvent {
+                content: ClipContent::Text(text),
+                sensitive: false,
+            }));
         }
 
-        Ok(Some(ClipEvent {
-            content: ClipContent::Text(text),
-            sensitive: false,
-        }))
+        if targets.contains(&self.atoms.IMAGE_PNG) {
+            let bytes = self.convert_and_read(self.atoms.IMAGE_PNG, MAX_IMAGE_BYTES)?;
+            image_bytes::validate_png(&bytes)?;
+            return Ok(Some(ClipEvent {
+                content: ClipContent::ImagePng(bytes),
+                sensitive: false,
+            }));
+        }
+
+        // Neither text nor a PNG. A file list, or a format v1 does not carry.
+        Ok(None)
     }
 
     fn request_targets(&self) -> Result<Vec<Atom>> {
-        let bytes = self.convert_and_read(self.atoms.TARGETS)?;
+        // A target list is a few hundred atoms at most, so the text bound is generous here.
+        let bytes = self.convert_and_read(self.atoms.TARGETS, MAX_TEXT_BYTES)?;
         // TARGETS comes back as a list of 32 bit atoms.
         Ok(bytes
             .chunks_exact(4)
@@ -272,7 +321,7 @@ impl X11Clipboard {
     }
 
     /// Asks the owner to convert the selection, waits for the reply, and reads the property.
-    fn convert_and_read(&self, target: Atom) -> Result<Vec<u8>> {
+    fn convert_and_read(&self, target: Atom, limit: usize) -> Result<Vec<u8>> {
         self.conn
             .delete_property(self.window, self.atoms.ASLI_SELECTION)
             .map_err(|e| Error::Read(format!("could not clear the transfer property: {e}")))?;
@@ -307,7 +356,7 @@ impl X11Clipboard {
                         // The owner refused this target.
                         return Ok(Vec::new());
                     }
-                    return self.read_property();
+                    return self.read_property(limit);
                 }
                 Some(_) => {
                     // Selection traffic is what we are waiting for. Other events, including a new
@@ -318,7 +367,7 @@ impl X11Clipboard {
         }
     }
 
-    fn read_property(&self) -> Result<Vec<u8>> {
+    fn read_property(&self, limit: usize) -> Result<Vec<u8>> {
         let reply = self
             .conn
             .get_property(
@@ -334,7 +383,7 @@ impl X11Clipboard {
             .map_err(|e| Error::Read(format!("could not read the transfer property: {e}")))?;
 
         if reply.type_ == self.atoms.INCR {
-            return self.read_incr();
+            return self.read_incr(limit);
         }
 
         self.conn
@@ -348,7 +397,7 @@ impl X11Clipboard {
     /// The owner writes the data to our property in chunks, sending a `PropertyNotify` each time.
     /// We must delete the property to acknowledge each chunk, and a zero length chunk ends the
     /// transfer. Without this, anything past the server's maximum request size is truncated.
-    fn read_incr(&self) -> Result<Vec<u8>> {
+    fn read_incr(&self, limit: usize) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         let deadline = Instant::now() + CONVERT_TIMEOUT;
 
@@ -397,6 +446,15 @@ impl X11Clipboard {
                     if reply.value.is_empty() {
                         return Ok(out);
                     }
+
+                    // An incremental transfer is the one path where a hostile or broken owner can
+                    // feed us unbounded data a chunk at a time, so the cap is enforced per chunk
+                    // rather than only on the total at the end.
+                    if out.len().saturating_add(reply.value.len()) > limit {
+                        return Err(Error::Read(format!(
+                            "an incremental transfer exceeded the {limit} byte limit and was abandoned"
+                        )));
+                    }
                     out.extend_from_slice(&reply.value);
                 }
                 Some(_) => {}
@@ -407,7 +465,7 @@ impl X11Clipboard {
 
     /// Answers another client's request for the selection we own.
     fn serve_selection_request(&self, request: &SelectionRequestEvent) -> Result<()> {
-        let Some(text) = self.owned.as_deref() else {
+        let Some(owned) = self.owned.as_ref() else {
             self.refuse(request)?;
             return Ok(());
         };
@@ -419,30 +477,55 @@ impl X11Clipboard {
             request.property
         };
 
+        // The target list has to describe what is actually held. Advertising text targets while
+        // serving an image would make every paste fail in a way the other application reports as
+        // our fault.
         if request.target == self.atoms.TARGETS {
-            let targets = [
-                self.atoms.TARGETS,
-                self.atoms.UTF8_STRING,
-                self.atoms.TEXT_PLAIN_UTF8,
-                self.atoms.TEXT_PLAIN,
-                self.atoms.STRING,
-                self.atoms.TEXT,
-            ];
-            self.conn
-                .change_property32(
-                    PropMode::REPLACE,
-                    request.requestor,
-                    property,
-                    AtomEnum::ATOM,
-                    &targets,
-                )
-                .map_err(|e| Error::Write(format!("could not answer a TARGETS request: {e}")))?;
-        } else if request.target == self.atoms.UTF8_STRING
-            || request.target == self.atoms.TEXT_PLAIN_UTF8
-            || request.target == self.atoms.TEXT_PLAIN
-            || request.target == self.atoms.STRING
-            || request.target == self.atoms.TEXT
-        {
+            match owned {
+                Owned::Text(_) => {
+                    let targets = [
+                        self.atoms.TARGETS,
+                        self.atoms.UTF8_STRING,
+                        self.atoms.TEXT_PLAIN_UTF8,
+                        self.atoms.TEXT_PLAIN,
+                        self.atoms.STRING,
+                        self.atoms.TEXT,
+                    ];
+                    self.conn
+                        .change_property32(
+                            PropMode::REPLACE,
+                            request.requestor,
+                            property,
+                            AtomEnum::ATOM,
+                            &targets,
+                        )
+                        .map_err(|e| {
+                            Error::Write(format!("could not answer a TARGETS request: {e}"))
+                        })?;
+                }
+                Owned::Image(_) => {
+                    let targets = [self.atoms.TARGETS, self.atoms.IMAGE_PNG];
+                    self.conn
+                        .change_property32(
+                            PropMode::REPLACE,
+                            request.requestor,
+                            property,
+                            AtomEnum::ATOM,
+                            &targets,
+                        )
+                        .map_err(|e| {
+                            Error::Write(format!("could not answer a TARGETS request: {e}"))
+                        })?;
+                }
+            }
+        } else if let (Owned::Text(text), true) = (
+            owned,
+            request.target == self.atoms.UTF8_STRING
+                || request.target == self.atoms.TEXT_PLAIN_UTF8
+                || request.target == self.atoms.TEXT_PLAIN
+                || request.target == self.atoms.STRING
+                || request.target == self.atoms.TEXT,
+        ) {
             self.conn
                 .change_property8(
                     PropMode::REPLACE,
@@ -452,6 +535,16 @@ impl X11Clipboard {
                     text.as_bytes(),
                 )
                 .map_err(|e| Error::Write(format!("could not answer a text request: {e}")))?;
+        } else if let (Owned::Image(png), true) = (owned, request.target == self.atoms.IMAGE_PNG) {
+            self.conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    request.target,
+                    png,
+                )
+                .map_err(|e| Error::Write(format!("could not answer an image request: {e}")))?;
         } else {
             self.refuse(request)?;
             return Ok(());
@@ -537,7 +630,7 @@ impl ClipboardWatcher for X11Clipboard {
             if let Some(since) = pending_since {
                 if since.elapsed() >= DEBOUNCE {
                     pending_since = None;
-                    match self.read_text() {
+                    match self.read_clipboard() {
                         Ok(Some(event)) => sink(event),
                         // Either there was no text on the clipboard, or the read failed because
                         // the owner exited between the notification and our request. Both are
@@ -591,7 +684,32 @@ mod tests {
             .set_text("asli round trip")
             .expect("takes ownership");
         assert_eq!(receipt.seq, None, "X11 has no sequence counter");
-        assert_eq!(clipboard.owned.as_deref(), Some("asli round trip"));
+        assert!(matches!(clipboard.owned, Some(Owned::Text(ref t)) if t == "asli round trip"));
+    }
+
+    #[test]
+    fn owns_an_image_and_serves_it_as_png() {
+        if !display_available() {
+            eprintln!("skipping: no DISPLAY");
+            return;
+        }
+        let mut clipboard = X11Clipboard::connect().expect("connects");
+        let mut png = crate::image_bytes::PNG_MAGIC.to_vec();
+        png.extend_from_slice(b"IHDR stand in for a real image");
+        clipboard.set_image(&png).expect("takes ownership");
+        assert!(matches!(clipboard.owned, Some(Owned::Image(ref bytes)) if bytes == &png));
+    }
+
+    #[test]
+    fn a_non_png_is_refused_before_the_selection_is_taken() {
+        if !display_available() {
+            eprintln!("skipping: no DISPLAY");
+            return;
+        }
+        let mut clipboard = X11Clipboard::connect().expect("connects");
+        // Putting a mislabelled payload on the clipboard would fail on the other side rather than
+        // here, which is the worse place to find out.
+        assert!(clipboard.set_image(b"BM this is a bitmap").is_err());
     }
 
     #[test]
