@@ -1,6 +1,6 @@
 # Threat model
 
-Status: this describes the approved design and the code that now implements it. Linux is verified on real hardware for text and images; the Windows and macOS backends compile but have never executed. Where a control is designed but not built, it is marked "not yet implemented", and two such controls remain, both listed below.
+Status: this describes the approved design and the code that now implements it. Linux is verified on real hardware for text and images; the Windows and macOS backends compile but have never executed. Where a control is designed but not built, the table says so in the row itself rather than in a summary that can drift out of date.
 
 Related reading: `docs/PROTOCOL.md` for the wire format, the architecture notes for the crypto
 spec, `SECURITY.md` for how to report a problem.
