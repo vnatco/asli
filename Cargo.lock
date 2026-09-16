@@ -159,6 +159,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asli-history"
+version = "0.1.0"
+dependencies = [
+ "asli-crypto",
+ "hkdf",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
 name = "asli-net"
 version = "0.1.0"
 dependencies = [

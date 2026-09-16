@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/asli-app", "crates/asli-clipboard", "crates/asli-core", "crates/asli-crypto", "crates/asli-net"]
+members = ["crates/asli-app", "crates/asli-clipboard", "crates/asli-core", "crates/asli-crypto", "crates/asli-history", "crates/asli-net"]
 
 [workspace.package]
 version = "0.1.0"
