@@ -1,8 +1,6 @@
 # Asli wire protocol, version 1
 
-Status: **normative specification, not yet implemented.** No client or relay code exists at the time
-of writing. This document defines what the implementation must do, and it is the reference an
-independent implementer needs in order to build an interoperable client or relay without reading the
+Status: **normative specification, implemented.** The Rust client and the Node relay both speak this protocol, and the two are checked against each other by shared test vectors in `testdata/vectors.json`. Text and images have been exercised against a live relay.
 Rust source.
 
 Protocol version: `1`. Suite identifier: `asli-v1`.

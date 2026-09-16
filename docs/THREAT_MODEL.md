@@ -1,10 +1,6 @@
 # Threat model
 
-Status: this describes the approved design. The project is at M0 and the client
-is not implemented yet, so nothing in this document should be read as a statement about shipping
-code. Where a control is designed but not built, it is marked "not yet implemented". This file is
-updated as code lands, and it is wrong for it to describe anything aspirational once there is a
-release.
+Status: this describes the approved design and the code that now implements it. Linux is verified on real hardware for text and images; the Windows and macOS backends compile but have never executed. Where a control is designed but not built, it is marked "not yet implemented", and two such controls remain, both listed below.
 
 Related reading: `docs/PROTOCOL.md` for the wire format, the architecture notes for the crypto
 spec, `SECURITY.md` for how to report a problem.
