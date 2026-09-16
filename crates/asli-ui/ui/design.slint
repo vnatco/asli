@@ -68,6 +68,9 @@ export component Body inherits Text {
 
 // A panel. Everything that groups controls sits on one of these.
 export component Card inherits Rectangle {
+    // A card is as tall as what it holds. Rectangle stretches by default, so a card sharing a
+    // column with a spacer took half the leftover height and left a void under its own contents.
+    vertical-stretch: 0;
     background: Palette.surface;
     border-radius: Metrics.radius;
     border-width: 1px;
@@ -84,10 +87,15 @@ export component Button inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> danger: false;
     in property <bool> enabled: true;
+    // Space either side of the label. A button is the label plus this, never the label alone.
+    in property <length> h-pad: 18px;
     callback clicked();
 
     height: Metrics.control-height;
-    min-width: 104px;
+    // Measured from the label, because a Rectangle takes no width from its children. Binding a
+    // flat minimum instead is what glued "Copy join string" to both edges of its own button: the
+    // label was wider than the minimum, so the box stayed at the minimum and the text filled it.
+    min-width: max(104px, label.preferred-width + root.h-pad * 2);
     border-radius: Metrics.radius-small;
 
     background: !enabled
