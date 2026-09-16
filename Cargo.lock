@@ -127,7 +127,7 @@ dependencies = [
 name = "asli-core"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -140,7 +140,7 @@ dependencies = [
  "hkdf 0.12.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "zeroize",
 ]
 
