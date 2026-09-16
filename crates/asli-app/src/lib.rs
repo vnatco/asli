@@ -23,9 +23,14 @@
 //!
 //! # No terminal in the onboarding path
 //!
-//! Joining is a tray menu item that prompts with the desktop's own dialog program, because the
-//! promise is "paste one string on the other machine" and an instruction to open a shell is not
-//! that. See [`dialog`]. The command line equivalents remain for people who prefer them.
+//! Joining is a screen in [`window`], because the promise is "paste one string on the other
+//! machine" and an instruction to open a shell is not that. The command line equivalents remain
+//! for people who prefer them.
+//!
+//! Three earlier mechanisms are gone. The join string was written to an HTML file and opened in a
+//! browser, joining was a prompt from the desktop's own dialog program, and settings was a JSON
+//! file handed to a text editor. They were three different applications appearing on screen, and
+//! the first of them wrote the account key to disk.
 
 #![forbid(unsafe_code)]
 
@@ -33,12 +38,12 @@ pub mod autostart;
 pub mod clipboard_io;
 pub mod config;
 pub mod daemon;
-pub mod dialog;
 pub mod error;
+pub mod history_store;
 pub mod notify;
 pub mod qr;
-pub mod reveal;
 pub mod secrets;
 pub mod tray;
+pub mod window;
 
 pub use error::{Error, Result};

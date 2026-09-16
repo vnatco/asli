@@ -1,0 +1,30 @@
+[package]
+name = "asli-ui"
+description = "The compiled Asli window markup, kept apart so every hand written crate can forbid unsafe code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Slint requires this. The library crates stay at the workspace floor of 1.82; only the two crates
+# that draw a window need the higher one.
+rust-version = "1.92"
+
+# Deliberately not `[lints] workspace = true`. This crate is one line of hand written code and
+# several thousand generated ones, and the workspace lint table would judge the generated ones.
+# Everything written by a person lives in the other crates, where those lints do apply.
+
+[dependencies]
+# Default features would pull Qt and an OpenGL renderer; both are off. What is left is winit for
+# the platform window and Slint's own software renderer, so the application draws every pixel
+# itself and never requires a GPU or a GL context.
+slint = { version = "1.18.0", default-features = false, features = [
+    "compat-1-18",
+    "std",
+    "backend-winit",
+    "renderer-software",
+] }
+
+[build-dependencies]
+# Compiles ui/*.slint into Rust at build time, so a mistake in the markup fails the build rather
+# than producing a blank window on somebody else's machine.
+slint-build = "1.18.0"

@@ -40,9 +40,9 @@ enum Command {
         /// The token from `asli create`, starting with `asli1_`.
         token: String,
     },
-    /// Run the daemon in the foreground, with no tray.
+    /// Run the daemon in the foreground, with no tray and no window.
     Run,
-    /// Run the daemon with a tray icon. This is what launching at login starts.
+    /// Run the daemon with a tray icon and a window. This is what launching at login starts.
     Tray,
     /// Turn starting at login on or off.
     Autostart {
@@ -57,12 +57,6 @@ enum Command {
     Show,
 }
 
-/// How long the join token stays on the clipboard before it clears itself.
-///
-/// Long enough to paste into another machine's prompt, short enough that it is not still sitting
-/// there an hour later.
-const TOKEN_CLEAR_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
-
 fn main() {
     if let Err(err) = dispatch() {
         eprintln!("error: {err}");
@@ -73,11 +67,6 @@ fn main() {
 fn dispatch() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
-
-    // Before anything else. The join page holds the account key in plain text, and its removal
-    // timer is a thread that dies with the process, so a restart used to orphan the file
-    // indefinitely. Sweeping on the way in is the part that survives a kill or a reboot.
-    asli_app::reveal::sweep(&paths.cache_dir());
 
     match cli.command {
         Command::Create { force } => create(&paths, force),
@@ -114,14 +103,14 @@ fn join(paths: &Paths, raw: &str) -> Result<()> {
     let identity = Identity::from_secret(&secret);
     let store = secrets::store(paths, identity.secret())?;
     let config = paths.load_config()?;
-    // Kept for people who prefer a shell. The tray menu is the path that does not require one.
+    // Kept for people who prefer a shell. The window is the path that does not require one.
 
     println!("Joined.");
     println!("Key stored in: {}", store.describe());
     println!("Room id:       {}", identity.room_id());
     println!("Relay:         {}", config.relay_url);
     println!();
-    println!("Run 'asli run' here and on your other devices.");
+    println!("Run 'asli tray' here and on your other devices.");
     Ok(())
 }
 
@@ -139,7 +128,7 @@ fn present_token(secret: &[u8; 32]) -> Result<()> {
     println!();
     println!("Scan this on your other devices, or paste the token with 'asli join <token>'.");
     println!("Anyone who has it has your clipboard. Do not send it over chat or email.");
-    println!("Scanning the QR is safest. Copying it from the tray marks it so clipboard");
+    println!("Scanning the QR is safest. Copying it from the window marks it so clipboard");
     println!("history and cloud sync skip it, and clears it after 90 seconds, but any");
     println!("software that ignores those markers can still read it.");
     Ok(())
@@ -153,6 +142,10 @@ fn status(paths: &Paths) -> Result<()> {
     println!("Relay:         {}", config.relay_url);
     println!("Device id:     {}", config.device_id);
     println!("Size cap:      {} bytes", config.max_content_bytes);
+    println!(
+        "History:       {}",
+        if config.keep_history { "on" } else { "off" }
+    );
     println!("Next sequence: {}", paths.load_state()?.seq);
 
     if let Some((secret, store)) = &account {
@@ -184,7 +177,7 @@ fn status(paths: &Paths) -> Result<()> {
     }
 
     println!();
-    println!("Live connection state is reported by the running daemon. Start it with 'asli run'.");
+    println!("Live connection state is reported by the running daemon. Start it with 'asli tray'.");
     Ok(())
 }
 
@@ -231,24 +224,16 @@ fn autostart_command(paths: &Paths, state: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Runs the daemon, with a tray and a window or without either.
+///
+/// # Which thread runs what
+///
+/// With a tray, the window owns the main thread. Every platform requires a user interface event
+/// loop to run there, so the daemon moves to a worker with its own runtime and the tray to another
+/// of its own. Without a tray this is a headless daemon and the main thread runs it directly, as
+/// it always did.
 fn run(paths: &Paths, with_tray: bool) -> Result<()> {
     let config = paths.load_config()?;
-
-    // A tray launched with no account must not simply exit: that is indistinguishable from a
-    // crash, and the second machine has just been installed precisely in order to join.
-    #[cfg(target_os = "linux")]
-    if with_tray && secrets::load(paths)?.is_none() {
-        onboard(paths)?;
-    }
-
-    let (secret, store) = secrets::load(paths)?.ok_or(Error::NoAccount)?;
-    let identity = Identity::from_secret(&secret);
-
-    eprintln!(
-        "{}",
-        log_line("starting", &format!("room {}", identity.room_id()))
-    );
-    eprintln!("{}", log_line("key_store", store.describe()));
 
     // The stored preference is applied on every start, so an entry deleted by hand comes back and
     // one turned off stays off. Failure is reported and not fatal: a machine that cannot write an
@@ -260,195 +245,154 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         use asli_app::clipboard_io::ClipboardIo as _;
+        use asli_app::window::{self, MemoryHistory, Screen, SharedHistory};
 
         let (clipboard, observed) = asli_app::clipboard_io::start()?;
         eprintln!("{}", log_line("clipboard", &clipboard.describe()));
 
         let controls = Controls::default();
         let io: Arc<dyn asli_app::clipboard_io::ClipboardIo> = Arc::new(clipboard);
+        let account = secrets::load(paths)?;
 
-        if with_tray {
-            start_tray(paths, &config, &controls, &io)?;
+        // A tray with no account must not simply exit: that is indistinguishable from a crash,
+        // and the second machine has just been installed precisely in order to join. Without a
+        // tray there is nowhere to show first run, so the old refusal still stands.
+        if !with_tray && account.is_none() {
+            return Err(Error::NoAccount);
         }
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(Error::Io)?;
+        if let Some((_, store)) = &account {
+            eprintln!("{}", log_line("key_store", store.describe()));
+        }
 
-        runtime.block_on(async {
-            tokio::select! {
-                result = daemon::run(paths, &config, identity, Arc::clone(&io), observed, controls.clone()) => result,
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("{}", log_line("stopping", "interrupted"));
-                    Ok(())
+        // The encrypted store when there is an account key to seal it with, and a list that lives
+        // only as long as the process when there is not. First run has no key yet, and a history
+        // written now that nothing could decrypt later is worse than no history at all.
+        let history: SharedHistory = match &account {
+            Some((secret, _)) => match asli_app::history_store::open(paths, secret, &config) {
+                Ok(store) => Arc::new(std::sync::Mutex::new(store)),
+                Err(err) => {
+                    // Never fatal. Syncing is the product and remembering is the convenience, so
+                    // a history that will not open costs the history and not the daemon.
+                    eprintln!("{}", log_line("history_failed", &err.to_string()));
+                    Arc::new(std::sync::Mutex::new(MemoryHistory::new(
+                        config.keep_history,
+                        config.history_entries,
+                    )))
                 }
+            },
+            None => Arc::new(std::sync::Mutex::new(MemoryHistory::new(
+                config.keep_history,
+                config.history_entries,
+            ))),
+        };
+
+        let identity = account.map(|(secret, _)| Identity::from_secret(&secret));
+        if let Some(identity) = &identity {
+            eprintln!(
+                "{}",
+                log_line("starting", &format!("room {}", identity.room_id()))
+            );
+        }
+
+        if !with_tray {
+            let Some(identity) = identity else {
+                return Err(Error::NoAccount);
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(Error::Io)?;
+
+            return runtime.block_on(async {
+                tokio::select! {
+                    result = daemon::run(paths, &config, identity, Arc::clone(&io), observed, controls.clone(), Arc::clone(&history)) => result,
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("{}", log_line("stopping", "interrupted"));
+                        Ok(())
+                    }
+                }
+            });
+        }
+
+        window::install(window::Context {
+            paths: paths.clone(),
+            controls: controls.clone(),
+            io: Arc::clone(&io),
+            history: Arc::clone(&history),
+        })?;
+        start_tray(paths, &config, &controls, &io)?;
+
+        match identity {
+            Some(identity) => {
+                start_daemon(paths, &config, identity, &io, observed, &controls, &history)?;
             }
-        })
+            // Nothing to connect to yet, so the window opens on first run instead. The daemon
+            // starts on the next launch, which happens by itself once an account exists.
+            None => window::open(Screen::FirstRun),
+        }
+
+        // Blocks until the window asks to quit. Not until the last window closes: the daemon
+        // outlives every window, and closing one means "go away", never "stop syncing".
+        window::run_event_loop()
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (config, identity, with_tray);
+        let _ = (config, with_tray);
         eprintln!("The daemon supports Linux only so far.");
         Ok(())
     }
 }
 
-/// Joins an account from the tray, with no terminal anywhere in the path.
-///
-/// This is the other half of the product's central promise. Creating an account produces one
-/// string; until this existed the only way to use that string on the second machine was
-/// `asli join <token>` in a shell, which is not an onboarding story for a tray application.
-///
-/// Joining replaces the account on this device and abandons the old room, so it confirms first and
-/// says what is lost. Every failure is shown in a dialog, because a person who clicked a menu item
-/// cannot see a log line.
+/// Runs the daemon on a worker thread, leaving the main one for the window.
 #[cfg(target_os = "linux")]
-fn join_from_tray(paths: &Paths) {
-    use asli_app::dialog;
+fn start_daemon(
+    paths: &Paths,
+    config: &Config,
+    identity: Identity,
+    io: &Arc<dyn asli_app::clipboard_io::ClipboardIo>,
+    observed: std::sync::mpsc::Receiver<asli_app::clipboard_io::Observed>,
+    controls: &Controls,
+    history: &asli_app::window::SharedHistory,
+) -> Result<()> {
+    let paths = paths.clone();
+    let config = config.clone();
+    let io = Arc::clone(io);
+    let controls = controls.clone();
+    let history = Arc::clone(history);
 
-    let Some(tool) = dialog::detect() else {
-        eprintln!("{}", log_line("join_failed", "no dialog program"));
-        notify::join_failed(&dialog::missing_advice());
-        return;
-    };
-
-    // Replacing an existing account is destructive and irreversible: the old room is abandoned and
-    // every other device still on the old token stops syncing with this one.
-    if secrets::load(paths).ok().flatten().is_some()
-        && !dialog::confirm(
-            tool,
-            "Replace this account?",
-            "This device already has an account.\n\nJoining another one replaces it. Any device \
-             still using the current join string will stop syncing with this machine, and the \
-             current account cannot be recovered unless you saved its join string somewhere.",
-            "Replace it",
-            "Cancel",
-        )
-    {
-        return;
-    }
-
-    let Some(raw) = dialog::ask_text(
-        tool,
-        "Join another account",
-        "Paste the join string from your other device.\n\nIt starts with asli1_ and is shown \
-         there under Show join string.",
-    ) else {
-        return;
-    };
-
-    match join_with_token(paths, &raw) {
-        Ok(room_id) => {
-            eprintln!("{}", log_line("joined", &format!("room {room_id}")));
-            notify::joined(&room_id);
-            restart_self();
-        }
-        Err(err) => {
-            // The parser distinguishes a wrong prefix from a bad checksum from a truncated string,
-            // so the person is told which mistake they made rather than that something failed.
-            let reason = err.to_string();
-            eprintln!("{}", log_line("join_failed", &reason));
-            dialog::error(tool, "Could not join", &reason);
-            notify::join_failed(&reason);
-        }
-    }
-}
-
-/// Stores the account behind a token, returning the room it belongs to.
-///
-/// Shared by the tray flow and the command line one, so both validate identically.
-fn join_with_token(paths: &Paths, raw: &str) -> Result<String> {
-    let secret = token::parse(raw)?;
-    let identity = Identity::from_secret(&secret);
-    secrets::store(paths, identity.secret())?;
-    Ok(identity.room_id())
-}
-
-/// Restarts this process so the daemon picks up the account that was just stored.
-///
-/// `daemon::run` takes its identity by value and the connection holds a session built from it, so
-/// there is no way to swap accounts on a live connection. Rather than pretend otherwise, or leave
-/// the person wondering why nothing happened until they restart it themselves, the process
-/// replaces itself. The notification says the connection is restarting for exactly this reason.
-#[cfg(target_os = "linux")]
-fn restart_self() {
-    use std::os::unix::process::CommandExt as _;
-
-    let Ok(exe) = std::env::current_exe() else {
-        eprintln!(
-            "{}",
-            log_line("restart_failed", "could not find this executable")
-        );
-        return;
-    };
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    eprintln!("{}", log_line("restarting", "onto the account just joined"));
-    // exec replaces the image, so nothing after this runs unless it failed.
-    let err = std::process::Command::new(exe).args(args).exec();
-    eprintln!("{}", log_line("restart_failed", &err.to_string()));
-}
-
-/// Offers create or join when the tray starts with no account.
-///
-/// Returns true when an account now exists. A tray that starts with no account and simply exits
-/// looks like a crash, and the machine that most needs this dialog is the second one, where the
-/// person has just installed the application in order to join.
-#[cfg(target_os = "linux")]
-fn onboard(paths: &Paths) -> Result<bool> {
-    use asli_app::dialog::{self, Choice};
-
-    let Some(tool) = dialog::detect() else {
-        return Ok(false);
-    };
-
-    match dialog::choose(
-        tool,
-        "Welcome to Asli",
-        "No account on this device yet.\n\nCreate a new one, or join an account you already have \
-         on another machine.",
-        "Create new",
-        "Join existing",
-    ) {
-        Choice::Primary => {
-            let identity = Identity::generate()?;
-            secrets::store(paths, identity.secret())?;
-            let token = token::encode(identity.secret());
-            // The page the other machine will be looking at, shown immediately rather than after a
-            // separate trip through the menu.
-            let _ = asli_app::reveal::show_token(token.as_str(), &paths.cache_dir());
-            dialog::info(
-                tool,
-                "Account created",
-                "Your join string is on screen. Open Asli on your other device and choose \
-                 Join another account, then paste it there.",
-            );
-            Ok(true)
-        }
-        Choice::Secondary => {
-            let Some(raw) = dialog::ask_text(
-                tool,
-                "Join another account",
-                "Paste the join string from your other device.\n\nIt starts with asli1_ and is \
-                 shown there under Show join string.",
-            ) else {
-                return Ok(false);
-            };
-            match join_with_token(paths, &raw) {
-                Ok(room_id) => {
-                    eprintln!("{}", log_line("joined", &format!("room {room_id}")));
-                    Ok(true)
-                }
+    std::thread::Builder::new()
+        .name("asli-daemon".to_owned())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
                 Err(err) => {
-                    dialog::error(tool, "Could not join", &err.to_string());
-                    Ok(false)
+                    eprintln!("{}", log_line("daemon_failed", &err.to_string()));
+                    return;
                 }
+            };
+
+            let result = runtime.block_on(async {
+                tokio::select! {
+                    result = daemon::run(&paths, &config, identity, io, observed, controls, history) => result,
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("{}", log_line("stopping", "interrupted"));
+                        Ok(())
+                    }
+                }
+            });
+
+            if let Err(err) = result {
+                eprintln!("{}", log_line("daemon_failed", &err.to_string()));
             }
-        }
-        Choice::Cancelled => Ok(false),
-    }
+            // Whether it stopped cleanly or not, there is nothing left to sync, so the window
+            // should not sit there implying otherwise.
+            asli_app::window::quit();
+        })
+        .map_err(Error::Io)?;
+
+    Ok(())
 }
 
 /// Applies the stored autostart preference, if the platform supports it.
@@ -542,6 +486,10 @@ fn start_tray(
 }
 
 /// Acts on a tray command. Returns true when the application should exit.
+///
+/// Most items now open a screen rather than doing something of their own. That is the point of
+/// having a window: a menu item that performs an invisible action is indistinguishable from one
+/// that does nothing, which is exactly how these behaved before.
 #[cfg(target_os = "linux")]
 fn handle_command(
     command: tray::Command,
@@ -551,6 +499,11 @@ fn handle_command(
     io: &dyn asli_app::clipboard_io::ClipboardIo,
 ) -> bool {
     use std::sync::atomic::Ordering;
+
+    if let Some(screen) = asli_app::window::screen_for(command) {
+        asli_app::window::open(screen);
+        return false;
+    }
 
     match command {
         tray::Command::Pause => {
@@ -583,62 +536,6 @@ fn handle_command(
                 notify::retained_unavailable();
             }
         }
-        tray::Command::ShowToken => match secrets::load(paths) {
-            Ok(Some((secret, _))) => {
-                let token = asli_crypto::token::encode(&secret);
-
-                // A page on screen, not a QR printed into a log file. A tray menu has no terminal
-                // attached, so the previous version of this was invisible to the person clicking
-                // it, which is indistinguishable from a button that does nothing.
-                match asli_app::reveal::show_token(token.as_str(), &paths.cache_dir()) {
-                    Ok(_) => {
-                        eprintln!("{}", log_line("show_token", "opened the join page"));
-                        notify::token_shown();
-                    }
-                    Err(err) => {
-                        eprintln!("{}", log_line("show_token_failed", &err.to_string()));
-                        notify::action_failed("Could not show the join string", &err.to_string());
-                    }
-                }
-
-                // Copying the key is a deliberate action, so it is marked: out of clipboard
-                // history, out of cloud sync, ignored by other clipboard managers. It clears
-                // itself shortly afterwards, but only if it is still the thing on the clipboard.
-                match io.write_text_concealed(token.as_str(), TOKEN_CLEAR_AFTER) {
-                    Ok(()) => {
-                        eprintln!(
-                            "{}",
-                            log_line("token_copied", "marked as concealed, clears in 90 seconds")
-                        );
-                        notify::token_copied(TOKEN_CLEAR_AFTER.as_secs());
-                    }
-                    Err(err) => {
-                        eprintln!("{}", log_line("token_copy_failed", &err.to_string()));
-                        notify::token_copy_failed(&err.to_string());
-                    }
-                }
-            }
-            Ok(None) => {
-                eprintln!(
-                    "{}",
-                    log_line("show_token_failed", "no account on this device")
-                );
-                notify::action_failed("No account on this device", "Run 'asli create' first");
-            }
-            Err(err) => {
-                eprintln!("{}", log_line("show_token_failed", &err.to_string()));
-                notify::action_failed("Could not read the account", &err.to_string());
-            }
-        },
-        tray::Command::Join => {
-            join_from_tray(paths);
-        }
-        tray::Command::Settings => {
-            if let Err(err) = tray::open_settings(paths) {
-                eprintln!("{}", log_line("settings_failed", &err.to_string()));
-                notify::action_failed("Could not open settings", &err.to_string());
-            }
-        }
         tray::Command::Diagnostics => {
             let text = tray::diagnostics(config, &controls.status.get(), paths);
             // Diagnostics go onto the clipboard so they can be pasted into a bug report, which is
@@ -657,6 +554,12 @@ fn handle_command(
             // path into its select loop yet, so this exits directly.
             std::process::exit(0);
         }
+        // Handled above by opening a screen.
+        tray::Command::ShowToken
+        | tray::Command::Join
+        | tray::Command::History
+        | tray::Command::Status
+        | tray::Command::Settings => {}
     }
     false
 }

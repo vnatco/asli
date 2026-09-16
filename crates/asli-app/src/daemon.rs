@@ -32,6 +32,7 @@ use crate::config::{Config, Paths, State};
 use crate::error::Result;
 use crate::notify;
 use crate::tray::StatusHandle;
+use crate::window::{HistoryContent, SharedHistory};
 
 /// Everything the tray shares with the daemon.
 ///
@@ -245,6 +246,23 @@ const fn is_image(event: &ClientEvent) -> bool {
     matches!(event, ClientEvent::Image { .. })
 }
 
+/// Records a clip that reached the clipboard, so it can be put back later.
+///
+/// A retained clip is deliberately not recorded here. It was not written to the clipboard, only
+/// offered, and a history holding something the person never received would offer to restore a
+/// clip they have never seen.
+fn record(history: &SharedHistory, event: &ClientEvent, now_ms: u64) {
+    let content = match event {
+        ClientEvent::Clip(clip) if !clip.retained => HistoryContent::Text(clip.text.clone()),
+        ClientEvent::Image { png, .. } => HistoryContent::ImagePng(png.clone()),
+        _ => return,
+    };
+
+    if let Ok(mut history) = history.lock() {
+        history.record(content, false, now_ms);
+    }
+}
+
 /// Handles one event from a live connection.
 ///
 /// Extracted from the connection loop because judging an event is a different job from deciding
@@ -256,6 +274,7 @@ fn on_live_event(
     status: &mut Status,
     connected_once: &Arc<AtomicBool>,
     notifications: bool,
+    history: &SharedHistory,
 ) {
     let now = client::now_ms();
 
@@ -274,6 +293,10 @@ fn on_live_event(
     }
 
     if on_client_event(event, io, status, now) {
+        // Recorded only when the clip actually reached the clipboard. A write that failed is not
+        // history, and listing it would offer to restore something that was never there.
+        record(history, event, now);
+
         if is_image(event) {
             notify::image_received(notifications, clip_len(event));
         } else {
@@ -366,6 +389,7 @@ pub async fn run(
     io: Arc<dyn ClipboardIo>,
     observed: Receiver<Observed>,
     controls: Controls,
+    history: SharedHistory,
 ) -> Result<()> {
     let device_id = config.device_id_bytes()?;
     let seq = reserve_sequence(paths)?;
@@ -381,6 +405,7 @@ pub async fn run(
         local_tx,
         config.max_content_bytes,
         Arc::clone(&controls.paused),
+        Arc::clone(&history),
     )?;
 
     run_connection_loop(
@@ -393,7 +418,10 @@ pub async fn run(
             rx: &mut local_rx,
             tx_for_retained: local_tx_for_retained,
         },
-        notifications,
+        Sinks {
+            notifications,
+            history,
+        },
     )
     .await
 }
@@ -408,6 +436,7 @@ fn spawn_clipboard_bridge(
     local_tx: mpsc::Sender<LocalEvent>,
     cap: usize,
     paused: Arc<AtomicBool>,
+    history: SharedHistory,
 ) -> Result<()> {
     std::thread::Builder::new()
         .name("asli-clip-bridge".to_owned())
@@ -435,6 +464,15 @@ fn spawn_clipboard_bridge(
                             continue;
                         }
                         let bytes = text.len();
+                        // Recorded before it is sent, because the send consumes it. What this
+                        // device copies belongs in its own history just as much as what arrives.
+                        if let Ok(mut history) = history.lock() {
+                            history.record(
+                                HistoryContent::Text(text.clone()),
+                                false,
+                                client::now_ms(),
+                            );
+                        }
                         if local_tx.blocking_send(LocalEvent::Text(text)).is_err() {
                             return;
                         }
@@ -456,12 +494,21 @@ fn spawn_clipboard_bridge(
                             continue;
                         }
                         let bytes = png.len();
+                        if let Ok(mut history) = history.lock() {
+                            history.record(
+                                HistoryContent::ImagePng(png.clone()),
+                                false,
+                                client::now_ms(),
+                            );
+                        }
                         if local_tx.blocking_send(LocalEvent::Image(png)).is_err() {
                             return;
                         }
                         eprintln!("{}", log_line("image_sent", &format!("{bytes} bytes")));
                     }
                     Observed::Sensitive => {
+                        // Never recorded, and there is nothing to record: the watcher does not
+                        // hand over the content of a clip the source marked as a password.
                         eprintln!(
                             "{}",
                             log_line(
@@ -490,6 +537,17 @@ struct LocalChannel<'a> {
     rx: &'a mut mpsc::Receiver<LocalEvent>,
     /// Used by the retained pump, which raises a request while a connection is live.
     tx_for_retained: mpsc::Sender<LocalEvent>,
+}
+
+/// Where the connection loop reports, beyond the clipboard itself.
+///
+/// The two travel together because they are the same decision made twice: what happens to a clip
+/// once it has arrived, beyond being pasted. One tells the person, the other remembers it.
+struct Sinks {
+    /// Whether an arriving clip raises a notification.
+    notifications: bool,
+    /// Where arriving clips are recorded so they can be put back later.
+    history: SharedHistory,
 }
 
 /// Watches for a retained fetch raised by the tray and puts it on the local queue.
@@ -524,12 +582,16 @@ async fn run_connection_loop(
     controls: Controls,
     io: Arc<dyn ClipboardIo>,
     local: LocalChannel<'_>,
-    notifications: bool,
+    sinks: Sinks,
 ) -> Result<()> {
     let LocalChannel {
         rx: local_rx,
         tx_for_retained: local_tx_for_retained,
     } = local;
+    let Sinks {
+        notifications,
+        history,
+    } = sinks;
     let mut backoff = Backoff::new();
     let mut status = Status {
         state: "Connecting".to_owned(),
@@ -583,6 +645,7 @@ async fn run_connection_loop(
                 &mut status,
                 &connected_once,
                 notifications,
+                &history,
             );
         })
         .await;

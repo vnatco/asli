@@ -46,6 +46,26 @@ pub struct Config {
     /// Stable for the life of the install. It identifies the device to the other devices in the
     /// room, inside the ciphertext, and never to the relay.
     pub device_id: String,
+    /// Whether to keep a local history of what was copied.
+    ///
+    /// Defaulted rather than required, because this field arrived after the first release and a
+    /// configuration written before it must still load. The same applies to the field below.
+    #[serde(default = "default_keep_history")]
+    pub keep_history: bool,
+    /// How many history entries to keep, oldest dropped first.
+    #[serde(default = "default_history_entries")]
+    pub history_entries: usize,
+}
+
+/// History is on by default, which is what every comparable tool does and what makes the feature
+/// discoverable. It records nothing a password manager marked as concealed.
+fn default_keep_history() -> bool {
+    true
+}
+
+/// A hundred entries: enough to find yesterday's copy, small enough to stay cheap.
+fn default_history_entries() -> usize {
+    100
 }
 
 impl Config {
@@ -62,6 +82,8 @@ impl Config {
             notifications: false,
             autostart: true,
             device_id: hex(&device_id),
+            keep_history: default_keep_history(),
+            history_entries: default_history_entries(),
         })
     }
 

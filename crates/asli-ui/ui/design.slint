@@ -1,0 +1,459 @@
+// The whole look of Asli, built from primitives.
+//
+// Nothing here comes from a widget library. Slint ships a std-widgets set that draws native
+// looking buttons and checkboxes, and this file deliberately does not import it: a tray utility
+// that appears on three desktops would otherwise look like three different applications, and
+// none of them like ours. Everything below is a Rectangle, a Text, a TouchArea or a TextInput,
+// so the dropdown, the switch and the field are ours to shape.
+//
+// Two rules hold this together. Colour never carries meaning on its own, because a state that
+// reads only as a hue disappears for anyone who cannot separate those hues, so every state also
+// changes a shape, a border or a label. And every interactive element animates on a single
+// shared duration, because a control that moves at its own speed reads as a different control.
+
+// The palette. One switch flips the whole application between dark and light.
+export global Palette {
+    in-out property <bool> dark: true;
+
+    out property <color> bg: dark ? #0f1115 : #f5f6f8;
+    out property <color> surface: dark ? #171a21 : #ffffff;
+    out property <color> raised: dark ? #1e222b : #eceff4;
+    out property <color> line: dark ? #2a2f3a : #dde1e8;
+    out property <color> line-strong: dark ? #3a414f : #c6ccd8;
+
+    out property <color> text: dark ? #e9ecf1 : #11141a;
+    out property <color> text-dim: dark ? #99a1b0 : #5a6270;
+    out property <color> text-faint: dark ? #6a7280 : #8b93a1;
+
+    out property <color> accent: #4f8cff;
+    out property <color> accent-deep: #2f6be0;
+    out property <color> on-accent: #ffffff;
+
+    out property <color> good: #3ecf8e;
+    out property <color> warn: #f0a33c;
+    out property <color> bad: #f2585b;
+
+    // A focus ring that is visible on both grounds without being the accent, so focus and
+    // selection never look like the same thing.
+    out property <color> focus: dark ? #7aa7ff : #1f5ed8;
+}
+
+// Shared measurements, so spacing is a decision made once.
+export global Metrics {
+    out property <length> gap: 12px;
+    out property <length> pad: 18px;
+    out property <length> radius: 10px;
+    out property <length> radius-small: 7px;
+    out property <length> control-height: 38px;
+    out property <duration> quick: 120ms;
+}
+
+// Section heading inside a screen.
+export component Heading inherits Text {
+    in property <bool> secondary: false;
+    color: secondary ? Palette.text-dim : Palette.text;
+    font-size: secondary ? 12px : 16px;
+    font-weight: secondary ? 500 : 700;
+    wrap: word-wrap;
+}
+
+// Ordinary body copy. Dim by default: the screens are mostly explanation, and explanation that
+// competes with the thing being explained is noise.
+export component Body inherits Text {
+    in property <bool> strong: false;
+    color: strong ? Palette.text : Palette.text-dim;
+    font-size: 13px;
+    wrap: word-wrap;
+}
+
+// A panel. Everything that groups controls sits on one of these.
+export component Card inherits Rectangle {
+    background: Palette.surface;
+    border-radius: Metrics.radius;
+    border-width: 1px;
+    border-color: Palette.line;
+}
+
+// The button.
+//
+// Three ranks rather than two. Primary is the one action a screen exists for, ghost is everything
+// reversible, and danger is the one that destroys an account. Danger is not merely a red primary:
+// it also carries a border, so it stays distinguishable when the red is not.
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: Metrics.control-height;
+    min-width: 104px;
+    border-radius: Metrics.radius-small;
+
+    background: !enabled
+        ? Palette.raised
+        : primary
+            ? (touch.pressed ? Palette.accent-deep : touch.has-hover ? Palette.accent.brighter(0.12) : Palette.accent)
+            : danger
+                ? (touch.pressed ? Palette.bad.darker(0.2) : touch.has-hover ? Palette.bad.brighter(0.1) : Palette.bad)
+                : (touch.pressed ? Palette.line : touch.has-hover ? Palette.raised.brighter(0.25) : Palette.raised);
+
+    border-width: (primary || danger) ? 0px : 1px;
+    border-color: Palette.line-strong;
+
+    animate background { duration: Metrics.quick; }
+
+    label := Text {
+        text: root.text;
+        color: !root.enabled
+            ? Palette.text-faint
+            : (root.primary || root.danger) ? Palette.on-accent : Palette.text;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+    }
+
+    // The focus ring is drawn outside the fill so it survives against a filled primary button.
+    ring := Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: focus-scope.has-focus ? 2px : 0px;
+        border-color: Palette.focus;
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (root.enabled && (event.text == " " || event.text == "\n")) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            focus-scope.focus();
+            root.clicked();
+        }
+    }
+}
+
+// The text field.
+//
+// Built around the TextInput primitive, which is the one part no application can draw for itself.
+// It carries its own inline state: a field that says what is wrong underneath itself is the only
+// way a person pasting a join string learns which mistake they made.
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in property <string> hint;
+    in property <bool> invalid: false;
+    in property <bool> valid: false;
+    in property <bool> monospace: false;
+    in-out property <string> text;
+    callback edited(string);
+    callback accepted(string);
+
+    height: Metrics.control-height;
+    border-radius: Metrics.radius-small;
+    background: Palette.bg;
+    border-width: input.has-focus ? 2px : 1px;
+    border-color: invalid
+        ? Palette.bad
+        : valid
+            ? Palette.good
+            : input.has-focus ? Palette.focus : Palette.line-strong;
+
+    animate border-color { duration: Metrics.quick; }
+
+    // Placeholder is a sibling rather than a property, because TextInput has none.
+    ghost := Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: 100%;
+        vertical-alignment: center;
+        text: root.placeholder;
+        color: Palette.text-faint;
+        font-size: 13px;
+        font-family: root.monospace ? "monospace" : "";
+        visible: root.text == "";
+    }
+
+    input := TextInput {
+        x: 12px;
+        width: parent.width - 24px;
+        height: 100%;
+        vertical-alignment: center;
+        text <=> root.text;
+        color: Palette.text;
+        font-size: 13px;
+        font-family: root.monospace ? "monospace" : "";
+        selection-background-color: Palette.accent;
+        selection-foreground-color: Palette.on-accent;
+        single-line: true;
+        wrap: no-wrap;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(self.text); }
+    }
+
+    public function focus-input() {
+        input.focus();
+    }
+}
+
+// The switch.
+//
+// A sliding track rather than a tick box, because these are all settings that take effect the
+// moment they change rather than on a later save. The knob moves, so the state is legible as
+// position and not only as colour.
+export component Switch inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    height: max(Metrics.control-height, layout.preferred-height);
+
+    layout := HorizontalLayout {
+        spacing: Metrics.gap;
+        alignment: space-between;
+
+        VerticalLayout {
+            spacing: 2px;
+            alignment: center;
+            Text {
+                text: root.text;
+                color: root.enabled ? Palette.text : Palette.text-faint;
+                font-size: 13px;
+                font-weight: 500;
+                wrap: word-wrap;
+            }
+            if root.detail != "": Text {
+                text: root.detail;
+                color: Palette.text-faint;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+
+        Rectangle {
+            width: 46px;
+            height: 26px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 13px;
+            background: !root.enabled
+                ? Palette.raised
+                : root.checked ? Palette.accent : Palette.line-strong;
+            border-width: track-focus.has-focus ? 2px : 0px;
+            border-color: Palette.focus;
+            animate background { duration: Metrics.quick; }
+
+            knob := Rectangle {
+                width: 20px;
+                height: 20px;
+                y: 3px;
+                x: root.checked ? parent.width - self.width - 3px : 3px;
+                border-radius: 10px;
+                background: Palette.on-accent;
+                animate x { duration: Metrics.quick; easing: ease-out; }
+            }
+
+            track-focus := FocusScope {
+                width: 0px;
+                height: 0px;
+                key-pressed(event) => {
+                    if (root.enabled && event.text == " ") {
+                        root.checked = !root.checked;
+                        root.toggled(root.checked);
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+
+            TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: root.enabled ? pointer : default;
+                clicked => {
+                    track-focus.focus();
+                    root.checked = !root.checked;
+                    root.toggled(root.checked);
+                }
+            }
+        }
+    }
+}
+
+// The dropdown.
+//
+// A PopupWindow holding rows we draw, rather than a native menu, so the list matches the rest of
+// the application on every desktop. The closed control shows a chevron that rotates when open,
+// which is the part a person uses to tell whether their click registered.
+export component Select inherits Rectangle {
+    in property <[string]> options;
+    in property <bool> enabled: true;
+    in-out property <int> current: 0;
+    callback changed(int);
+
+    height: Metrics.control-height;
+    border-radius: Metrics.radius-small;
+    background: touch.has-hover && enabled ? Palette.raised.brighter(0.2) : Palette.raised;
+    border-width: 1px;
+    border-color: Palette.line-strong;
+    animate background { duration: Metrics.quick; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+
+        Text {
+            text: root.current >= 0 && root.current < root.options.length
+                ? root.options[root.current]
+                : "";
+            color: root.enabled ? Palette.text : Palette.text-faint;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        // The chevron, drawn rather than imported, so there is no icon font to ship.
+        chevron := Path {
+            width: 10px;
+            height: 6px;
+            y: (parent.height - self.height) / 2;
+            stroke: Palette.text-dim;
+            stroke-width: 1.5px;
+            viewbox-width: 10;
+            viewbox-height: 6;
+            MoveTo { x: 0; y: 0; }
+            LineTo { x: 5; y: 5; }
+            LineTo { x: 10; y: 0; }
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Palette.surface;
+            border-radius: Metrics.radius-small;
+            border-width: 1px;
+            border-color: Palette.line-strong;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000066;
+            drop-shadow-offset-y: 6px;
+
+            VerticalLayout {
+                padding: 4px;
+                for option[index] in root.options: Rectangle {
+                    height: 32px;
+                    border-radius: 5px;
+                    background: row-touch.has-hover
+                        ? Palette.raised
+                        : index == root.current ? Palette.raised.darker(0.1) : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+
+                        Text {
+                            text: option;
+                            color: Palette.text;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        // The current row is marked with a dot as well as a background, so the
+                        // selection is not carried by a hue alone.
+                        Rectangle {
+                            width: 6px;
+                            height: 6px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 3px;
+                            background: Palette.accent;
+                            visible: index == root.current;
+                        }
+                    }
+
+                    row-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.current = index;
+                            root.changed(index);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { popup.show(); }
+    }
+}
+
+// A labelled row wrapping any control, so every settings line is spaced identically.
+export component Row inherits VerticalLayout {
+    in property <string> label;
+    in property <string> detail;
+    spacing: 6px;
+
+    if label != "": Text {
+        text: label;
+        color: Palette.text;
+        font-size: 13px;
+        font-weight: 500;
+    }
+
+    @children
+
+    if detail != "": Text {
+        text: detail;
+        color: Palette.text-faint;
+        font-size: 11px;
+        wrap: word-wrap;
+    }
+}
+
+// A state dot with a written label beside it, never a dot alone.
+export component StatusDot inherits HorizontalLayout {
+    in property <color> tint: Palette.good;
+    in property <string> text;
+    spacing: 8px;
+
+    Rectangle {
+        width: 9px;
+        height: 9px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 4.5px;
+        background: root.tint;
+    }
+
+    Text {
+        text: root.text;
+        color: Palette.text;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+}

@@ -44,6 +44,8 @@ mod id {
     pub const PASTE_RETAINED: &str = "asli.paste_retained";
     pub const SHOW_TOKEN: &str = "asli.show_token";
     pub const JOIN: &str = "asli.join";
+    pub const HISTORY: &str = "asli.history";
+    pub const STATUS: &str = "asli.status";
     pub const SETTINGS: &str = "asli.settings";
     pub const DIAGNOSTICS: &str = "asli.diagnostics";
     pub const QUIT: &str = "asli.quit";
@@ -62,7 +64,11 @@ pub enum Command {
     ShowToken,
     /// Join an account belonging to another device, by pasting its token.
     Join,
-    /// Open the settings file.
+    /// Show what was copied recently, so any of it can be put back.
+    History,
+    /// Show the connection in detail.
+    Status,
+    /// Open settings.
     Settings,
     /// Put recent diagnostics somewhere the person can paste them into a bug report.
     Diagnostics,
@@ -165,6 +171,8 @@ impl Tray {
         // The other half of onboarding. Without this the only way onto an existing account is a
         // terminal command, which is no onboarding story at all for a tray application.
         let join_item = MenuItem::with_id(id::JOIN, "Join another account", true, None);
+        let history_item = MenuItem::with_id(id::HISTORY, "History", true, None);
+        let open_status_item = MenuItem::with_id(id::STATUS, "Status", true, None);
         let settings_item = MenuItem::with_id(id::SETTINGS, "Settings", true, None);
         let diagnostics_item = MenuItem::with_id(id::DIAGNOSTICS, "Copy diagnostics", true, None);
         let quit_item = MenuItem::with_id(id::QUIT, "Quit", true, None);
@@ -175,6 +183,9 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &pause_item,
             &retained_item,
+            &PredefinedMenuItem::separator(),
+            &history_item,
+            &open_status_item,
             &PredefinedMenuItem::separator(),
             &show_token_item,
             &join_item,
@@ -252,6 +263,8 @@ impl Tray {
             id::PASTE_RETAINED => Some(Command::PasteRetained),
             id::SHOW_TOKEN => Some(Command::ShowToken),
             id::JOIN => Some(Command::Join),
+            id::HISTORY => Some(Command::History),
+            id::STATUS => Some(Command::Status),
             id::SETTINGS => Some(Command::Settings),
             id::DIAGNOSTICS => Some(Command::Diagnostics),
             id::QUIT => Some(Command::Quit),
@@ -414,31 +427,6 @@ pub fn relative_time(then_ms: Option<u64>, now_ms: u64) -> String {
         7200..=86_399 => format!("{} hours ago", seconds / 3600),
         _ => format!("{} days ago", seconds / 86_400),
     }
-}
-
-/// Opens the settings file in whatever the desktop uses for text.
-///
-/// A settings window is a whole user interface for six values, and the file is already documented,
-/// human readable JSON. This is the smaller honest version of that feature.
-///
-/// # Errors
-///
-/// Returns [`Error::Io`] if the opener could not be started.
-pub fn open_settings(paths: &Paths) -> Result<()> {
-    let path = paths.config_file();
-
-    #[cfg(target_os = "linux")]
-    let opener = "xdg-open";
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(target_os = "windows")]
-    let opener = "explorer";
-
-    std::process::Command::new(opener)
-        .arg(&path)
-        .spawn()
-        .map(|_| ())
-        .map_err(Error::Io)
 }
 
 /// Recent diagnostics, with no clipboard content anywhere in them.

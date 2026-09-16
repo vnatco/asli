@@ -1,4 +1,4 @@
-//! Rendering the join token as a QR code in the terminal.
+//! Rendering the join token as a QR code, for a terminal and for the window.
 //!
 //! The QR is the primary way to move the key between devices, and the copy button is the
 //! secondary one. That ordering is deliberate: this application synchronises the clipboard, so
@@ -7,8 +7,6 @@
 //!
 //! The QR is never written to a file. It exists on screen, for as long as the person is looking
 //! at it, and nowhere else.
-
-use std::fmt::Write as _;
 
 use fast_qr::QRBuilder;
 
@@ -59,53 +57,80 @@ pub fn render(payload: &str) -> Result<String> {
     Ok(out)
 }
 
-/// Renders the same QR as inline SVG, for display outside a terminal.
+/// Renders the same QR as raw RGBA pixels, one pixel per module, for drawing in the window.
 ///
-/// The half block rendering above is for a terminal and is unreadable anywhere else. A tray menu
-/// has no terminal, so the reveal page needs a form a browser can draw. SVG rather than PNG
-/// because it stays sharp at any size, needs no encoder, and embeds directly in the page with no
-/// second file to write or clean up.
+/// The half block form above is for a terminal and is unreadable anywhere else. This returns the
+/// symbol at its natural size and lets the window scale it up with nearest neighbour sampling,
+/// which keeps the module edges hard. Scaling here instead would mean shipping a larger buffer to
+/// say the same thing.
+///
+/// The symbol is always drawn dark on white regardless of the application's theme, because a QR
+/// inverted to suit a dark background is unreadable to most cameras.
+///
+/// Returns the side length in pixels, including the quiet zone, and the pixel data.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Qr`] if the payload cannot be encoded.
-pub fn render_svg(payload: &str) -> Result<String> {
+pub fn render_rgba(payload: &str) -> Result<(u32, Vec<u8>)> {
     let code = QRBuilder::new(payload)
         .build()
         .map_err(|e| Error::Qr(format!("{e:?}")))?;
 
     let size = code.size;
-    // Every reader needs the quiet zone, and four modules is what the specification asks for.
+    // Four modules, the same quiet zone the specification asks for and the SVG form uses.
     let quiet = 4usize;
     let span = size + quiet * 2;
 
-    let mut modules = String::new();
+    let mut pixels = vec![0xffu8; span * span * 4];
     for y in 0..size {
         for x in 0..size {
             if code.data[y * size + x].value() {
-                let cx = x + quiet;
-                let cy = y + quiet;
-                // Adjacent rectangles share edges, which some renderers hairline. Drawing each
-                // module one hundredth larger closes the seam without shifting the grid.
-                let _ = write!(
-                    modules,
-                    "<rect x=\"{cx}\" y=\"{cy}\" width=\"1.01\" height=\"1.01\"/>"
-                );
+                let offset = ((y + quiet) * span + (x + quiet)) * 4;
+                pixels[offset] = 0;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 0;
+                pixels[offset + 3] = 0xff;
             }
         }
     }
 
-    Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {span} {span}\" \
-shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"Join token QR code\">\
-<rect width=\"{span}\" height=\"{span}\" fill=\"#fff\"/>\
-<g fill=\"#000\">{modules}</g></svg>"
-    ))
+    let span =
+        u32::try_from(span).map_err(|_| Error::Qr("symbol is implausibly large".to_owned()))?;
+    Ok((span, pixels))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgba_is_square_opaque_and_has_a_quiet_zone() {
+        let (span, pixels) = render_rgba("asli1_TESTTOKENVALUE").expect("renders");
+        let span_usize = span as usize;
+
+        assert_eq!(
+            pixels.len(),
+            span_usize * span_usize * 4,
+            "the buffer must describe a square of exactly this side"
+        );
+        assert!(
+            pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 0xff),
+            "every pixel must be opaque, or the white ground shows through as grey"
+        );
+
+        // The corner sits inside the quiet zone, which is what a reader looks for first.
+        assert_eq!(
+            &pixels[0..4],
+            &[0xff, 0xff, 0xff, 0xff],
+            "the quiet zone is light"
+        );
+
+        assert!(
+            pixels.as_chunks::<4>().0.iter().any(|px| px[0] == 0),
+            "a symbol with no dark modules is not a symbol"
+        );
+    }
 
     #[test]
     fn renders_something_square_and_non_empty() {
@@ -143,36 +168,5 @@ mod tests {
         // Real join tokens are 64 characters.
         let token = format!("asli1_{}", "0123456789ABCDEFGHJKMNPQRSTVWXYZ".repeat(2));
         assert!(render(&token).is_ok());
-    }
-
-    #[test]
-    fn the_svg_is_self_contained_and_has_modules() {
-        let svg = render_svg("asli1_TESTTOKENVALUE").expect("renders");
-        assert!(svg.starts_with("<svg"));
-        assert!(svg.ends_with("</svg>"));
-        assert!(svg.contains("<rect"), "a QR with no modules is not a QR");
-        // Nothing fetched: a page that loaded anything would leak that a key was displayed.
-        assert!(!svg.contains("href"));
-    }
-
-    #[test]
-    fn the_svg_keeps_the_quiet_zone() {
-        // Without the margin many readers simply fail, and the failure looks like a bad camera.
-        let svg = render_svg("asli1_TESTTOKENVALUE").expect("renders");
-        let view = svg
-            .split("viewBox=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next());
-        let span: usize = view
-            .expect("viewBox")
-            .split_whitespace()
-            .nth(2)
-            .expect("width")
-            .parse()
-            .expect("number");
-        assert!(
-            span >= 21 + 8,
-            "expected a quiet zone on both sides, got {span}"
-        );
     }
 }
