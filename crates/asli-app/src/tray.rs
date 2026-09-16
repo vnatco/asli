@@ -43,6 +43,7 @@ mod id {
     pub const PAUSE: &str = "asli.pause";
     pub const PASTE_RETAINED: &str = "asli.paste_retained";
     pub const SHOW_TOKEN: &str = "asli.show_token";
+    pub const JOIN: &str = "asli.join";
     pub const SETTINGS: &str = "asli.settings";
     pub const DIAGNOSTICS: &str = "asli.diagnostics";
     pub const QUIT: &str = "asli.quit";
@@ -59,6 +60,8 @@ pub enum Command {
     PasteRetained,
     /// Show the join token again.
     ShowToken,
+    /// Join an account belonging to another device, by pasting its token.
+    Join,
     /// Open the settings file.
     Settings,
     /// Put recent diagnostics somewhere the person can paste them into a bug report.
@@ -159,6 +162,9 @@ impl Tray {
         let retained_item =
             MenuItem::with_id(id::PASTE_RETAINED, "Paste last synced clip", true, None);
         let show_token_item = MenuItem::with_id(id::SHOW_TOKEN, "Show join string", true, None);
+        // The other half of onboarding. Without this the only way onto an existing account is a
+        // terminal command, which is no onboarding story at all for a tray application.
+        let join_item = MenuItem::with_id(id::JOIN, "Join another account", true, None);
         let settings_item = MenuItem::with_id(id::SETTINGS, "Settings", true, None);
         let diagnostics_item = MenuItem::with_id(id::DIAGNOSTICS, "Copy diagnostics", true, None);
         let quit_item = MenuItem::with_id(id::QUIT, "Quit", true, None);
@@ -171,6 +177,7 @@ impl Tray {
             &retained_item,
             &PredefinedMenuItem::separator(),
             &show_token_item,
+            &join_item,
             &settings_item,
             &diagnostics_item,
             &PredefinedMenuItem::separator(),
@@ -244,6 +251,7 @@ impl Tray {
             }),
             id::PASTE_RETAINED => Some(Command::PasteRetained),
             id::SHOW_TOKEN => Some(Command::ShowToken),
+            id::JOIN => Some(Command::Join),
             id::SETTINGS => Some(Command::Settings),
             id::DIAGNOSTICS => Some(Command::Diagnostics),
             id::QUIT => Some(Command::Quit),

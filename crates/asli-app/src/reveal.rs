@@ -137,8 +137,9 @@ fn page_html(token: &str, qr_svg: &str) -> String {
 <p class=\"warn\"><strong>Anyone who sees this has your clipboard.</strong> Do not send it over\n\
 chat or email. Scanning the QR is safest. Copying it marks it so clipboard history and cloud sync\n\
 skip it, but software that ignores those markers can still read it.</p>\n\
-<p class=\"warn\">Or run <code>asli join &lt;token&gt;</code> on the other device. This page deletes\n\
-itself in three minutes.</p>\n\
+<p class=\"warn\">On the other device, open the Asli tray menu and choose\n\
+<strong>Join another account</strong>, then paste this string. This page deletes itself in three\n\
+minutes.</p>\n\
 </body>\n\
 </html>\n"
     )

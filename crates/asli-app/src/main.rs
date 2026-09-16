@@ -109,6 +109,7 @@ fn join(paths: &Paths, raw: &str) -> Result<()> {
     let identity = Identity::from_secret(&secret);
     let store = secrets::store(paths, identity.secret())?;
     let config = paths.load_config()?;
+    // Kept for people who prefer a shell. The tray menu is the path that does not require one.
 
     println!("Joined.");
     println!("Key stored in: {}", store.describe());
@@ -227,6 +228,14 @@ fn autostart_command(paths: &Paths, state: Option<&str>) -> Result<()> {
 
 fn run(paths: &Paths, with_tray: bool) -> Result<()> {
     let config = paths.load_config()?;
+
+    // A tray launched with no account must not simply exit: that is indistinguishable from a
+    // crash, and the second machine has just been installed precisely in order to join.
+    #[cfg(target_os = "linux")]
+    if with_tray && secrets::load(paths)?.is_none() {
+        onboard(paths)?;
+    }
+
     let (secret, store) = secrets::load(paths)?.ok_or(Error::NoAccount)?;
     let identity = Identity::from_secret(&secret);
 
@@ -278,6 +287,162 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         let _ = (config, identity, with_tray);
         eprintln!("The daemon supports Linux only so far.");
         Ok(())
+    }
+}
+
+/// Joins an account from the tray, with no terminal anywhere in the path.
+///
+/// This is the other half of the product's central promise. Creating an account produces one
+/// string; until this existed the only way to use that string on the second machine was
+/// `asli join <token>` in a shell, which is not an onboarding story for a tray application.
+///
+/// Joining replaces the account on this device and abandons the old room, so it confirms first and
+/// says what is lost. Every failure is shown in a dialog, because a person who clicked a menu item
+/// cannot see a log line.
+#[cfg(target_os = "linux")]
+fn join_from_tray(paths: &Paths) {
+    use asli_app::dialog;
+
+    let Some(tool) = dialog::detect() else {
+        eprintln!("{}", log_line("join_failed", "no dialog program"));
+        notify::join_failed(&dialog::missing_advice());
+        return;
+    };
+
+    // Replacing an existing account is destructive and irreversible: the old room is abandoned and
+    // every other device still on the old token stops syncing with this one.
+    if secrets::load(paths).ok().flatten().is_some()
+        && !dialog::confirm(
+            tool,
+            "Replace this account?",
+            "This device already has an account.\n\nJoining another one replaces it. Any device \
+             still using the current join string will stop syncing with this machine, and the \
+             current account cannot be recovered unless you saved its join string somewhere.",
+            "Replace it",
+            "Cancel",
+        )
+    {
+        return;
+    }
+
+    let Some(raw) = dialog::ask_text(
+        tool,
+        "Join another account",
+        "Paste the join string from your other device.\n\nIt starts with asli1_ and is shown \
+         there under Show join string.",
+    ) else {
+        return;
+    };
+
+    match join_with_token(paths, &raw) {
+        Ok(room_id) => {
+            eprintln!("{}", log_line("joined", &format!("room {room_id}")));
+            notify::joined(&room_id);
+            restart_self();
+        }
+        Err(err) => {
+            // The parser distinguishes a wrong prefix from a bad checksum from a truncated string,
+            // so the person is told which mistake they made rather than that something failed.
+            let reason = err.to_string();
+            eprintln!("{}", log_line("join_failed", &reason));
+            dialog::error(tool, "Could not join", &reason);
+            notify::join_failed(&reason);
+        }
+    }
+}
+
+/// Stores the account behind a token, returning the room it belongs to.
+///
+/// Shared by the tray flow and the command line one, so both validate identically.
+fn join_with_token(paths: &Paths, raw: &str) -> Result<String> {
+    let secret = token::parse(raw)?;
+    let identity = Identity::from_secret(&secret);
+    secrets::store(paths, identity.secret())?;
+    Ok(identity.room_id())
+}
+
+/// Restarts this process so the daemon picks up the account that was just stored.
+///
+/// `daemon::run` takes its identity by value and the connection holds a session built from it, so
+/// there is no way to swap accounts on a live connection. Rather than pretend otherwise, or leave
+/// the person wondering why nothing happened until they restart it themselves, the process
+/// replaces itself. The notification says the connection is restarting for exactly this reason.
+#[cfg(target_os = "linux")]
+fn restart_self() {
+    use std::os::unix::process::CommandExt as _;
+
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!(
+            "{}",
+            log_line("restart_failed", "could not find this executable")
+        );
+        return;
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    eprintln!("{}", log_line("restarting", "onto the account just joined"));
+    // exec replaces the image, so nothing after this runs unless it failed.
+    let err = std::process::Command::new(exe).args(args).exec();
+    eprintln!("{}", log_line("restart_failed", &err.to_string()));
+}
+
+/// Offers create or join when the tray starts with no account.
+///
+/// Returns true when an account now exists. A tray that starts with no account and simply exits
+/// looks like a crash, and the machine that most needs this dialog is the second one, where the
+/// person has just installed the application in order to join.
+#[cfg(target_os = "linux")]
+fn onboard(paths: &Paths) -> Result<bool> {
+    use asli_app::dialog::{self, Choice};
+
+    let Some(tool) = dialog::detect() else {
+        return Ok(false);
+    };
+
+    match dialog::choose(
+        tool,
+        "Welcome to Asli",
+        "No account on this device yet.\n\nCreate a new one, or join an account you already have \
+         on another machine.",
+        "Create new",
+        "Join existing",
+    ) {
+        Choice::Primary => {
+            let identity = Identity::generate()?;
+            secrets::store(paths, identity.secret())?;
+            let token = token::encode(identity.secret());
+            // The page the other machine will be looking at, shown immediately rather than after a
+            // separate trip through the menu.
+            let _ = asli_app::reveal::show_token(token.as_str(), &paths.cache_dir());
+            dialog::info(
+                tool,
+                "Account created",
+                "Your join string is on screen. Open Asli on your other device and choose \
+                 Join another account, then paste it there.",
+            );
+            Ok(true)
+        }
+        Choice::Secondary => {
+            let Some(raw) = dialog::ask_text(
+                tool,
+                "Join another account",
+                "Paste the join string from your other device.\n\nIt starts with asli1_ and is \
+                 shown there under Show join string.",
+            ) else {
+                return Ok(false);
+            };
+            match join_with_token(paths, &raw) {
+                Ok(room_id) => {
+                    eprintln!("{}", log_line("joined", &format!("room {room_id}")));
+                    Ok(true)
+                }
+                Err(err) => {
+                    dialog::error(tool, "Could not join", &err.to_string());
+                    Ok(false)
+                }
+            }
+        }
+        Choice::Cancelled => Ok(false),
     }
 }
 
@@ -460,6 +625,9 @@ fn handle_command(
                 notify::action_failed("Could not read the account", &err.to_string());
             }
         },
+        tray::Command::Join => {
+            join_from_tray(paths);
+        }
         tray::Command::Settings => {
             if let Err(err) = tray::open_settings(paths) {
                 eprintln!("{}", log_line("settings_failed", &err.to_string()));

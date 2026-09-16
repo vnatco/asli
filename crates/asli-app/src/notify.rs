@@ -163,6 +163,25 @@ pub fn retained_unavailable() {
     );
 }
 
+/// A join succeeded and the daemon is restarting onto the new account.
+///
+/// The restart is named because the icon disappears and comes back, and an unexplained
+/// disappearance reads as a crash rather than as the thing the person just asked for.
+pub fn joined(room_id: &str) {
+    action(
+        "Joined the account",
+        &format!("Room {room_id}. Reconnecting on the new account now."),
+    );
+}
+
+/// A join was attempted with something that is not a usable token.
+///
+/// The reason comes from the token parser, which distinguishes a wrong prefix from a bad checksum
+/// from a truncated string, so this shows that rather than a generic failure.
+pub fn join_failed(reason: &str) {
+    action("Could not join", reason);
+}
+
 /// Something a menu action tried to do failed.
 pub fn action_failed(what: &str, reason: &str) {
     action(what, reason);

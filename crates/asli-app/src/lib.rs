@@ -20,6 +20,12 @@
 //!
 //! The tray, autostart and notifications are wired. Autostart on Windows and macOS returns a
 //! clear error rather than reporting a success that will not survive a reboot.
+//!
+//! # No terminal in the onboarding path
+//!
+//! Joining is a tray menu item that prompts with the desktop's own dialog program, because the
+//! promise is "paste one string on the other machine" and an instruction to open a shell is not
+//! that. See [`dialog`]. The command line equivalents remain for people who prefer them.
 
 #![forbid(unsafe_code)]
 
@@ -27,6 +33,7 @@ pub mod autostart;
 pub mod clipboard_io;
 pub mod config;
 pub mod daemon;
+pub mod dialog;
 pub mod error;
 pub mod notify;
 pub mod qr;
