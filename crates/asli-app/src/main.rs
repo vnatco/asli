@@ -11,7 +11,7 @@ use asli_app::clipboard_io::log_line;
 use asli_app::config::{Config, Paths};
 use asli_app::daemon::Controls;
 use asli_app::error::{Error, Result};
-use asli_app::{autostart, daemon, qr, secrets, tray};
+use asli_app::{autostart, daemon, notify, qr, secrets, tray};
 use asli_crypto::{token, Identity};
 use clap::{Parser, Subcommand};
 
@@ -386,10 +386,12 @@ fn handle_command(
         tray::Command::Pause => {
             controls.paused.store(true, Ordering::Relaxed);
             eprintln!("{}", log_line("paused", "by the tray menu"));
+            notify::sync_paused(true);
         }
         tray::Command::Resume => {
             controls.paused.store(false, Ordering::Relaxed);
             eprintln!("{}", log_line("resumed", "by the tray menu"));
+            notify::sync_paused(false);
         }
         tray::Command::PasteRetained => {
             // The relay holds the stored clip, and only the daemon's connection can ask for it, so
@@ -402,39 +404,66 @@ fn handle_command(
             if controls.status.get().has_retained {
                 controls.request_retained();
                 eprintln!("{}", log_line("paste_retained", "requested from the relay"));
+                notify::retained_requested();
             } else {
                 eprintln!(
                     "{}",
                     log_line("paste_retained", "the relay is not holding a stored clip")
                 );
+                notify::retained_unavailable();
             }
         }
         tray::Command::ShowToken => match secrets::load(paths) {
             Ok(Some((secret, _))) => {
-                if let Err(err) = present_token(&secret) {
-                    eprintln!("{}", log_line("show_token_failed", &err.to_string()));
+                let token = asli_crypto::token::encode(&secret);
+
+                // A page on screen, not a QR printed into a log file. A tray menu has no terminal
+                // attached, so the previous version of this was invisible to the person clicking
+                // it, which is indistinguishable from a button that does nothing.
+                match asli_app::reveal::show_token(token.as_str(), &paths.cache_dir()) {
+                    Ok(_) => {
+                        eprintln!("{}", log_line("show_token", "opened the join page"));
+                        notify::token_shown();
+                    }
+                    Err(err) => {
+                        eprintln!("{}", log_line("show_token_failed", &err.to_string()));
+                        notify::action_failed("Could not show the join string", &err.to_string());
+                    }
                 }
+
                 // Copying the key is a deliberate action, so it is marked: out of clipboard
                 // history, out of cloud sync, ignored by other clipboard managers. It clears
                 // itself shortly afterwards, but only if it is still the thing on the clipboard.
-                let token = asli_crypto::token::encode(&secret);
                 match io.write_text_concealed(token.as_str(), TOKEN_CLEAR_AFTER) {
-                    Ok(()) => eprintln!(
-                        "{}",
-                        log_line("token_copied", "marked as concealed, clears in 90 seconds")
-                    ),
-                    Err(err) => eprintln!("{}", log_line("token_copy_failed", &err.to_string())),
+                    Ok(()) => {
+                        eprintln!(
+                            "{}",
+                            log_line("token_copied", "marked as concealed, clears in 90 seconds")
+                        );
+                        notify::token_copied(TOKEN_CLEAR_AFTER.as_secs());
+                    }
+                    Err(err) => {
+                        eprintln!("{}", log_line("token_copy_failed", &err.to_string()));
+                        notify::token_copy_failed(&err.to_string());
+                    }
                 }
             }
-            Ok(None) => eprintln!(
-                "{}",
-                log_line("show_token_failed", "no account on this device")
-            ),
-            Err(err) => eprintln!("{}", log_line("show_token_failed", &err.to_string())),
+            Ok(None) => {
+                eprintln!(
+                    "{}",
+                    log_line("show_token_failed", "no account on this device")
+                );
+                notify::action_failed("No account on this device", "Run 'asli create' first");
+            }
+            Err(err) => {
+                eprintln!("{}", log_line("show_token_failed", &err.to_string()));
+                notify::action_failed("Could not read the account", &err.to_string());
+            }
         },
         tray::Command::Settings => {
             if let Err(err) = tray::open_settings(paths) {
                 eprintln!("{}", log_line("settings_failed", &err.to_string()));
+                notify::action_failed("Could not open settings", &err.to_string());
             }
         }
         tray::Command::Diagnostics => {
@@ -443,8 +472,10 @@ fn handle_command(
             // the only reason this application ever writes something it did not receive.
             if let Err(err) = io.write_text(&text) {
                 eprintln!("{}", log_line("diagnostics_failed", &err.to_string()));
+                notify::diagnostics_failed(&err.to_string());
             } else {
                 eprintln!("{}", log_line("diagnostics", "copied to the clipboard"));
+                notify::diagnostics_copied();
             }
         }
         tray::Command::Quit => {

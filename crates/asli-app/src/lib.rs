@@ -30,6 +30,7 @@ pub mod daemon;
 pub mod error;
 pub mod notify;
 pub mod qr;
+pub mod reveal;
 pub mod secrets;
 pub mod tray;
 

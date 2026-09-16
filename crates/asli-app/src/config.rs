@@ -127,6 +127,25 @@ impl Paths {
         self.dir.join("state.json")
     }
 
+    /// Directory for disposable files, such as the rendered join page.
+    ///
+    /// Deliberately not the configuration directory. A page showing the account key is throwaway
+    /// and is deleted shortly after it is opened, so it has no business sitting beside settings
+    /// that are meant to persist.
+    ///
+    /// The `ASLI_CONFIG_DIR` override is honoured here too, so a test that redirects the
+    /// configuration never writes into a real cache directory either.
+    #[must_use]
+    pub fn cache_dir(&self) -> PathBuf {
+        if std::env::var_os("ASLI_CONFIG_DIR").is_some() {
+            return self.dir.join("cache");
+        }
+        ProjectDirs::from("dev", "vnat", "asli").map_or_else(
+            || self.dir.join("cache"),
+            |dirs| dirs.cache_dir().to_path_buf(),
+        )
+    }
+
     /// Path of the fallback key file, used only when no keychain is available.
     #[must_use]
     pub fn secret_file(&self) -> PathBuf {

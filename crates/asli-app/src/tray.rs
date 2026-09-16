@@ -129,13 +129,16 @@ pub fn missing_host_advice() -> &'static str {
 
 /// The tray, its menu, and the items that change.
 pub struct Tray {
-    /// Held because dropping it removes the icon from the session.
-    _icon: TrayIcon,
+    /// Held because dropping it removes the icon from the session, and because the icon is
+    /// swapped on every state change.
+    icon: TrayIcon,
     status_item: MenuItem,
     last_sync_item: MenuItem,
     pause_item: MenuItem,
     retained_item: MenuItem,
     paused: Arc<AtomicBool>,
+    /// The state the icon currently shows, so it is only redrawn when it actually changes.
+    icon_state: Mutex<IconState>,
 }
 
 impl Tray {
@@ -181,21 +184,27 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Asli")
-            .with_icon(default_icon()?)
+            .with_icon(icon_for(IconState::Offline)?)
             .build()
             .map_err(|e| Error::ConfigDir(format!("could not register the tray icon: {e}")))?;
 
         Ok(Self {
-            _icon: icon,
+            icon,
             status_item,
             last_sync_item,
             pause_item,
             retained_item,
             paused,
+            icon_state: Mutex::new(IconState::Offline),
         })
     }
 
     /// Refreshes the menu from the current daemon state.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if another thread panicked while holding the icon state lock, which is already
+    /// fatal for the tray thread.
     pub fn refresh(&self, status: &Status, now_ms: u64) {
         let paused = self.paused.load(Ordering::Relaxed);
 
@@ -211,6 +220,17 @@ impl Tray {
         self.pause_item
             .set_text(if paused { "Resume sync" } else { "Pause sync" });
         self.retained_item.set_enabled(status.has_retained);
+
+        // Redrawn only on a change: refresh runs every second, and rebuilding the buffer each
+        // time would be pointless work for a picture that almost never changes.
+        let wanted = IconState::from_status(&status.state, paused);
+        let mut current = self.icon_state.lock().expect("icon state lock");
+        if *current != wanted {
+            if let Ok(icon) = icon_for(wanted) {
+                let _ = self.icon.set_icon(Some(icon));
+                *current = wanted;
+            }
+        }
     }
 
     /// Translates a menu event into a command, if it is one of ours.
@@ -238,37 +258,132 @@ impl Tray {
     }
 }
 
-/// A small solid icon drawn in code.
+/// What the icon should say at a glance.
 ///
-/// Shipping a PNG would mean finding it at runtime, which is a packaging problem on three
-/// platforms for something that is 16 by 16 pixels. The shape is deliberately simple: a rounded
-/// square, which reads as "clipboard" at tray size better than any detail would.
-fn default_icon() -> Result<Icon> {
-    const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+/// The whole point of a tray icon is that it carries state without being opened. An icon that
+/// looks identical whether syncing works or died an hour ago is decoration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconState {
+    /// Connected to the relay.
+    Connected,
+    /// Deliberately paused by the person.
+    Paused,
+    /// Not connected, retrying, or rejected.
+    Offline,
+}
 
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            // Corners are cut so the square reads as rounded at tray size, where the icon is
-            // often 16 pixels across and a sharp corner looks like a rendering artefact.
-            let near_x = !(7..SIZE - 7).contains(&x);
-            let near_y = !(7..SIZE - 7).contains(&y);
-            let corner = near_x && near_y;
-            let edge = !(4..SIZE - 4).contains(&x) || !(4..SIZE - 4).contains(&y);
-            let inside = !edge && !corner;
+impl IconState {
+    /// Derives the icon state from the daemon's status line and the pause flag.
+    #[must_use]
+    pub fn from_status(state: &str, paused: bool) -> Self {
+        if paused {
+            Self::Paused
+        } else if state.starts_with("Synced") {
+            Self::Connected
+        } else {
+            Self::Offline
+        }
+    }
+}
 
-            if inside {
-                rgba.extend_from_slice(&[0xe8, 0xe8, 0xe8, 0xff]);
-            } else if corner {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                rgba.extend_from_slice(&[0x9a, 0x9a, 0x9a, 0xff]);
-            }
+/// Icon side in pixels.
+///
+/// Drawn at 32 and scaled down by the host. Trays render at 16 or 22 on most desktops, so the
+/// mark has to survive being halved, which is why it is two heavy shapes rather than fine detail.
+const ICON_SIZE: u32 = 32;
+
+/// Builds the icon for a state.
+///
+/// The mark is two overlapping rounded squares, the back one offset up and right: a copy, which
+/// is what this application does and what the name means. Colour carries the state, and so does
+/// the offset shape, because a person with any common form of colour blindness gets no
+/// information from hue alone.
+///
+/// Generated in code rather than shipped as a file. A runtime file lookup is a packaging problem
+/// on three platforms for something this small, and a missing icon file means an invisible tray.
+///
+/// # Errors
+///
+/// Returns [`Error::ConfigDir`] if the buffer does not match the dimensions, which would be an
+/// arithmetic mistake in the drawing loop rather than anything environmental.
+pub fn icon_for(state: IconState) -> Result<Icon> {
+    // Foreground, and the accent used for the state dot.
+    let (fg, accent) = match state {
+        // Neutral and bright: nothing to report is the normal case and should not shout.
+        IconState::Connected => ([0xe8, 0xe8, 0xe8], [0x4c, 0xd1, 0x64]),
+        // Amber, and the front sheet is hollow, so a paused tray reads as paused at 16 pixels.
+        IconState::Paused => ([0xc8, 0xc8, 0xc8], [0xe0, 0xa8, 0x30]),
+        // Dimmed, so an offline tray recedes rather than demanding attention it cannot satisfy.
+        IconState::Offline => ([0x8a, 0x8a, 0x8a], [0xd0, 0x4c, 0x4c]),
+    };
+
+    let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
+
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            let pixel = draw_pixel(x, y, state, fg, accent);
+            rgba.extend_from_slice(&pixel);
         }
     }
 
-    Icon::from_rgba(rgba, SIZE, SIZE)
+    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
         .map_err(|e| Error::ConfigDir(format!("could not build the tray icon: {e}")))
+}
+
+/// One pixel of the mark.
+///
+/// Split out so the shape is testable without constructing an [`Icon`], and so the loop above
+/// stays readable.
+fn draw_pixel(x: u32, y: u32, state: IconState, fg: [u8; 3], accent: [u8; 3]) -> [u8; 4] {
+    // Back sheet: offset up and to the right, drawn as an outline only where it is not covered.
+    let back = rounded(x, y, 11, 3, 28, 20);
+    let front = rounded(x, y, 4, 10, 21, 27);
+    let front_inner = rounded(x, y, 7, 13, 18, 24);
+
+    // The state dot sits in the lower right, where it survives being scaled to 16 pixels.
+    let dot = {
+        let dx = i64::from(x) - 24;
+        let dy = i64::from(y) - 24;
+        dx * dx + dy * dy <= 25
+    };
+
+    if dot {
+        return [accent[0], accent[1], accent[2], 0xff];
+    }
+
+    if front {
+        // Paused is hollow, so the state is legible without colour.
+        let hollow = matches!(state, IconState::Paused) && front_inner;
+        if hollow {
+            return [0, 0, 0, 0];
+        }
+        return [fg[0], fg[1], fg[2], 0xff];
+    }
+
+    if back {
+        // The back sheet is dimmer, which is what makes it read as behind rather than beside.
+        // Integer maths on a u8 channel: 3/5 of 255 is 153, so this cannot overflow, but saying
+        // so with saturation is cheaper than an allow attribute.
+        let dim = |c: u8| u8::try_from(u16::from(c) * 3 / 5).unwrap_or(u8::MAX);
+        return [dim(fg[0]), dim(fg[1]), dim(fg[2]), 0xff];
+    }
+
+    [0, 0, 0, 0]
+}
+
+/// Whether a point falls inside a rectangle with its corners cut.
+///
+/// A sharp corner at tray size looks like a rendering fault, and a real rounded rectangle needs
+/// antialiasing this does not have, so the corners are simply clipped.
+fn rounded(x: u32, y: u32, left: u32, top: u32, right: u32, bottom: u32) -> bool {
+    if x < left || x >= right || y < top || y >= bottom {
+        return false;
+    }
+    let near_left = x < left + 2;
+    let near_right = x >= right - 2;
+    let near_top = y < top + 2;
+    let near_bottom = y >= bottom - 2;
+    !((near_left || near_right) && (near_top || near_bottom))
 }
 
 /// Renders a timestamp as something a person reads at a glance.
@@ -419,9 +534,46 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_is_well_formed_rgba() {
+    fn every_icon_state_is_well_formed_rgba() {
         // Icon::from_rgba rejects a buffer whose length does not match the dimensions, so this
         // catches an arithmetic slip in the drawing loop.
-        default_icon().expect("the built in icon must always be valid");
+        for state in [IconState::Connected, IconState::Paused, IconState::Offline] {
+            icon_for(state).unwrap_or_else(|e| panic!("{state:?} must be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn the_three_states_actually_look_different() {
+        // An icon that is identical in every state is decoration, which is the complaint that
+        // prompted this. Compare the raw pixels rather than trusting the colour constants.
+        let pixels = |state: IconState| -> Vec<u8> {
+            let fg = [0xe8, 0xe8, 0xe8];
+            let accent = [0x4c, 0xd1, 0x64];
+            (0..ICON_SIZE)
+                .flat_map(|y| (0..ICON_SIZE).flat_map(move |x| draw_pixel(x, y, state, fg, accent)))
+                .collect()
+        };
+        assert_ne!(
+            pixels(IconState::Connected),
+            pixels(IconState::Paused),
+            "paused must be distinguishable from connected without colour"
+        );
+    }
+
+    #[test]
+    fn icon_state_follows_the_status_line() {
+        assert_eq!(
+            IconState::from_status("Synced, 2 connected", false),
+            IconState::Connected
+        );
+        assert_eq!(IconState::from_status("Synced", true), IconState::Paused);
+        assert_eq!(
+            IconState::from_status("Offline, retrying", false),
+            IconState::Offline
+        );
+        assert_eq!(
+            IconState::from_status("Rejected: BAD_SIGNATURE", false),
+            IconState::Offline
+        );
     }
 }

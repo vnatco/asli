@@ -85,6 +85,89 @@ pub fn clip_sensitive() {
     );
 }
 
+/// Feedback for something the person just clicked in the tray menu.
+///
+/// These ignore the notification preference on purpose, and the distinction matters. That setting
+/// governs *unsolicited* notifications about clips arriving, which is a stream a person may well
+/// not want. A menu click is a question, and an answer is not spam. Without this, every menu item
+/// except Settings reports success only to a log file nobody reads, which makes a working button
+/// indistinguishable from a dead one.
+fn action(summary: &str, body: &str) {
+    send(summary, body);
+}
+
+/// The join token was copied to the clipboard.
+pub fn token_copied(clear_after_secs: u64) {
+    action(
+        "Join token copied",
+        &format!(
+            "It is marked so clipboard history and cloud sync skip it, and it clears in {clear_after_secs} seconds"
+        ),
+    );
+}
+
+/// The join token could not be copied.
+pub fn token_copy_failed(reason: &str) {
+    action("Could not copy the join token", reason);
+}
+
+/// The reveal window was opened.
+pub fn token_shown() {
+    action(
+        "Join string opened",
+        "Scan the QR on your other device. Anyone who sees it has your clipboard",
+    );
+}
+
+/// Diagnostics were copied to the clipboard.
+pub fn diagnostics_copied() {
+    action(
+        "Diagnostics copied",
+        "Paste them into a bug report. They contain no clipboard content",
+    );
+}
+
+/// Diagnostics could not be copied.
+pub fn diagnostics_failed(reason: &str) {
+    action("Could not copy diagnostics", reason);
+}
+
+/// Syncing was paused or resumed from the menu.
+pub fn sync_paused(paused: bool) {
+    if paused {
+        action(
+            "Sync paused",
+            "Copies stay on this machine until you resume",
+        );
+    } else {
+        action(
+            "Sync resumed",
+            "Copies are shared with your other devices again",
+        );
+    }
+}
+
+/// The stored clip was requested from the relay.
+pub fn retained_requested() {
+    action(
+        "Fetching the last synced clip",
+        "It will land on your clipboard shortly",
+    );
+}
+
+/// There was no stored clip to fetch.
+pub fn retained_unavailable() {
+    action(
+        "Nothing stored to paste",
+        "The relay is not holding a clip for this account",
+    );
+}
+
+/// Something a menu action tried to do failed.
+pub fn action_failed(what: &str, reason: &str) {
+    action(what, reason);
+}
+
 /// Connection to the relay was lost and is being retried.
 pub fn connection_lost(enabled: bool) {
     if !enabled {
