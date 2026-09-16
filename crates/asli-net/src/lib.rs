@@ -36,7 +36,7 @@ pub mod session;
 pub mod state;
 
 pub use backoff::Backoff;
-pub use client::{ClientEvent, Disconnect, ReceivedClip};
+pub use client::{ClientEvent, Disconnect, LocalEvent, ReceivedClip};
 pub use envelope::{AuthFailCode, ErrorCode, Limits, Message};
 pub use error::{Error, Result};
 pub use session::{pump, Action, FakeTransport, Session, Transport};

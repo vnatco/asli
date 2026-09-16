@@ -14,6 +14,25 @@ use crate::envelope::{AuthFailCode, ErrorCode};
 use crate::error::{Error, Result};
 use crate::session::{Action, Session};
 
+/// Something originating on this device that the connection must carry.
+///
+/// A channel of `String` could only ever carry text, which silently made images unsendable and
+/// left the retained fetch with no route to the socket at all. Naming the three things a client
+/// can originate makes each one reach the right `Session` method instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocalEvent {
+    /// Text copied on this device.
+    Text(String),
+    /// A PNG copied on this device. Sealed and sent as chunks.
+    Image(Vec<u8>),
+    /// Ask the relay for the clip it is holding.
+    ///
+    /// Explicit by design: a retained clip is never applied automatically on connect, because a
+    /// device that just copied something locally would lose it to a stale clip from the relay.
+    FetchRetained,
+}
+
 /// A clip that arrived, decrypted and validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedClip {
@@ -135,7 +154,7 @@ pub fn now_ms() -> u64 {
 pub async fn run_once(
     url: &str,
     session: &mut Session,
-    local_rx: &mut mpsc::Receiver<String>,
+    local_rx: &mut mpsc::Receiver<LocalEvent>,
     on_event: &mut dyn FnMut(ClientEvent),
 ) -> Result<Disconnect> {
     install_crypto_provider();
@@ -199,23 +218,65 @@ pub async fn run_once(
             }
 
             local = local_rx.recv() => {
-                let Some(text) = local else {
+                let Some(event) = local else {
                     return Ok(Disconnect::LocalChannelClosed);
                 };
-                match session.observe_local(&text, now_ms()) {
-                    Ok(Some(frame)) => socket
+                for frame in frames_for(session, event, on_event)? {
+                    socket
                         .send(WsMessage::Text(frame.into()))
                         .await
-                        .map_err(|e| Error::Transport(format!("{e}")))?,
-                    // Nothing to send: empty content, or the echo of our own write.
-                    Ok(None) => {}
-                    Err(Error::ContentTooLarge { got, limit }) => {
-                        on_event(ClientEvent::ClipSkipped { got, limit });
-                    }
-                    Err(other) => return Err(other),
+                        .map_err(|e| Error::Transport(format!("{e}")))?;
                 }
             }
         }
+    }
+}
+
+/// Turns something that happened on this device into the frames that carry it.
+///
+/// Split out of [`run_once`] because the three variants each have their own rules, and a select
+/// arm is the wrong place to read them. Returns an empty list when there is nothing to send, which
+/// is a normal outcome rather than an error: empty content, the echo of our own write, or a
+/// retained fetch raised before the handshake finished.
+fn frames_for(
+    session: &mut Session,
+    event: LocalEvent,
+    on_event: &mut dyn FnMut(ClientEvent),
+) -> Result<Vec<String>> {
+    match event {
+        LocalEvent::Text(text) => match session.observe_local(&text, now_ms()) {
+            Ok(Some(frame)) => Ok(vec![frame]),
+            // Nothing to send: empty content, the echo of our own write, or a copy that raced the
+            // handshake. The last of those is timing rather than corruption, and treating it as
+            // fatal would drop the whole connection over one early copy.
+            Ok(None) | Err(Error::OutOfOrder(_)) => Ok(Vec::new()),
+            Err(Error::ContentTooLarge { got, limit }) => {
+                on_event(ClientEvent::ClipSkipped { got, limit });
+                Ok(Vec::new())
+            }
+            Err(other) => Err(other),
+        },
+        // Order matters and is preserved by the caller: clip_begin, chunks, then clip_end. The
+        // receiver commits nothing to the clipboard until the final chunk verifies.
+        LocalEvent::Image(png) => match session.observe_local_image(&png, now_ms()) {
+            Ok(frames) => Ok(frames),
+            Err(Error::ContentTooLarge { got, limit }) => {
+                on_event(ClientEvent::ClipSkipped { got, limit });
+                Ok(Vec::new())
+            }
+            // A copy made while the handshake is still in flight is ordinary timing, not a
+            // protocol violation. Treating it as fatal killed the whole connection over one
+            // early image, which is far worse than dropping that image.
+            Err(Error::OutOfOrder(_)) => Ok(Vec::new()),
+            Err(other) => Err(other),
+        },
+        // The tray can raise this at any moment, including while reconnecting, so asking too
+        // early is ignored rather than fatal.
+        LocalEvent::FetchRetained => match session.fetch_last_frame() {
+            Ok(frame) => Ok(vec![frame]),
+            Err(Error::OutOfOrder(_)) => Ok(Vec::new()),
+            Err(other) => Err(other),
+        },
     }
 }
 
@@ -257,7 +318,7 @@ mod tls_tests {
     /// panics. So this asserts on the absence of a panic rather than on the connection.
     #[tokio::test]
     async fn tls_dial_does_not_panic_for_want_of_a_crypto_provider() {
-        let (_tx, mut rx) = mpsc::channel::<String>(1);
+        let (_tx, mut rx) = mpsc::channel::<LocalEvent>(1);
         let identity = asli_crypto::Identity::generate().expect("rng works");
         let mut session = Session::new(identity, [7u8; 16], 1);
         let mut sink = |_: ClientEvent| {};

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use asli_crypto::Identity;
 use asli_net::session::Action;
-use asli_net::{client, ClientEvent, Session};
+use asli_net::{client, ClientEvent, LocalEvent, Session};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -48,7 +48,7 @@ async fn run() {
     println!("image: {} bytes", png.len());
 
     let (report_tx, mut report_rx) = mpsc::channel::<String>(16);
-    let (_receiver_tx, mut receiver_rx) = mpsc::channel::<String>(4);
+    let (_receiver_tx, mut receiver_rx) = mpsc::channel::<LocalEvent>(4);
 
     // The receiver joins first, so it is in the room before any chunk is sent.
     let receiver_url = url.clone();

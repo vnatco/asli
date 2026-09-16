@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use asli_crypto::{token, Identity};
-use asli_net::{client, ClientEvent, Session};
+use asli_net::{client, ClientEvent, LocalEvent, Session};
 use tokio::sync::mpsc;
 
 const DEFAULT_URL: &str = "wss://asli.vnat.dev/v1";
@@ -46,6 +46,12 @@ async fn run() {
         .position(|a| a == "--send-every-secs")
         .and_then(|i| rest.get(i + 1))
         .and_then(|v| v.parse::<u64>().ok());
+    // Lets a soak prove the receive direction for images, which text alone cannot.
+    let send_image = rest
+        .iter()
+        .position(|a| a == "--send-image")
+        .and_then(|i| rest.get(i + 1))
+        .and_then(|path| std::fs::read(path).ok());
 
     let secret = match token::parse(&join_token) {
         Ok(secret) => secret,
@@ -62,7 +68,17 @@ async fn run() {
     // A device id the daemon will never use, so neither side mistakes the other for itself.
     let mut session = Session::new(identity, [0xfe; 16], 1);
 
-    let (tx, mut rx) = mpsc::channel::<String>(8);
+    let (tx, mut rx) = mpsc::channel::<LocalEvent>(8);
+
+    if let Some(png) = send_image {
+        println!("peer will send a {} byte image once", png.len());
+        let tx = tx.clone();
+        tokio::task::spawn_local(async move {
+            tokio::time::sleep(Duration::from_secs(14)).await;
+            println!("peer sending image: {} bytes", png.len());
+            let _ = tx.send(LocalEvent::Image(png)).await;
+        });
+    }
 
     if let Some(secs) = send_every {
         println!("peer will send a clip every {secs}s");
@@ -75,7 +91,7 @@ async fn run() {
                 // Logged so a soak can tell the difference between "sent nothing" and
                 // "sent but the other side never wrote it to the clipboard".
                 println!("peer sending #{n}: {} bytes", text.len());
-                if tx.send(text).await.is_err() {
+                if tx.send(LocalEvent::Text(text)).await.is_err() {
                     return;
                 }
             }
@@ -98,6 +114,18 @@ async fn run() {
                 digest[2],
                 digest[3],
                 clip.retained
+            );
+        }
+        ClientEvent::Image { png, .. } => {
+            received += 1;
+            let digest = asli_core::hash(&png);
+            println!(
+                "peer received image #{received}: {} bytes, hash {:02x}{:02x}{:02x}{:02x}",
+                png.len(),
+                digest[0],
+                digest[1],
+                digest[2],
+                digest[3]
             );
         }
         ClientEvent::Presence { peers } => println!("peer sees {peers} connected"),

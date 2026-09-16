@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use asli_crypto::Identity;
-use asli_net::{client, ClientEvent, Session};
+use asli_net::{client, ClientEvent, LocalEvent, Session};
 use tokio::sync::mpsc;
 
 const DEFAULT_URL: &str = "wss://asli.vnat.dev/v1";
@@ -45,8 +45,8 @@ async fn run() {
 
     let marker = format!("asli live check {}", client::now_ms());
 
-    let (sender_tx, mut sender_rx) = mpsc::channel::<String>(4);
-    let (_receiver_tx, mut receiver_rx) = mpsc::channel::<String>(4);
+    let (sender_tx, mut sender_rx) = mpsc::channel::<LocalEvent>(4);
+    let (_receiver_tx, mut receiver_rx) = mpsc::channel::<LocalEvent>(4);
 
     let (report_tx, mut report_rx) = mpsc::channel::<String>(8);
 
@@ -99,7 +99,7 @@ async fn run() {
         };
         let send_later = async {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let _ = sender_tx.send(sender_marker).await;
+            let _ = sender_tx.send(LocalEvent::Text(sender_marker)).await;
         };
         let (result, ()) = tokio::join!(
             client::run_once(&sender_url, &mut sender, &mut sender_rx, &mut on_event),

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use asli_crypto::Identity;
 use asli_net::client::{self, ClientEvent, Disconnect};
 use asli_net::session::Action;
-use asli_net::{Backoff, Session};
+use asli_net::{Backoff, LocalEvent, Session};
 use tokio::sync::mpsc;
 
 use crate::clipboard_io::{log_line, ClipboardIo, Observed};
@@ -259,16 +259,6 @@ fn on_live_event(
 ) {
     let now = client::now_ms();
 
-    // Drained here because this is the only place the connection is known to be live. The frame
-    // itself cannot be sent from here: run_once owns the socket and exposes no way to hand it one,
-    // so the request is reported rather than silently discarded.
-    if controls.take_retained_request() {
-        eprintln!(
-            "{}",
-            log_line("paste_retained_failed", session_fetch_last_unavailable())
-        );
-    }
-
     // Pausing must also stop arriving content from overwriting the local clipboard. Dropping it
     // here rather than disconnecting keeps resume instant. Images are paused too: an image that
     // landed while paused would be just as unwelcome as text.
@@ -291,16 +281,6 @@ fn on_live_event(
         }
     }
     controls.status.set(status.clone());
-}
-
-/// Why a retained fetch cannot be sent from here.
-///
-/// `Session::fetch_last_frame` produces exactly the right frame, and the relay implements the
-/// request, but `client::run_once` owns the socket for the life of the connection and takes only
-/// text from a channel. There is no seam to hand it one frame. Closing this needs a change in
-/// `asli-net`, so it is named rather than papered over.
-const fn session_fetch_last_unavailable() -> &'static str {
-    "the transport has no way to send a fetch_last frame from outside its own loop"
 }
 
 /// The one place a received image reaches the clipboard.
@@ -392,8 +372,10 @@ pub async fn run(
     let session = Session::new(identity, device_id, seq);
 
     // The watcher thread is blocking, so it gets its own bridge into the async side.
-    let (local_tx, mut local_rx) = mpsc::channel::<String>(16);
+    let (local_tx, mut local_rx) = mpsc::channel::<LocalEvent>(16);
     let notifications = config.notifications;
+    // The bridge consumes its sender, and the retained pump needs one of its own.
+    let local_tx_for_retained = local_tx.clone();
     spawn_clipboard_bridge(
         observed,
         local_tx,
@@ -407,7 +389,10 @@ pub async fn run(
         session,
         controls,
         io,
-        &mut local_rx,
+        LocalChannel {
+            rx: &mut local_rx,
+            tx_for_retained: local_tx_for_retained,
+        },
         notifications,
     )
     .await
@@ -420,7 +405,7 @@ pub async fn run(
 /// Returns [`crate::Error::Io`] if the thread could not be spawned.
 fn spawn_clipboard_bridge(
     observed: Receiver<Observed>,
-    local_tx: mpsc::Sender<String>,
+    local_tx: mpsc::Sender<LocalEvent>,
     cap: usize,
     paused: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -450,7 +435,7 @@ fn spawn_clipboard_bridge(
                             continue;
                         }
                         let bytes = text.len();
-                        if local_tx.blocking_send(text).is_err() {
+                        if local_tx.blocking_send(LocalEvent::Text(text)).is_err() {
                             return;
                         }
                         eprintln!("{}", log_line("clip_sent", &format!("{bytes} bytes")));
@@ -470,21 +455,11 @@ fn spawn_clipboard_bridge(
                             notify::clip_too_large(png.len(), cap);
                             continue;
                         }
-                        // Sending images needs a route into the session that owns the socket, and
-                        // the only one that exists carries text. Saying so is the point: an image
-                        // that vanishes with no explanation is precisely the complaint this
-                        // project exists to avoid, and a person watching the log can now tell the
-                        // difference between "not supported yet" and "broken".
-                        eprintln!(
-                            "{}",
-                            log_line(
-                                "image_not_sent",
-                                &format!(
-                                    "{} bytes captured, but sending images needs a transport path that does not exist yet",
-                                    png.len()
-                                ),
-                            )
-                        );
+                        let bytes = png.len();
+                        if local_tx.blocking_send(LocalEvent::Image(png)).is_err() {
+                            return;
+                        }
+                        eprintln!("{}", log_line("image_sent", &format!("{bytes} bytes")));
                     }
                     Observed::Sensitive => {
                         eprintln!(
@@ -506,6 +481,38 @@ fn spawn_clipboard_bridge(
     Ok(())
 }
 
+/// Both ends of the channel carrying what this device originates.
+///
+/// They travel together because they are the same channel: the receiver is what the connection
+/// pumps, and the sender is how the tray's retained request joins the same queue as a copy.
+struct LocalChannel<'a> {
+    /// Local events on their way to the socket.
+    rx: &'a mut mpsc::Receiver<LocalEvent>,
+    /// Used by the retained pump, which raises a request while a connection is live.
+    tx_for_retained: mpsc::Sender<LocalEvent>,
+}
+
+/// Watches for a retained fetch raised by the tray and puts it on the local queue.
+///
+/// A separate task because the tray raises the request from another thread at an arbitrary moment,
+/// while the connection loop is parked in `select!`. Polling a flag is enough: this fires at most
+/// once per menu click, so the quarter second granularity is invisible.
+fn spawn_retained_pump(
+    tx: mpsc::Sender<LocalEvent>,
+    wanted: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if wanted.swap(false, Ordering::Relaxed)
+                && tx.send(LocalEvent::FetchRetained).await.is_err()
+            {
+                return;
+            }
+        }
+    })
+}
+
 /// Connects, pumps, and reconnects forever.
 ///
 /// Split from [`run`] so each half stays readable: this one owns the retry policy, the other owns
@@ -516,9 +523,13 @@ async fn run_connection_loop(
     mut session: Session,
     controls: Controls,
     io: Arc<dyn ClipboardIo>,
-    local_rx: &mut mpsc::Receiver<String>,
+    local: LocalChannel<'_>,
     notifications: bool,
 ) -> Result<()> {
+    let LocalChannel {
+        rx: local_rx,
+        tx_for_retained: local_tx_for_retained,
+    } = local;
     let mut backoff = Backoff::new();
     let mut status = Status {
         state: "Connecting".to_owned(),
@@ -558,6 +569,12 @@ async fn run_connection_loop(
             );
         }
 
+        // A request raised while this connection is live is carried by the socket itself.
+        let retained_pump = spawn_retained_pump(
+            local_tx_for_retained.clone(),
+            Arc::clone(&controls.retained_wanted),
+        );
+
         let outcome = client::run_once(&url, &mut session, local_rx, &mut |event| {
             on_live_event(
                 &event,
@@ -569,6 +586,8 @@ async fn run_connection_loop(
             );
         })
         .await;
+
+        retained_pump.abort();
 
         // Whatever happened, the counter this connection reached must survive it.
         let _ = paths.save_state(State {
