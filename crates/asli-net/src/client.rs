@@ -44,6 +44,17 @@ pub enum ClientEvent {
     },
     /// A clip arrived.
     Clip(ReceivedClip),
+    /// A chunked image arrived, reassembled and validated.
+    ///
+    /// Surfaced rather than folded into [`ClientEvent::Clip`] because writing an image to the
+    /// clipboard is a different platform call than writing text, and a caller without image
+    /// support should be able to ignore this without discarding text by accident.
+    Image {
+        /// Normalized PNG bytes.
+        png: Vec<u8>,
+        /// Capture time from inside the ciphertext.
+        ts_ms: u64,
+    },
     /// The room connection count changed.
     Presence {
         /// Connections in the room.
@@ -163,6 +174,9 @@ pub async fn run_once(
                                 }
                                 Action::Clip { text, ts_ms, retained } => {
                                     on_event(ClientEvent::Clip(ReceivedClip { text, ts_ms, retained }));
+                                }
+                                Action::Image { png, ts_ms } => {
+                                    on_event(ClientEvent::Image { png, ts_ms });
                                 }
                                 Action::Presence { peers } => {
                                     on_event(ClientEvent::Presence { peers });

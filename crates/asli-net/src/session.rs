@@ -8,12 +8,13 @@
 //! The caller supplies the current time, so tests are deterministic.
 
 use asli_core::{EchoGuard, Incoming, ReplayGuard, Verdict};
+use asli_crypto::chunk::{self, Assembly, ChunkPos};
 use asli_crypto::clip::{self, ContentType, Inner, DEVICE_ID_LEN, MSG_ID_LEN, NONCE_LEN, TAG_LEN};
 use asli_crypto::identity::ROOM_ID_LEN;
 use asli_crypto::Identity;
 
 use crate::envelope::{
-    self, Auth, AuthFailCode, Clip, ErrorCode, FetchLast, Hello, Limits, Message, Pong,
+    self, Auth, AuthFailCode, Clip, ClipChunk, ErrorCode, FetchLast, Hello, Limits, Message, Pong,
     PROTOCOL_VERSION,
 };
 use crate::error::{Error, Result};
@@ -60,6 +61,17 @@ pub enum Action {
         /// Whether the relay delivered this as a stored clip rather than a live one.
         retained: bool,
     },
+    /// A chunked image arrived, reassembled and validated.
+    ///
+    /// Separate from [`Action::Clip`] because an image is not written to the clipboard by the same
+    /// code path as text, and because a caller that does not support images should be able to
+    /// ignore this variant without accidentally discarding text.
+    Image {
+        /// Normalized PNG bytes.
+        png: Vec<u8>,
+        /// Capture time from inside the ciphertext.
+        ts_ms: u64,
+    },
     /// The room connection count changed.
     Presence {
         /// Connections in the room. Never a device count.
@@ -88,6 +100,12 @@ pub struct Session {
     replay: ReplayGuard,
     peers: u32,
     pinned_auth: Option<([u8; 16], u64)>,
+    /// The chunked message currently being reassembled, if any.
+    ///
+    /// Exactly one at a time. A sender that interleaves two chunked messages on one connection is
+    /// outside the protocol, and allowing it would mean unbounded concurrent assemblies, which is
+    /// the memory exhaustion this cap exists to prevent.
+    assembly: Option<Assembly>,
 }
 
 impl Session {
@@ -109,6 +127,7 @@ impl Session {
             replay: ReplayGuard::new(device_id, DEFAULT_RETENTION_MS),
             peers: 0,
             pinned_auth: None,
+            assembly: None,
         }
     }
 
@@ -203,6 +222,9 @@ impl Session {
             }
             Message::AuthFail(fail) => Ok(vec![Action::AuthFailed(fail.code)]),
             Message::Clip(clip) => self.on_clip(&clip, now_ms),
+            Message::ClipBegin(c) | Message::ClipChunk(c) | Message::ClipEnd(c) => {
+                self.on_chunk(&c, now_ms)
+            }
             Message::Presence(presence) => {
                 self.peers = presence.peers;
                 Ok(vec![Action::Presence {
@@ -336,6 +358,210 @@ impl Session {
             ts_ms: inner.ts_ms,
             retained,
         }])
+    }
+
+    fn on_chunk(&mut self, chunk: &ClipChunk, now_ms: u64) -> Result<Vec<Action>> {
+        if self.phase != Phase::Ready {
+            return Err(Error::OutOfOrder("chunk before auth_ok"));
+        }
+
+        // Structural checks are protocol errors, as for a whole clip: a well behaved relay never
+        // forwards a malformed one.
+        let msg_id: [u8; MSG_ID_LEN] = envelope::fixed("msg_id", &chunk.msg_id)?;
+        let nonce: [u8; NONCE_LEN] = envelope::fixed("n", &chunk.n)?;
+        if chunk.ct.len() <= TAG_LEN {
+            return Err(Error::FieldLength {
+                field: "ct",
+                expected: TAG_LEN + 1,
+                got: chunk.ct.len(),
+            });
+        }
+
+        // Everything from here is a silent discard, matching on_clip.
+        if chunk.room != self.identity.room_id() || !self.epoch_is_acceptable(chunk.epoch) {
+            return Ok(Vec::new());
+        }
+
+        let final_chunk = chunk.idx + 1 == chunk.chunk_count;
+        let pos = ChunkPos {
+            idx: chunk.idx,
+            chunk_count: chunk.chunk_count,
+            final_chunk,
+        };
+
+        // A fresh message id replaces any assembly in progress. Dropping the old one is correct:
+        // the sender moved on, and holding a partial forever is how a memory leak starts.
+        let starting_over = self
+            .assembly
+            .as_ref()
+            .is_none_or(|existing| existing.msg_id() != &msg_id);
+        if starting_over {
+            if chunk.idx != 0 {
+                // Joining a stream mid flight can never complete, so there is nothing to hold.
+                return Ok(Vec::new());
+            }
+            let Ok(assembly) =
+                Assembly::new(msg_id, chunk.epoch, chunk.chunk_count, self.assembly_cap())
+            else {
+                return Ok(Vec::new());
+            };
+            self.assembly = Some(assembly);
+        }
+
+        let Ok(piece) = chunk::open_chunk(
+            &self.identity.enc_key(chunk.epoch),
+            chunk.epoch,
+            &self.identity.room_id_bytes(),
+            &msg_id,
+            &nonce,
+            pos,
+            &chunk.ct,
+        ) else {
+            // A chunk that does not verify at the position it claims means the stream has been
+            // tampered with, so the whole assembly is abandoned rather than continued.
+            self.assembly = None;
+            return Ok(Vec::new());
+        };
+
+        let Some(assembly) = self.assembly.as_mut() else {
+            return Ok(Vec::new());
+        };
+        if assembly
+            .accept(&msg_id, chunk.epoch, chunk.idx, chunk.chunk_count, piece)
+            .is_err()
+        {
+            self.assembly = None;
+            return Ok(Vec::new());
+        }
+
+        if !final_chunk || !assembly.is_complete() {
+            return Ok(Vec::new());
+        }
+
+        let Some(assembly) = self.assembly.take() else {
+            return Ok(Vec::new());
+        };
+        let Ok(inner) = assembly.finish() else {
+            return Ok(Vec::new());
+        };
+
+        let verdict = self.replay.check(
+            &Incoming {
+                msg_id,
+                device_id: inner.device_id,
+                seq: inner.seq,
+                ts_ms: inner.ts_ms,
+                retained: false,
+            },
+            now_ms,
+        );
+        if verdict != Verdict::Accept {
+            return Ok(Vec::new());
+        }
+
+        match inner.content_type {
+            ContentType::ImagePng => Ok(vec![Action::Image {
+                png: inner.content,
+                ts_ms: inner.ts_ms,
+            }]),
+            // Text is never chunked in v1: accepting it here would mean two code paths for the
+            // same content, and two paths to get loop prevention wrong on. ContentType is non
+            // exhaustive, so a future type lands here too and is ignored until it is handled,
+            // which is the safe direction.
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// The cap on reassembled bytes, which is larger than the content cap.
+    ///
+    /// The content cap measures the payload a person copied. What arrives in chunks is the padded
+    /// inner plaintext: a header plus padding to the next bucket. Applying the content cap to the
+    /// padded total rejects any image within one bucket of the limit, which is a silent failure
+    /// for exactly the largest images that still ought to work. The sender compares raw content
+    /// against the content cap, so the two sides have to agree about what is being measured.
+    fn assembly_cap(&self) -> usize {
+        let content = self.max_content_bytes();
+        // Padding rounds up to at most one 64 KiB bucket past the body, and the body adds the
+        // inner header on top of the content.
+        content
+            .saturating_add(clip::INNER_HEADER_LEN)
+            .saturating_add(64 * 1024)
+    }
+
+    /// The content cap this relay announced, or a conservative default before `challenge`.
+    fn max_content_bytes(&self) -> usize {
+        self.limits.map_or(8 * 1024 * 1024, |limits| {
+            usize::try_from(limits.max_content_bytes).unwrap_or(usize::MAX)
+        })
+    }
+
+    /// Seals a local image into a run of chunk frames, ready to send in order.
+    ///
+    /// Images are not written to the clipboard by this crate, so unlike [`Session::observe_local`]
+    /// there is no echo guard interaction here: the caller owns that decision along with capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ContentTooLarge`] when the image exceeds the relay's announced content
+    /// limit, and [`Error::OutOfOrder`] before the handshake completes.
+    pub fn observe_local_image(&mut self, png: &[u8], now_ms: u64) -> Result<Vec<String>> {
+        if self.phase != Phase::Ready {
+            return Err(Error::OutOfOrder("image before auth_ok"));
+        }
+        if png.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let limit = self.max_content_bytes();
+        if png.len() > limit {
+            return Err(Error::ContentTooLarge {
+                got: png.len(),
+                limit,
+            });
+        }
+
+        self.seq = self.seq.saturating_add(1);
+        let msg_id: [u8; MSG_ID_LEN] = asli_crypto::random::bytes()?;
+        let inner = Inner {
+            content_type: ContentType::ImagePng,
+            device_id: self.device_id,
+            seq: self.seq,
+            ts_ms: now_ms,
+            content: png.to_vec(),
+        };
+
+        let sealed = chunk::seal_chunks(
+            &self.identity.enc_key(self.epoch),
+            self.epoch,
+            &self.identity.room_id_bytes(),
+            &msg_id,
+            &inner,
+            chunk::DEFAULT_CHUNK_BYTES,
+        )?;
+
+        let room = self.identity.room_id();
+        let mut frames = Vec::with_capacity(sealed.len());
+        for piece in sealed {
+            let payload = ClipChunk {
+                v: PROTOCOL_VERSION,
+                room: room.clone(),
+                epoch: self.epoch,
+                msg_id: msg_id.to_vec(),
+                idx: piece.idx,
+                chunk_count: piece.chunk_count,
+                n: piece.nonce.to_vec(),
+                ct: piece.ciphertext,
+            };
+            let message = if piece.final_chunk {
+                Message::ClipEnd(payload)
+            } else if piece.idx == 0 {
+                Message::ClipBegin(payload)
+            } else {
+                Message::ClipChunk(payload)
+            };
+            frames.push(message.to_frame()?);
+        }
+        Ok(frames)
     }
 
     /// During a rotation window a peer may be one epoch ahead or behind.
@@ -908,5 +1134,239 @@ mod tests {
         assert!(session.epoch_is_acceptable(0));
         assert!(session.epoch_is_acceptable(1));
         assert!(!session.epoch_is_acceptable(2));
+    }
+
+    /// Seals an image as the peer device would, returning the frames in order.
+    fn image_frames(session_seq: u64, png: &[u8]) -> (Vec<String>, [u8; 16]) {
+        let (mut peer, _) = ready_session(DEVICE_B);
+        let _ = session_seq;
+        let frames = peer.observe_local_image(png, NOW).expect("seals");
+        let first = Message::parse(&frames[0]).expect("parses");
+        let msg_id = match first {
+            Message::ClipBegin(c) | Message::ClipChunk(c) | Message::ClipEnd(c) => {
+                let bytes: [u8; 16] = c.msg_id.as_slice().try_into().expect("16 bytes");
+                bytes
+            }
+            _ => panic!("expected a chunk frame"),
+        };
+        (frames, msg_id)
+    }
+
+    fn big_png() -> Vec<u8> {
+        (0..600_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect()
+    }
+
+    #[test]
+    fn a_chunked_image_round_trips() {
+        let png = big_png();
+        let (frames, _) = image_frames(1, &png);
+        assert!(
+            frames.len() > 2,
+            "expected several chunks, got {}",
+            frames.len()
+        );
+
+        let (mut a, _) = ready_session(DEVICE_A);
+        let mut actions = Vec::new();
+        for frame in &frames {
+            actions.extend(a.handle_frame(frame, NOW).expect("handled"));
+        }
+
+        assert_eq!(actions.len(), 1, "exactly one action, on the final chunk");
+        match &actions[0] {
+            Action::Image { png: got, .. } => assert_eq!(got, &png),
+            other => panic!("expected an image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nothing_is_emitted_until_the_final_chunk() {
+        let (frames, _) = image_frames(1, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+        for frame in &frames[..frames.len() - 1] {
+            let actions = a.handle_frame(frame, NOW).expect("handled");
+            assert!(actions.is_empty(), "a partial assembly must commit nothing");
+        }
+        let last = a
+            .handle_frame(&frames[frames.len() - 1], NOW)
+            .expect("handled");
+        assert_eq!(last.len(), 1);
+    }
+
+    #[test]
+    fn a_truncated_stream_commits_nothing() {
+        let (frames, _) = image_frames(1, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+        // Everything except the final chunk. The image must never appear.
+        for frame in &frames[..frames.len() - 1] {
+            assert!(a.handle_frame(frame, NOW).expect("handled").is_empty());
+        }
+    }
+
+    #[test]
+    fn a_dropped_interior_chunk_commits_nothing() {
+        let (frames, _) = image_frames(1, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+        let mut actions = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            if i == 1 {
+                continue;
+            }
+            actions.extend(a.handle_frame(frame, NOW).expect("handled"));
+        }
+        assert!(actions.is_empty(), "a gap must not reassemble");
+    }
+
+    #[test]
+    fn a_reordered_chunk_is_discarded() {
+        let (frames, _) = image_frames(1, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+        let mut order: Vec<&String> = frames.iter().collect();
+        order.swap(1, 2);
+        let mut actions = Vec::new();
+        for frame in order {
+            actions.extend(a.handle_frame(frame, NOW).expect("handled"));
+        }
+        // The AAD binds the index, so a swapped chunk fails to open and the assembly is abandoned.
+        assert!(actions.is_empty(), "reordering must not reassemble");
+    }
+
+    #[test]
+    fn a_replayed_chunk_is_discarded() {
+        let (frames, _) = image_frames(1, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+        let mut actions = Vec::new();
+        actions.extend(a.handle_frame(&frames[0], NOW).expect("handled"));
+        actions.extend(a.handle_frame(&frames[0], NOW).expect("handled"));
+        for frame in &frames[1..] {
+            actions.extend(a.handle_frame(frame, NOW).expect("handled"));
+        }
+        assert!(
+            actions.is_empty(),
+            "a repeated index must poison the assembly"
+        );
+    }
+
+    #[test]
+    fn a_stray_foreign_chunk_does_not_destroy_an_assembly_in_flight() {
+        let (first, _) = image_frames(1, &big_png());
+        let (second, _) = image_frames(2, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+
+        assert!(a.handle_frame(&first[0], NOW).expect("handled").is_empty());
+
+        // An interior chunk of an unrelated message. It cannot start an assembly and must not be
+        // folded into this one, so it is ignored outright. Letting it abort the transfer in
+        // progress would hand any peer a cheap way to break another peer's image transfer by
+        // emitting a single stray frame.
+        assert!(a.handle_frame(&second[1], NOW).expect("handled").is_empty());
+
+        let mut actions = Vec::new();
+        for frame in &first[1..] {
+            actions.extend(a.handle_frame(frame, NOW).expect("handled"));
+        }
+        assert_eq!(
+            actions.len(),
+            1,
+            "the legitimate transfer must still complete"
+        );
+    }
+
+    #[test]
+    fn a_new_message_replaces_an_unfinished_assembly() {
+        let (first, _) = image_frames(1, &big_png());
+        let png = big_png();
+        let (second, _) = image_frames(2, &png);
+        let (mut a, _) = ready_session(DEVICE_A);
+
+        // Abandon the first message part way through.
+        assert!(a.handle_frame(&first[0], NOW).expect("handled").is_empty());
+        assert!(a.handle_frame(&first[1], NOW).expect("handled").is_empty());
+
+        // A fresh begin supersedes it. Holding the abandoned one forever is how a leak starts.
+        let mut actions = Vec::new();
+        for frame in &second {
+            actions.extend(a.handle_frame(frame, NOW).expect("handled"));
+        }
+        assert_eq!(actions.len(), 1, "the second message completes");
+        match &actions[0] {
+            Action::Image { png: got, .. } => assert_eq!(got, &png),
+            other => panic!("expected an image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stream_joined_mid_flight_is_ignored() {
+        let (frames, _) = image_frames(1, &big_png());
+        let (mut a, _) = ready_session(DEVICE_A);
+        // Starting at an interior chunk can never complete, so it is dropped rather than tracked.
+        assert!(a.handle_frame(&frames[1], NOW).expect("handled").is_empty());
+    }
+
+    #[test]
+    fn an_image_just_under_the_cap_survives_padding_on_the_way_back() {
+        // Regression. The relay announces a 700 KiB content cap. An image of 700000 bytes is
+        // inside it, but its padded inner plaintext is 720896 bytes, so capping the reassembly at
+        // the content limit silently discarded it mid stream. The sender measures raw content and
+        // the receiver must measure the padded total, or the two disagree and large images vanish.
+        let png: Vec<u8> = (0..700_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+
+        let (mut sender, _) = ready_session(DEVICE_B);
+        let frames = sender
+            .observe_local_image(&png, NOW)
+            .expect("sender accepts an image inside the content cap");
+
+        let (mut receiver, _) = ready_session(DEVICE_A);
+        let mut actions = Vec::new();
+        for frame in &frames {
+            actions.extend(receiver.handle_frame(frame, NOW).expect("handled"));
+        }
+
+        assert_eq!(actions.len(), 1, "the image must reassemble");
+        match &actions[0] {
+            Action::Image { png: got, .. } => assert_eq!(got.len(), png.len()),
+            other => panic!("expected an image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_image_beyond_the_content_cap_is_refused_before_sealing() {
+        let (mut a, _) = ready_session(DEVICE_A);
+        let limit = a.limits().expect("limits announced").max_content_bytes;
+        let oversize = vec![0u8; usize::try_from(limit).unwrap_or(usize::MAX) + 1];
+        let err = a
+            .observe_local_image(&oversize, NOW)
+            .expect_err("must refuse");
+        assert!(matches!(err, Error::ContentTooLarge { .. }));
+    }
+
+    #[test]
+    fn an_empty_image_produces_no_frames() {
+        let (mut a, _) = ready_session(DEVICE_A);
+        assert!(a.observe_local_image(&[], NOW).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn chunk_frames_carry_the_right_types_in_order() {
+        let (frames, _) = image_frames(1, &big_png());
+        let types: Vec<&str> = frames
+            .iter()
+            .map(|f| {
+                let m = Message::parse(f).expect("parses");
+                match m {
+                    Message::ClipBegin(_) => "begin",
+                    Message::ClipChunk(_) => "chunk",
+                    Message::ClipEnd(_) => "end",
+                    _ => "other",
+                }
+            })
+            .collect();
+        assert_eq!(types[0], "begin");
+        assert_eq!(types[types.len() - 1], "end");
+        assert!(types[1..types.len() - 1].iter().all(|t| *t == "chunk"));
     }
 }

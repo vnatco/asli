@@ -22,7 +22,13 @@ import type { Config } from './config.ts';
 import { log, roomLogId } from './log.ts';
 import { AUTH_FAIL_CLOSE, verifyAuth } from './auth.ts';
 import type { AuthFailCode, NonceState } from './auth.ts';
-import { parseFrame, validateAuth, validateClip, validateHello } from './validate.ts';
+import {
+  parseFrame,
+  validateAuth,
+  validateChunk,
+  validateClip,
+  validateHello,
+} from './validate.ts';
 import { IpLimiter, RollingQuota, TokenBucket, rateLimitKey, resolveClientAddress } from './limits.ts';
 import { RoomRegistry } from './rooms.ts';
 import type { Connection } from './rooms.ts';
@@ -31,6 +37,23 @@ const SUITE = 'asli-v1';
 const ENCODING = 'json';
 
 type ConnState = 'connected' | 'challenged' | 'ready';
+
+/**
+ * How long a half finished chunk stream may sit before it is abandoned.
+ *
+ * A sender that dies mid image would otherwise pin its assembly slot forever, which is both a leak
+ * and a way to lock a connection out of sending anything else.
+ */
+const CHUNK_ASSEMBLY_TIMEOUT_MS = 30_000;
+
+/** A chunked message in flight on one connection. Exactly one at a time. */
+type ChunkAssembly = {
+  msgId: string;
+  chunkCount: number;
+  received: number;
+  bytes: number;
+  startedMs: number;
+};
 
 type Session = {
   ws: WebSocket;
@@ -46,6 +69,8 @@ type Session = {
   pendingClip: string | null;
   backpressureSinceMs: number | null;
   joined: boolean;
+  /** The chunked message this connection is currently sending, if any. */
+  assembly: ChunkAssembly | null;
 };
 
 /**
@@ -254,6 +279,109 @@ export function createRelay(config: Config): Relay {
     session.ws.send(frame);
   }
 
+  /**
+   * Routes one chunk of a chunked message.
+   *
+   * The relay never opens a chunk, so its job is narrower than it looks: charge the quota as bytes
+   * arrive rather than at the end, refuse a second concurrent assembly on one connection, discard a
+   * stalled one, and never retain a chunked message. Ordering and integrity are enforced
+   * cryptographically by the receiver, because the relay is not trusted to do it.
+   */
+  function handleChunk(
+    session: Session,
+    raw: NodeBuffer,
+    message: ReturnType<typeof parseFrame>,
+    type: string,
+  ): void {
+    if (!message.ok) return;
+    const chunk = validateChunk(message.message, config.maxFrameBytes);
+    if (chunk === null) {
+      sendError(session, 'MALFORMED', 'chunk failed validation');
+      session.ws.close(4005, 'MALFORMED');
+      return;
+    }
+    if (chunk.roomText.toUpperCase() !== session.conn.roomId) {
+      session.ws.close(4005, 'ROOM_MISMATCH');
+      return;
+    }
+
+    const now = Date.now();
+
+    // A begin always starts fresh. Anything else must match the assembly in progress, or the
+    // sender is interleaving messages, which the protocol does not allow.
+    const current = session.assembly;
+    const stale = current !== null && now - current.startedMs > CHUNK_ASSEMBLY_TIMEOUT_MS;
+    if (current !== null && stale) {
+      log.debug('chunk_assembly_timeout', {
+        conn: session.conn.id,
+        msg: current.msgId,
+      });
+      session.assembly = null;
+    }
+
+    if (type === 'clip_begin' || session.assembly === null) {
+      if (chunk.idx !== 0) {
+        // A stream joined in the middle can never complete here, so there is nothing to track.
+        sendError(session, 'MALFORMED', 'chunk stream did not start at index zero');
+        return;
+      }
+      session.assembly = {
+        msgId: chunk.msgIdText,
+        chunkCount: chunk.chunkCount,
+        received: 0,
+        bytes: 0,
+        startedMs: now,
+      };
+    }
+
+    const assembly = session.assembly;
+    if (assembly === null) return;
+    if (assembly.msgId !== chunk.msgIdText || assembly.chunkCount !== chunk.chunkCount) {
+      sendError(session, 'MALFORMED', 'chunk does not belong to the assembly in progress');
+      session.assembly = null;
+      return;
+    }
+
+    // Charged as it arrives. Charging at the end would let a partial upload spend the room's whole
+    // daily allowance and then abandon the message.
+    let quota = roomQuotas.get(session.conn.roomId);
+    if (quota === undefined) {
+      quota = new RollingQuota(config.roomBytesPerDay, 24 * 60 * 60 * 1000, now);
+      roomQuotas.set(session.conn.roomId, quota);
+    }
+    if (!quota.charge(raw.length, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
+      sendError(session, 'QUOTA_EXCEEDED', 'room daily quota exhausted', quota.retryAfterMs(now));
+      session.assembly = null;
+      session.ws.close(4008, 'QUOTA_EXCEEDED');
+      return;
+    }
+
+    assembly.received += 1;
+    assembly.bytes += raw.length;
+
+    const frame = raw.toString('utf8');
+    let delivered = 0;
+    for (const peer of sessions) {
+      if (peer === session) continue;
+      if (peer.state !== 'ready' || peer.conn.roomId !== session.conn.roomId) continue;
+      deliver(peer, frame);
+      delivered += 1;
+    }
+
+    // Deliberately never retained. A retained clip is served to late joiners as a single frame,
+    // and half a chunked image is worse than nothing.
+    if (type === 'clip_end') {
+      log.debug('chunk_complete', {
+        conn: session.conn.id,
+        room: roomLogId(session.conn.roomId),
+        bytes: assembly.bytes,
+        count: delivered,
+      });
+      session.assembly = null;
+    }
+  }
+
   function handleClip(session: Session, raw: NodeBuffer, message: ReturnType<typeof parseFrame>): void {
     if (!message.ok) return;
     const clip = validateClip(message.message, config.maxFrameBytes);
@@ -364,6 +492,7 @@ export function createRelay(config: Config): Relay {
       pendingClip: null,
       backpressureSinceMs: null,
       joined: false,
+      assembly: null,
     };
     sessions.add(session);
     log.debug('conn_open', { conn: session.conn.id });
@@ -433,6 +562,11 @@ export function createRelay(config: Config): Relay {
       switch (type) {
         case 'clip':
           handleClip(session, raw, parsed);
+          return;
+        case 'clip_begin':
+        case 'clip_chunk':
+        case 'clip_end':
+          handleChunk(session, raw, parsed, type);
           return;
         case 'fetch_last':
           handleFetchLast(session);

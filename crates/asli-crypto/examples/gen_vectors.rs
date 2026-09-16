@@ -10,6 +10,7 @@
 //! prefix, a field order or a truncation length breaks the test suite loudly. If this file's
 //! output changes, the wire format changed, and that is a protocol version bump.
 
+use asli_crypto::chunk::{self, ChunkPos};
 use asli_crypto::{auth, clip, identity, kdf, token};
 
 const SECRET: [u8; 32] = [
@@ -37,6 +38,42 @@ const SEQ: u64 = 7;
 const TS_MS: u64 = 1_767_225_600_000;
 const CLIENT_TIME_MS: u64 = 1_767_225_600_123;
 const CONTENT: &[u8] = b"asli known answer vector";
+
+/// Fixed message id for the chunked vector, distinct from the single clip one.
+const CHUNK_MSG_ID: [u8; 16] = [
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+];
+/// Four fixed nonces, so the whole chunked vector is reproducible.
+///
+/// Four rather than three on purpose: the payload pads to 512 bytes and splits at 128, which
+/// yields `clip_begin`, two `clip_chunk` middles and `clip_end`, so every type code is covered and
+/// interior is genuinely interior.
+const CHUNK_NONCES: [[u8; 24]; 4] = [
+    [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+    ],
+    [
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e,
+        0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+    ],
+    [
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e,
+        0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+    ],
+    [
+        0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e,
+        0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    ],
+];
+/// Small enough that a short image splits into exactly three chunks.
+const CHUNK_BYTES: usize = 128;
+/// Fixed image payload for the chunked vector. Not a real PNG: the crypto layer never parses it.
+fn chunk_image() -> Vec<u8> {
+    (0..300u32)
+        .map(|i| u8::try_from(i % 251).unwrap_or(0))
+        .collect()
+}
 
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -121,6 +158,9 @@ fn main() {
     println!("    \"padded_plaintext_len\": {},", plaintext.len());
     println!("    \"ciphertext\": \"{}\"", hex(&ciphertext));
     println!("  }},");
+
+    emit_chunked(&id);
+
     println!("  \"auth\": {{");
     println!("    \"nonce_s\": \"{}\",", hex(&NONCE_S));
     println!("    \"nonce_c\": \"{}\",", hex(&NONCE_C));
@@ -129,4 +169,80 @@ fn main() {
     println!("    \"signature\": \"{}\"", hex(&signature));
     println!("  }}");
     println!("}}");
+}
+
+/// Emits the chunked transfer vector.
+///
+/// Split out because it is a different job from the single clip vectors, and because `main` is
+/// past the line limit with it inline.
+fn emit_chunked(id: &identity::Identity) {
+    // Chunked transfer. Sealed with fixed nonces so the whole stream is reproducible, which is
+    // what makes a reordering or truncation regression break the suite rather than pass quietly.
+    let chunk_inner = clip::Inner {
+        content_type: clip::ContentType::ImagePng,
+        device_id: DEVICE_ID,
+        seq: SEQ,
+        ts_ms: TS_MS,
+        content: chunk_image(),
+    };
+    let chunk_plaintext = clip::encode_inner(&chunk_inner);
+    let chunk_count = chunk::chunk_count_for(chunk_plaintext.len(), CHUNK_BYTES);
+
+    println!("  \"chunked\": {{");
+    println!("    \"epoch\": 0,");
+    println!("    \"msg_id\": \"{}\",", hex(&CHUNK_MSG_ID));
+    println!("    \"device_id\": \"{}\",", hex(&DEVICE_ID));
+    println!("    \"seq\": {SEQ},");
+    println!("    \"ts_ms\": {TS_MS},");
+    println!("    \"content_type\": 2,");
+    println!("    \"content\": \"{}\",", hex(&chunk_image()));
+    println!("    \"chunk_bytes\": {CHUNK_BYTES},");
+    println!("    \"chunk_count\": {chunk_count},");
+    println!("    \"padded_plaintext_len\": {},", chunk_plaintext.len());
+    println!("    \"chunks\": [");
+
+    let pieces: Vec<&[u8]> = chunk_plaintext.chunks(CHUNK_BYTES).collect();
+    assert_eq!(
+        pieces.len(),
+        CHUNK_NONCES.len(),
+        "the fixed nonce table must match the chunk count"
+    );
+    for (index, piece) in pieces.iter().enumerate() {
+        let idx = u32::try_from(index).expect("index fits");
+        let pos = ChunkPos {
+            idx,
+            chunk_count,
+            final_chunk: idx + 1 == chunk_count,
+        };
+        let nonce = CHUNK_NONCES[index];
+        let aad = chunk::build_chunk_aad(
+            chunk::PROTOCOL_VERSION,
+            pos.type_code(),
+            0,
+            &id.room_id_bytes(),
+            &CHUNK_MSG_ID,
+            pos,
+        );
+        let ciphertext = chunk::seal_chunk_with_nonce(
+            &id.enc_key(0),
+            0,
+            &id.room_id_bytes(),
+            &CHUNK_MSG_ID,
+            &nonce,
+            pos,
+            piece,
+        )
+        .expect("sealing the fixed chunk cannot fail");
+        let comma = if index + 1 == pieces.len() { "" } else { "," };
+        println!("      {{");
+        println!("        \"idx\": {idx},");
+        println!("        \"final\": {},", pos.final_chunk);
+        println!("        \"type_code\": {},", pos.type_code());
+        println!("        \"nonce\": \"{}\",", hex(&nonce));
+        println!("        \"aad\": \"{}\",", hex(&aad));
+        println!("        \"ciphertext\": \"{}\"", hex(&ciphertext));
+        println!("      }}{comma}");
+    }
+    println!("    ]");
+    println!("  }},");
 }

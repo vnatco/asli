@@ -61,6 +61,7 @@
 
 pub mod auth;
 pub mod base32;
+pub mod chunk;
 pub mod clip;
 pub mod error;
 pub mod identity;

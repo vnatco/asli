@@ -77,6 +77,12 @@ pub enum Message {
     Pong(Pong),
     /// Server to client, non fatal.
     Error(ErrorMessage),
+    /// First chunk of a chunked clip.
+    ClipBegin(ClipChunk),
+    /// An interior chunk.
+    ClipChunk(ClipChunk),
+    /// Final chunk, completing the message.
+    ClipEnd(ClipChunk),
 }
 
 impl Message {
@@ -114,8 +120,39 @@ impl Message {
             Self::Ping(m) => m.v,
             Self::Pong(m) => m.v,
             Self::Error(m) => m.v,
+            Self::ClipBegin(m) | Self::ClipChunk(m) | Self::ClipEnd(m) => m.v,
         }
     }
+}
+
+/// One chunk of a chunked clip.
+///
+/// The three chunk message types carry identical fields and differ only in position, so they share
+/// one payload type. The position itself is authenticated: `idx`, `chunk_count` and the implied
+/// final flag are bound into that chunk's associated data, so a relay cannot move a chunk without
+/// the tag check failing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipChunk {
+    /// Protocol version.
+    pub v: u8,
+    /// Room id, which must match the authenticated room.
+    pub room: String,
+    /// Key epoch, identical across every chunk of a message.
+    pub epoch: u32,
+    /// Message id, identical across every chunk of a message.
+    #[serde(with = "b64")]
+    pub msg_id: Vec<u8>,
+    /// Zero based chunk index.
+    pub idx: u32,
+    /// Total chunks in this message.
+    pub chunk_count: u32,
+    /// AEAD nonce for this chunk alone, 24 bytes.
+    #[serde(with = "b64")]
+    pub n: Vec<u8>,
+    /// Ciphertext of this chunk with the 16 byte tag appended.
+    #[serde(with = "b64")]
+    pub ct: Vec<u8>,
 }
 
 /// Client to server. Always the first message.

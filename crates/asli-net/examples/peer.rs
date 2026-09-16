@@ -23,7 +23,9 @@ const DEFAULT_URL: &str = "wss://asli.vnat.dev/v1";
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let local = tokio::task::LocalSet::new();
-    local.run_until(run()).await;
+    // Boxed because the event enum grew with image support and the composed future is now large
+    // enough that keeping it on the stack is wasteful.
+    Box::pin(local.run_until(run())).await;
 }
 
 async fn run() {

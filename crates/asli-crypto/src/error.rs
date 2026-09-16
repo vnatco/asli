@@ -53,6 +53,18 @@ pub enum Error {
     RoomBinding,
     /// Text was not valid UTF-8.
     NotUtf8,
+    /// A chunk count was zero, or beyond the cap that bounds a receiver's allocation.
+    ChunkCount,
+    /// A chunk did not belong where it claimed: wrong message, wrong total, an index outside the
+    /// range, or an index that already arrived.
+    ///
+    /// One variant rather than four on purpose. Distinguishing them would tell a relay probing the
+    /// receiver exactly which of its manipulations was detected.
+    ChunkMismatch,
+    /// Reassembly was attempted with a chunk still missing.
+    ChunkIncomplete,
+    /// The chunks accumulated past the size cap, detected mid stream rather than at the end.
+    ChunkTooLarge,
 }
 
 impl fmt::Display for Error {
@@ -80,6 +92,10 @@ impl fmt::Display for Error {
             Self::BadSignature => f.write_str("invalid signature"),
             Self::RoomBinding => f.write_str("room id does not match the public key"),
             Self::NotUtf8 => f.write_str("content is not valid UTF-8"),
+            Self::ChunkCount => f.write_str("chunk count is zero or beyond the supported maximum"),
+            Self::ChunkMismatch => f.write_str("a chunk did not belong to this message"),
+            Self::ChunkIncomplete => f.write_str("a chunk is missing, so nothing was reassembled"),
+            Self::ChunkTooLarge => f.write_str("the chunked payload exceeded the size cap"),
         }
     }
 }

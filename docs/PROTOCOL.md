@@ -331,15 +331,18 @@ Registry. Direction C is client, S is server.
 | `presence` | S to C | Room connection count changed | 7.8 |
 | `ping`, `pong` | C to S, S to C | Optional application level liveness and RTT | 7.9 |
 | `error` | S to C | Non fatal, connection stays open | 7.10 |
+| `clip_begin` | C to S, S to C | First chunk of a chunked clip | 7.11 |
+| `clip_chunk` | C to S, S to C | An interior chunk | 7.11 |
+| `clip_end` | C to S, S to C | Final chunk, completing the message | 7.11 |
 
 Sealed message types additionally have a numeric **type code**, bound into AAD (section 9.1):
 
 | Type code | Type | Status |
 |---|---|---|
 | 1 | `clip` | v1 |
-| 2 | `clip_begin` | Reserved for chunked transfer, v1.1 |
-| 3 | `clip_chunk` | Reserved for chunked transfer, v1.1 |
-| 4 | `clip_end` | Reserved for chunked transfer, v1.1 |
+| 2 | `clip_begin` | v1 |
+| 3 | `clip_chunk` | v1 |
+| 4 | `clip_end` | v1 |
 | 5 to 255 | unassigned | Reserved |
 
 Type codes are reserved now so that a v1.1 chunked message cannot collide with a v1 `clip` in AAD.
@@ -611,6 +614,34 @@ Server to client. Non fatal: the connection stays open.
 
 ---
 
+### 7.11 `clip_begin`, `clip_chunk` and `clip_end`
+
+A payload too large for one frame crosses as an ordered run of chunks. All three types carry the
+same fields, and differ only in position: `clip_begin` is index 0 of a message with more to come,
+`clip_end` is the final index, and `clip_chunk` is everything between. A single chunk message uses
+`clip_end`, so a receiver can never be handed a `clip_begin` that silently completes.
+
+| Field | Type | Encoding | Required | Meaning |
+|---|---|---|---|---|
+| `v` | number | | yes | Protocol version, 1 |
+| `room` | string | Crockford base32, 26 chars | yes | Must match the authenticated room |
+| `epoch` | number | u32 | yes | Key epoch, identical across every chunk of a message |
+| `msg_id` | string | base64, 16 bytes | yes | Identical across every chunk of a message |
+| `idx` | number | u32 | yes | Zero based chunk index |
+| `chunk_count` | number | u32 | yes | Total chunks, identical across every chunk, at most 4096 |
+| `n` | string | base64, 24 bytes | yes | AEAD nonce, fresh per chunk, never reused |
+| `ct` | string | base64 | yes | Ciphertext of this chunk with its 16 byte tag appended |
+
+```json
+{"v":1,"type":"clip_begin","room":"PAJJVF67VX0M0RJKZ0FDAD8B2M","epoch":0,
+ "msg_id":"sLGys7S1tre4ubq7vL2+vw==","idx":0,"chunk_count":4,
+ "n":"EBESExQVFhcYGRobHB0eHyAhIiMkJSYn","ct":"..."}
+```
+
+A sender MUST emit chunks in ascending index order on one connection, and MUST NOT interleave two
+chunked messages. A receiver MUST NOT rely on either: ordering is enforced cryptographically by
+section 9.5, not by arrival order.
+
 ## 8. Authentication handshake
 
 ### 8.1 Signature input
@@ -772,6 +803,60 @@ corruption or an active attack, and neither warrants a response that would confi
 relay.
 
 ---
+
+### 9.5 Sealing and opening a chunk
+
+A chunked message is encoded and padded exactly as a single clip would be, by section 9.2 and
+section 9.3, and only then split. That order matters: padding the whole message hides the true
+content length, whereas padding each chunk would leak the length of the final one.
+
+Each chunk is sealed independently under its own fresh nonce, with associated data that binds its
+position:
+
+```
+AAD = "asli/v1/caad"                 (12 bytes)
+   || u8(v)                           protocol version                  (1)
+   || u8(type_code)                   2, 3 or 4                         (1)
+   || u32be(epoch)                                                      (4)
+   || u8(16) || room_id_bytes                                           (1 + 16)
+   || u8(16) || msg_id                                                  (1 + 16)
+   || u32be(idx)                                                        (4)
+   || u32be(chunk_count)                                                (4)
+   || u8(final)                       1 for the last chunk, else 0      (1)
+
+total = 12 + 1 + 1 + 4 + 17 + 17 + 4 + 4 + 1 = 61 bytes, fixed
+```
+
+The label differs from the 51 byte clip AAD in section 9.1, so the two constructions can never be
+confused. The clip AAD is unchanged.
+
+Binding `idx`, `chunk_count` and the final flag is the point of the whole construction. Without
+them every chunk of a message is interchangeable to the AEAD, and a relay can reorder chunks, drop
+one from the middle, or truncate the stream, while each individual chunk still verifies. The
+receiver would then reassemble attacker chosen content with no way to detect it. With them, a chunk
+verifies only in the exact position it was sealed for.
+
+Receiver rules, all of which MUST hold:
+
+- A chunk whose `msg_id`, `epoch` or `chunk_count` differs from the assembly in progress is
+  rejected.
+- An `idx` outside `0 ..= chunk_count - 1`, or one that has already arrived, is rejected. A
+  repeated index means either a broken sender or a relay replaying a chunk, and the assembly is no
+  longer trustworthy either way.
+- The accumulated payload is measured as chunks arrive and rejected the moment it exceeds the cap,
+  not at the end.
+- Nothing is committed to the clipboard until every index has arrived and the reassembled inner
+  plaintext decodes. A partial assembly is discarded.
+- `chunk_count` above 4096 is rejected outright, so a hostile count cannot drive an allocation.
+
+### 9.6 Image content
+
+Images travel as PNG and nothing else in v1. One format on the wire means no transcoding
+ambiguity, no format sniffing on the receiving side, and no second decoder to harden. A client that
+captures a clipboard image in another format normalizes it to PNG before sealing, or does not sync
+it.
+
+The relay never inspects content type: it is inside the ciphertext, exactly as for text.
 
 ## 10. Receiver validation
 
@@ -1059,6 +1144,7 @@ noted:
 | `ciphertext` | The exact sealed output, ciphertext with tag appended |
 | `sig_input` | The exact 121 byte signature input for a fixed `nonce_s` and `nonce_c` |
 | `sig` | The 64 byte signature |
+| `chunked` | A four chunk message: the fixed `msg_id`, `content`, `chunk_bytes`, `chunk_count`, `padded_plaintext_len`, and per chunk the `idx`, `final`, `type_code`, `nonce`, the exact 61 AAD bytes and the exact ciphertext |
 
 ### 16.2 Negative tests
 
@@ -1072,6 +1158,10 @@ Each of these MUST fail closed:
 - A replayed `msg_id`.
 - A `ts_ms` beyond the max age window.
 - A `seq` at or below the highest already seen for that `device_id`.
+- A chunk presented at an index other than the one it was sealed for.
+- A chunk stream missing an interior index, or truncated before its final chunk.
+- A chunk repeating an index already accepted.
+- A chunk claiming a `chunk_count` that differs from the assembly in progress.
 - A `room_id` that does not match `pub_key`.
 - A signature over a stale or already used `nonce_s`.
 - Malformed join tokens: bad prefix, bad checksum, wrong length, wrong version byte, invalid
@@ -1084,7 +1174,7 @@ Each of these MUST fail closed:
 | Feature | Status | Notes |
 |---|---|---|
 | `bin1` binary framing | Reserved, not implemented | Section 3.2. Negotiated through `enc` in `hello` |
-| Image content (`content_type` 2) | Specified, not implemented | Normalized PNG, planned for v1.1 |
-| Chunked transfer | Reserved, not implemented | `clip_begin`, `clip_chunk`, `clip_end` hold type codes 2, 3 and 4. Each chunk is sealed independently with `msg_id`, `idx`, `chunk_count` and a final flag bound in that chunk's AAD, because without the index and count in AAD a relay can reorder, drop or truncate chunks undetectably |
+| Image content (`content_type` 2) | Specified and implemented at the transport layer | PNG only, see section 9.6. Clipboard capture of images is a client concern and lands separately |
+| Chunked transfer | Specified and implemented | See sections 7.11 and 9.5 |
 | Per device keys and a signed device roster | Not specified | The v2 path to real revocation, noted in the architecture notes It changes onboarding and is deliberately not in v1 |
 | Files as a content type | Not planned | Out of scope |

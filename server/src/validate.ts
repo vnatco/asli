@@ -35,15 +35,34 @@ const KNOWN_TYPES = new Set([
   'hello',
   'auth',
   'clip',
+  'clip_begin',
+  'clip_chunk',
+  'clip_end',
   'fetch_last',
   'ping',
   'pong',
+]);
+
+/** The three chunk types carry identical fields and differ only in position. */
+const CHUNK_FIELDS = new Set([
+  'v',
+  'type',
+  'room',
+  'epoch',
+  'msg_id',
+  'idx',
+  'chunk_count',
+  'n',
+  'ct',
 ]);
 
 const ALLOWED_FIELDS: Record<string, ReadonlySet<string>> = {
   hello: new Set(['v', 'type', 'suites', 'enc', 'client']),
   auth: new Set(['v', 'type', 'room', 'pub_key', 'nonce_c', 'client_time_ms', 'sig']),
   clip: new Set(['v', 'type', 'room', 'epoch', 'msg_id', 'n', 'ct']),
+  clip_begin: CHUNK_FIELDS,
+  clip_chunk: CHUNK_FIELDS,
+  clip_end: CHUNK_FIELDS,
   fetch_last: new Set(['v', 'type']),
   ping: new Set(['v', 'type', 't']),
   pong: new Set(['v', 'type', 't']),
@@ -201,4 +220,54 @@ export function validateClip(message: Envelope, maxFrameChars: number): ClipFiel
   if (ciphertext === null) return null;
 
   return { roomText, epoch, msgIdText, msgId, nonce, ciphertextBytes: ciphertext.length };
+}
+
+/** Upper bound on chunks per message, matching the crypto layer's cap. */
+export const MAX_CHUNKS = 4096;
+
+export type ChunkFields = {
+  roomText: string;
+  epoch: number;
+  msgIdText: string;
+  idx: number;
+  chunkCount: number;
+  ciphertextBytes: number;
+};
+
+/**
+ * Validates the shape of a chunk message.
+ *
+ * The relay never opens a chunk, so this checks only what routing and accounting need: that the
+ * position fields are plausible integers within the cap, and that the ciphertext is present. The
+ * cryptographic binding of idx and chunk_count is the receiver's business, and it is what actually
+ * prevents a reordered chunk from being accepted.
+ */
+export function validateChunk(message: Envelope, maxFrameChars: number): ChunkFields | null {
+  const roomText = message['room'];
+  if (typeof roomText !== 'string' || roomText.length !== ROOM_CHARS) return null;
+
+  const epoch = message['epoch'];
+  if (typeof epoch !== 'number' || !Number.isInteger(epoch) || epoch < 0 || epoch > 0xffff_ffff) {
+    return null;
+  }
+
+  const msgIdText = message['msg_id'];
+  const msgId = decodeExact(msgIdText, 16);
+  if (msgId === null || typeof msgIdText !== 'string') return null;
+
+  const idx = message['idx'];
+  const chunkCount = message['chunk_count'];
+  if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) return null;
+  if (typeof chunkCount !== 'number' || !Number.isInteger(chunkCount)) return null;
+  if (chunkCount < 1 || chunkCount > MAX_CHUNKS) return null;
+  // An index outside the declared run is nonsense that never needs forwarding.
+  if (idx >= chunkCount) return null;
+
+  const nonce = decodeExact(message['n'], 24);
+  if (nonce === null) return null;
+
+  const ciphertext = decodeAtLeast(message['ct'], 17, maxFrameChars);
+  if (ciphertext === null) return null;
+
+  return { roomText, epoch, msgIdText, idx, chunkCount, ciphertextBytes: ciphertext.length };
 }
