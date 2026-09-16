@@ -1,29 +1,32 @@
 version: 2
+
+# Security advisories only.
+#
+# Setting open-pull-requests-limit to 0 stops the weekly version bump pull
+# requests. It does not disable security updates: Dependabot still raises those
+# when an advisory affects a locked dependency, which is the part worth being
+# interrupted for.
+#
+# The reason for the distinction is this project's test vectors. The crypto
+# crates produce the exact bytes on the wire, and testdata/vectors.json freezes
+# them. A routine version bump that silently changed a byte would break every
+# existing account, so those upgrades are taken deliberately, together, with the
+# vector diff proving nothing moved. That is not a review a robot can do.
 updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore"
-    groups:
-      # One pull request for the routine bumps, so review attention goes to the major ones.
-      cargo-minor-and-patch:
-        update-types:
-          - minor
-          - patch
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore"
-    groups:
-      actions-minor-and-patch:
-        update-types:
-          - minor
-          - patch
