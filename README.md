@@ -62,9 +62,25 @@ the same code and the same configuration you would deploy yourself.
 
 ## Self-hosting the relay
 
-Not yet documented; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design. The short version:
-one Node process, no database, a Docker image and a compose file with Caddy for automatic HTTPS,
-comfortable on the cheapest VPS you can rent.
+The relay is one Node process with a single runtime dependency, no database, and nothing written to
+disk. It holds your most recent clip in memory, briefly, and forgets it. Full instructions are in
+[server/README.md](server/README.md); the short version:
+
+```sh
+cd server
+docker compose up -d
+```
+
+That brings up the relay behind Caddy, which obtains and renews a certificate automatically. Point
+your devices at it by setting the relay URL in Settings, or by editing `relay` in the config file
+printed by `asli status`.
+
+It is comfortable on the cheapest VPS you can rent. The public instance runs with `MemoryMax=128M`
+and sits around 45 MB resident, sharing a 961 MB box with other services.
+
+Running your own is a first class path, not a grudging one: the public relay runs the same code from
+the same compose file, with no privileged configuration of its own. The only thing it cannot do,
+either way, is read your clipboard.
 
 ## Platform notes
 

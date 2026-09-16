@@ -3,9 +3,10 @@
 How Asli is put together, and why. The security design lives in `PROTOCOL.md` and
 `THREAT_MODEL.md`; this document is about structure, threads and data flow.
 
-> **Status.** Only `asli-crypto` exists today. Everything else in this document is the agreed
-> design for M1 and is written as planned behaviour. Sections that describe code that does not
-> exist yet are marked "planned".
+> **Status.** All five crates exist and the relay is deployed. Text and images sync in both
+> directions on Linux, verified against a live relay. The Windows and macOS backends are written
+> and cross compile, but no Win32 or AppKit call in them has ever executed, so treat anything
+> specific to those two platforms as designed rather than proven.
 
 ## 1. The shape of the system
 
@@ -115,7 +116,7 @@ main thread with a timer tolerance, and hands its result to the core over a chan
 
 ## 5. Loop prevention, in three layers
 
-Each layer alone has a failure mode, so all three run. This lives in `asli-core` (planned), not in
+Each layer alone has a failure mode, so all three run. This lives in `asli-core`, not in
 the platform backends, so the logic is tested once rather than four times.
 
 1. **Origin id.** Every clip carries `device_id` inside the ciphertext. Drop anything with our own.
@@ -163,7 +164,7 @@ honestly rather than pretending to be offline.
 
 ## 7. Configuration and secrets
 
-Planned. The root secret and the configuration are stored separately, and only the secret goes to
+The root secret and the configuration are stored separately, and only the secret goes to
 the keychain.
 
 | Platform | Secret | Configuration |
