@@ -281,6 +281,12 @@ thread_local! {
     static TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
 }
 
+/// The Wayland application id, which must match the desktop entry's basename exactly.
+///
+/// Also the X11 `WM_CLASS`. Changing it without renaming `packaging/linux/asli.desktop` silently
+/// costs the window its icon, which is why they are named in the same comment.
+const APP_ID: &str = "asli";
+
 /// Installs what the window acts on. Call once, on the main thread, before [`run_event_loop`].
 ///
 /// # Errors
@@ -492,6 +498,24 @@ fn wire_account(window: &AppWindow) {
 
 /// Builds the window and attaches every callback.
 fn build() -> Result<AppWindow> {
+    // The Wayland app id, declared once, here rather than in `install`.
+    //
+    // It has to land after the toolkit's platform is initialised and before the first surface is
+    // created. `install` runs too early: there is no platform yet, the call fails with "no Slint
+    // platform was initialized", and the surface then announces no app id at all. A compositor
+    // with no name to match cannot find the installed desktop entry, and the window falls back to
+    // a generic icon whatever the icon theme holds.
+    //
+    // Once per process, because only the first window's surface reads it.
+    static APP_ID_ONCE: std::sync::Once = std::sync::Once::new();
+    APP_ID_ONCE.call_once(|| {
+        if let Err(err) = slint::set_xdg_app_id(APP_ID) {
+            // Never fatal. Elsewhere this is unnecessary or unsupported, and a window wearing the
+            // wrong icon is worth strictly more than no window.
+            eprintln!("{}", log_line("app_id_failed", &err.to_string()));
+        }
+    });
+
     let window = AppWindow::new().map_err(|err| Error::ConfigDir(err.to_string()))?;
 
     let handle = window.as_weak();
