@@ -73,11 +73,20 @@ pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
     let encoded = Zeroizing::new(asli_crypto::base32::encode(secret));
 
     if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
-        if entry.set_password(&encoded).is_ok() {
-            // A previous run may have left a file fallback behind. Two copies of the key is one
-            // copy too many.
-            let _ = fs::remove_file(paths.secret_file());
-            return Ok(Store::Keychain);
+        match entry.set_password(&encoded) {
+            Ok(()) => {
+                // A previous run may have left a file fallback behind. Two copies of the key is
+                // one copy too many.
+                let _ = fs::remove_file(paths.secret_file());
+                return Ok(Store::Keychain);
+            }
+            // A keychain that is there but locked must not be bypassed. The key would go to the
+            // file, the keychain would keep the old one, and since the keychain is read first,
+            // the next start would silently use the old account.
+            Err(keyring::Error::NoStorageAccess(err)) => {
+                return Err(Error::KeychainLocked(err.to_string()));
+            }
+            Err(_) => {}
         }
     }
 
@@ -91,10 +100,17 @@ pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
 ///
 /// Returns [`Error::Parse`] if a stored value exists but is not a valid key.
 pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
+    let mut locked = None;
     if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
-        if let Ok(encoded) = entry.get_password() {
-            let secret = decode(&encoded)?;
-            return Ok(Some((secret, Store::Keychain)));
+        match entry.get_password() {
+            Ok(encoded) => {
+                let secret = decode(&encoded)?;
+                return Ok(Some((secret, Store::Keychain)));
+            }
+            // Locked, or a prompt dismissed or denied. There may be a key in there.
+            Err(keyring::Error::NoStorageAccess(err)) => locked = Some(err.to_string()),
+            // No entry, or no keychain service at all: both mean nothing is stored there.
+            Err(_) => {}
         }
     }
 
@@ -105,7 +121,10 @@ pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
         return Ok(Some((secret, Store::File)));
     }
 
-    Ok(None)
+    match locked {
+        Some(detail) => Err(Error::KeychainLocked(detail)),
+        None => Ok(None),
+    }
 }
 
 /// Removes the account key from wherever it is.
@@ -118,7 +137,12 @@ pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
 /// Returns [`Error::Io`] if the fallback file exists and cannot be removed.
 pub fn wipe(paths: &Paths) -> Result<()> {
     if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
-        let _ = entry.delete_credential();
+        // Nothing there, or no keychain at all, is success. A locked keychain is not: reporting
+        // the account forgotten while the key is still stored would defeat the one way v1 has of
+        // revoking a leaked key.
+        if let Err(keyring::Error::NoStorageAccess(err)) = entry.delete_credential() {
+            return Err(Error::KeychainLocked(err.to_string()));
+        }
     }
     let path = paths.secret_file();
     if path.exists() {
@@ -155,13 +179,29 @@ fn decode(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
 }
 
 fn write_secret_file(paths: &Paths, encoded: &str) -> Result<()> {
+    use std::io::Write as _;
+
     let path = paths.secret_file();
-    fs::write(&path, encoded).map_err(|e| {
+    let failed = |e: std::io::Error| {
         Error::SecretStore(format!(
             "no keychain was available and {} could not be written: {e}",
             path.display()
         ))
-    })?;
+    };
+
+    // Created owner only from the first byte. Writing first and restricting afterwards left a
+    // moment where the file was readable by other users, and a handle opened then stays open.
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(failed)?;
+    file.write_all(encoded.as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    // Still applied, for a file that already existed with wider permissions.
     owner_only(&path)?;
     Ok(())
 }

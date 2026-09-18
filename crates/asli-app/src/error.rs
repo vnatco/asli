@@ -18,6 +18,11 @@ pub enum Error {
     AccountExists,
     /// The secret could not be stored anywhere, neither the keychain nor a file.
     SecretStore(String),
+    /// The keychain exists but refused access: it is locked, or a prompt was dismissed or denied.
+    ///
+    /// Kept apart from "no account", because it may well hold one. Treating it as empty offered
+    /// to create a new account over the real one.
+    KeychainLocked(String),
     /// Something in the crypto layer failed.
     Crypto(asli_crypto::Error),
     /// Something in the clipboard layer failed.
@@ -41,6 +46,10 @@ impl fmt::Display for Error {
                 "an account already exists on this device. Run 'asli reset' first if you really want to replace it",
             ),
             Self::SecretStore(detail) => write!(f, "could not store the account key: {detail}"),
+            Self::KeychainLocked(detail) => write!(
+                f,
+                "the keychain is locked or refused access, so the account key cannot be read. Unlock it and start Asli again ({detail})"
+            ),
             Self::Crypto(err) => write!(f, "{err}"),
             Self::Clipboard(err) => write!(f, "{err}"),
             Self::Net(err) => write!(f, "{err}"),
