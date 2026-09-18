@@ -60,9 +60,13 @@ mod platform {
 
     use crate::error::{Error, Result};
 
-    /// Filename of the desktop entry. Reverse DNS is the convention, and it keeps the entry
-    /// identifiable in a directory a user may have many of.
-    const ENTRY: &str = "dev.vnat.asli.desktop";
+    /// Filename of the desktop entry. The same basename as the application entry and the window's
+    /// app id, and the name `setup.sh --uninstall` removes, so there is one name for one job.
+    const ENTRY: &str = "asli.desktop";
+
+    /// What earlier builds called it. Removed whenever the setting is applied, or a machine that
+    /// ran one of them would start Asli twice at login.
+    const LEGACY_ENTRY: &str = "dev.vnat.asli.desktop";
 
     /// The autostart directory for this user, from the environment.
     ///
@@ -108,6 +112,11 @@ mod platform {
     }
 
     fn set_enabled_in(dir: &Path, enabled: bool, exe: &str) -> Result<()> {
+        let legacy = dir.join(LEGACY_ENTRY);
+        if legacy.exists() {
+            fs::remove_file(&legacy).map_err(Error::Io)?;
+        }
+
         let path = dir.join(ENTRY);
         if enabled {
             fs::create_dir_all(dir).map_err(Error::Io)?;
@@ -184,6 +193,18 @@ mod platform {
             // And disabling something already absent is not an error.
             set_enabled_in(&dir, false, "/usr/bin/asli").expect("disables");
             set_enabled_in(&dir, false, "/usr/bin/asli").expect("disabling twice is fine");
+
+            let _ = fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_old_entry_name_is_removed_so_login_starts_one_copy() {
+            let dir = scratch("legacy");
+            fs::write(dir.join(LEGACY_ENTRY), "[Desktop Entry]\n").expect("writes legacy");
+
+            set_enabled_in(&dir, true, "/usr/bin/asli").expect("enables");
+            assert!(dir.join(ENTRY).exists());
+            assert!(!dir.join(LEGACY_ENTRY).exists());
 
             let _ = fs::remove_dir_all(dir);
         }
