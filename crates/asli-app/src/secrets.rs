@@ -174,7 +174,9 @@ fn owner_only(path: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Same signature as the Unix version, which can fail.
 fn owner_only(_path: &std::path::Path) -> Result<()> {
+    // The file sits in the user profile, whose access control is owner only by default.
     Ok(())
 }
 

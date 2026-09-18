@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::{Config, Paths};
 use crate::daemon::Status;
@@ -236,6 +236,9 @@ impl Tray {
             .with_menu(Box::new(menu))
             .with_tooltip("Asli")
             .with_icon(icon_for(IconState::Offline)?)
+            // A left click opens the window and a right click opens the menu, as on every other
+            // tray application. The default on Windows and macOS is the menu for both.
+            .with_menu_on_left_click(false)
             .build()
             .map_err(|e| Error::ConfigDir(format!("could not register the tray icon: {e}")))?;
 
@@ -314,8 +317,11 @@ impl Tray {
     #[must_use]
     pub fn command_for_icon(event: &TrayIconEvent) -> Option<Command> {
         match event {
+            // Windows reports the press and the release as two clicks, so only the release counts.
+            // The Linux backend reports releases only.
             TrayIconEvent::Click {
                 button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
                 ..
             } => Some(Command::Open),
             _ => None,

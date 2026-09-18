@@ -251,6 +251,7 @@ fn set_owner_only(path: &Path, mode: u32) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Same signature as the Unix version, which can fail.
 fn set_owner_only(_path: &Path, _mode: u32) -> Result<()> {
     // Windows and macOS inherit the user profile's access control, which is owner only by default.
     Ok(())
