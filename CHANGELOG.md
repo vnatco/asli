@@ -44,6 +44,27 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- The join token clear could erase something copied after it, such as a password from a password
+  manager or a file. The clear now happens only if the clipboard still holds the token.
+- Restoring a history entry did not sync it to the other devices.
+- On Wayland the writer stalled for two seconds after every write, and a hung application pasting
+  a large image could freeze it for good. Offers for the middle click selection leaked.
+- On X11 content over 1 MiB arrived cut, a copy made during a read was lost, large incremental
+  transfers were abandoned, and one failed reply ended the writer.
+- A clip queued at the wrong moment could wait unwritten until the next one arrived, and a clip
+  queued just before the token clear was dropped.
+- A connection that stayed up for more than 1000 copies, then crashed, restarted below sequence
+  numbers it had already used, and its clips were dropped as replays.
+- A locked keychain at login looked like no account, and first run offered to replace it.
+- When the relay refused this device for good, the app vanished without saying why. It now stays
+  in the tray with the reason.
+- Opening the app from Finder, Launchpad or by double clicking `asliw.exe` did nothing.
+- Windows: large screenshots offered only as bitmaps were refused, some bitmaps decoded as
+  transparent or shifted, and Quit left a dead icon behind.
+- macOS: every copy could raise the pasteboard alert when reads were not allowed, and each
+  notification left a zombie process.
+- Login and menu entries broke on install paths containing spaces or percent signs, and a login
+  entry pointing at a binary that had moved was never repaired.
 - Our own clipboard writes could come back through the watcher on Wayland, and be logged as queued
   and recorded in the history twice. The session never sent them, but the history was wrong.
 
