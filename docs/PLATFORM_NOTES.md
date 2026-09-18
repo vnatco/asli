@@ -4,9 +4,9 @@ Everything awkward about clipboards, per operating system, written for someone w
 not syncing. If you are reading this because something is broken, start at section 7.
 
 > **Status.** Linux is implemented and verified on real hardware, for text and for images, over
-> both X11 and Wayland. The Windows and macOS backends are written and cross compile, but no Win32
-> or AppKit call in either has ever executed, so treat those sections as the mechanism they will
-> use rather than as observed behaviour.
+> both X11 and Wayland. The Windows and macOS backends are written, but no Win32 or AppKit call in
+> either has been observed running yet, so treat those sections as the mechanism they will use
+> rather than as observed behaviour.
 
 ## 1. Support matrix
 
@@ -195,10 +195,9 @@ session implements a host for it.
 - **Hyprland, Sway and other bare compositors**: the compositor has no tray. Your status bar provides
   it, for example waybar's tray module. If your bar has no tray module configured, no icon appears.
 
-**Left click does nothing on Linux, by design of the underlying protocol.** Click events are not
-delivered to applications the way they are on Windows and macOS, so every action lives in the menu.
-The same menu is used on all three platforms so behaviour does not diverge, and no feature will ever
-depend on telling a left click from a right click.
+**Left click opens the window** on hosts that deliver `Activate`, which KDE Plasma does. Some bars
+only ever show the menu, so every action is also in the menu, and no feature depends on telling a
+left click from a right click.
 
 Because a missing tray host makes the application invisible rather than merely ugly, startup will
 check whether a StatusNotifierItem host exists and, if not, show the onboarding window with the exact

@@ -1,6 +1,6 @@
 # Packaging
 
-What the release workflow builds, what is supported, and the honest state of code signing.
+What a release contains, how it is built, and the honest state of code signing.
 
 ## Artifacts
 
@@ -43,14 +43,16 @@ signature would have said.
 
 ## Building a release
 
-Tag and push. The workflow does the rest:
+There is no release workflow. Each artifact is built on its own platform from the tagged commit:
 
 ```sh
 git tag -a v0.1.0 -m "0.1.0"
 git push origin v0.1.0
+cargo build --release -p asli-app        # on each platform, from the tag
 ```
 
-To rebuild an existing tag without moving it, run the workflow manually and give it the tag name.
+On Windows the zip holds `asli.exe`, `asliw.exe`, `README.md` and `LICENSE`. Generate `SHA256SUMS`
+over every artifact once they are gathered, and attach everything to the GitHub release.
 
 ## Known follow up
 

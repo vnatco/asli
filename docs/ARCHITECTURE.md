@@ -3,9 +3,9 @@
 How Asli is put together, and why. The security design lives in `PROTOCOL.md` and
 `THREAT_MODEL.md`; this document is about structure, threads and data flow.
 
-> **Status.** All five crates exist and the relay is deployed. Text and images sync in both
-> directions on Linux, verified against a live relay. The Windows and macOS backends are written
-> and cross compile, but no Win32 or AppKit call in them has ever executed, so treat anything
+> **Status.** Every crate exists and the relay is deployed. Text and images sync in both
+> directions on Linux, verified against a live relay. The Windows and macOS clipboard backends are
+> written, but no Win32 or AppKit call in them has been observed running yet, so treat anything
 > specific to those two platforms as designed rather than proven.
 
 ## 1. The shape of the system
@@ -53,11 +53,14 @@ switched off can catch up.
 
 | Crate | Owns | Status |
 |---|---|---|
-| `asli-crypto` | Key derivation, identity and room id, join token, AEAD sealing and opening, the handshake signature. No I/O, no threads, no sockets. | **Exists** |
-| `asli-core` | Protocol message types and codec, the client state machine, dedup and loop prevention, reconnect policy, content normalization. No I/O. | Planned |
-| `asli-clipboard` | The `ClipboardWatcher` and `ClipboardWriter` traits plus one backend per platform. All the operating system ugliness lives here and nowhere else. | Planned |
-| `asli-app` | Tray and menu, Slint onboarding and settings windows, configuration, keychain access, autostart, notifications, wiring everything together. | Planned |
-| `server/` | The Node relay. TypeScript, `ws`, in memory. | Planned |
+| `asli-crypto` | Key derivation, identity and room id, join token, AEAD sealing and opening, chunk sealing, the handshake signature. No I/O, no threads, no sockets. | Done |
+| `asli-core` | Content normalization, the echo guard and the replay guard. No I/O. | Done |
+| `asli-net` | The wire envelope, the handshake, the reconnect state machine and backoff, and the clip and chunk paths over a WebSocket. | Done |
+| `asli-clipboard` | The `ClipboardWatcher` trait plus one backend per platform. All the operating system ugliness lives here and nowhere else. | Linux verified. Windows and macOS written, not yet observed running |
+| `asli-history` | The local clipboard history, encrypted at rest under a key derived from the account key. | Done |
+| `asli-ui` | The compiled Slint markup for the window, kept apart so every hand written crate can forbid unsafe code. | Done |
+| `asli-app` | The `asli` binary: tray and menu, the window, configuration, keychain access, autostart, notifications, the single instance lock, and the wiring between the rest. | Linux done |
+| `server/` | The Node relay. TypeScript, `ws`, in memory. | Deployed |
 
 The split exists for one practical reason: `asli-core` and `asli-crypto` have no I/O, so the
 integration test can drive two headless clients against a real relay with no display server and no
@@ -65,14 +68,15 @@ clipboard. That is what makes continuous integration meaningful for a GUI applic
 
 ## 3. Threading model
 
-Planned, and shaped by platform constraints rather than preference.
+Shaped by platform constraints rather than preference.
 
 | Thread | Runs | Why |
 |---|---|---|
-| Main | Tray icon, menu, Slint windows, and on macOS all pasteboard access | macOS requires AppKit pasteboard calls on the main thread. Calling `NSPasteboard` from a background thread is a documented crash in a competing product |
-| Clipboard watcher (one per platform backend) | Blocking platform event loop: the Windows message only window, the macOS 500 ms timer, the X11 XFixes loop, the Wayland data-control loop | Each platform wants to own a loop. The watcher sends `ClipEvent` values over a channel and never touches the network |
-| Clipboard reader (Windows) | Opens the clipboard with backoff and reads the payload | `OpenClipboard` can block or fail under contention, and `GetClipboardData` on a delay rendered format can block for up to 30 seconds. That must never happen on the message pump |
-| Tokio runtime | WebSocket connection, TLS, reconnect timers, heartbeat | One multi threaded runtime, or a current thread runtime, is enough. The socket is the only real I/O |
+| Main | The Slint event loop and the window. On Windows and macOS also the tray icon and its menu | Every platform wants its user interface loop on the main thread. On Windows the tray's hidden window needs a thread that pumps messages, and macOS requires the main thread outright |
+| Tray (Linux only) | Polls the tray and menu channels and refreshes the labels | The Linux tray is StatusNotifierItem over D-Bus, which runs its own service thread and needs no user interface loop |
+| Clipboard watcher | Blocking platform event loop: the Windows clipboard listener, the macOS 500 ms poll, the X11 XFixes loop, the Wayland data-control loop | Each platform wants to own a loop. The watcher sends observations over a channel and never touches the network |
+| Clipboard writer | Takes ownership of the clipboard for received clips, and on X11 and Wayland keeps serving it | X11 and Wayland have no clipboard storage, so whoever copied must answer every paste. Windows and macOS keep the data themselves, so there the writer only writes |
+| Daemon | A current thread Tokio runtime: the WebSocket, TLS, reconnect timers, heartbeat | The socket is the only real I/O |
 
 Communication is by channels, in one direction each way: the watcher sends local changes inward, and
 the network task sends received clips outward to the writer. Nothing shares a lock across a platform
@@ -169,9 +173,9 @@ the keychain.
 
 | Platform | Secret | Configuration |
 |---|---|---|
-| Windows | Windows Credential Manager | `%APPDATA%\asli\config.toml` |
-| macOS | Keychain | `~/Library/Application Support/asli/config.toml` |
-| Linux | Secret Service over D-Bus (pure Rust zbus) | `$XDG_CONFIG_HOME/asli/config.toml`, default `~/.config/asli` |
+| Windows | Windows Credential Manager | `%APPDATA%\vnat\asli\config\config.json` |
+| macOS | Keychain | `~/Library/Application Support/dev.vnat.asli/config.json` |
+| Linux | Secret Service over D-Bus (pure Rust zbus) | `$XDG_CONFIG_HOME/asli/config.json`, default `~/.config/asli` |
 
 The Linux case has a real failure mode that must be handled as a first class state rather than a
 panic: a bare Hyprland or Sway session with no `gnome-keyring-daemon` and no `kwallet` running has
@@ -186,8 +190,8 @@ notification preferences and the device id. It never holds key material.
 
 - **No database.** Not on the client, not on the relay. The relay keeps one recent clip per room in
   memory and forgets it.
-- **No clipboard history.** Asli syncs the current clipboard. A history browser is a different
-  product, and several good ones already exist locally.
+- **No synced history.** The history is local to each device and encrypted at rest. The relay
+  never holds more than the one most recent clip.
 - **No peer to peer.** No mDNS, no NAT traversal, no libp2p. A relay is one moving part instead of
   five, and it works on networks where discovery does not.
 - **No plugin system, no scripting, no extension API.** The attack surface of a clipboard tool

@@ -70,5 +70,5 @@ For security issues, do not open a public issue. See [SECURITY.md](SECURITY.md).
 - Describe what changes and why. Link the issue if there is one.
 - Say which platforms you actually tested on. "Builds on Linux" is useful information; so is "not
   tested on Windows".
-- CI must be green: format, clippy with warnings denied, tests on all three operating systems, the
-  crypto vectors including the libsodium interop check, shellcheck and PSScriptAnalyzer.
+- There is no hosted CI, so run format, clippy with warnings denied and the tests yourself, on
+  every platform you changed code for, and say which ones in the pull request.
