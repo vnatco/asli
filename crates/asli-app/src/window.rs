@@ -913,10 +913,9 @@ fn copy_token() {
 
 /// Puts a history entry back on the clipboard, which syncs it to every device.
 ///
-/// Written without seeding the echo guard, deliberately. The receive path seeds before writing so
-/// an arriving clip is not sent straight back, but this write is a local action: the watcher
-/// should see it, and the daemon should send it on, because putting an old clip back on every
-/// device is the entire point of the screen.
+/// Written as a copy, not as an arrival. An arrival must not go back out, but putting an old clip
+/// back on every device is the entire point of this screen, and the watcher cannot be relied on
+/// to report it: every platform recognises our own writes and ignores them.
 fn restore_entry(index: i32) {
     let Some(context) = CONTEXT.get() else {
         return;
@@ -937,8 +936,8 @@ fn restore_entry(index: i32) {
     };
 
     let result = match &clip {
-        HistoryContent::Text(text) => context.io.write_text(text),
-        HistoryContent::ImagePng(png) => context.io.write_image(png),
+        HistoryContent::Text(text) => context.io.write_text_as_copy(text),
+        HistoryContent::ImagePng(png) => context.io.write_image_as_copy(png),
     };
 
     match result {

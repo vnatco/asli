@@ -77,6 +77,29 @@ pub trait ClipboardIo: Send + Sync {
         )))
     }
 
+    /// Puts text on the clipboard as though the person had just copied it here, so it is sent to
+    /// the other devices too. Restoring a history entry is this.
+    ///
+    /// Distinct from [`ClipboardIo::write_text`], which is for clips that arrived and must not go
+    /// back out. Every platform recognises our own writes and ignores them, so a restore cannot
+    /// rely on the watcher noticing it: it announces itself instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write could not be handed to the platform.
+    fn write_text_as_copy(&self, text: &str) -> Result<()> {
+        self.write_text(text)
+    }
+
+    /// [`ClipboardIo::write_text_as_copy`] for an image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write could not be handed to the platform.
+    fn write_image_as_copy(&self, png: &[u8]) -> Result<()> {
+        self.write_image(png)
+    }
+
     /// A short description for the status output.
     fn describe(&self) -> String;
 }
@@ -196,6 +219,9 @@ enum Write {
 struct OwnWrites(Arc<Mutex<asli_core::EchoGuard>>);
 
 impl OwnWrites {
+    /// Stands for our own concealed write, whose content the watcher never reads.
+    const CONCEALED: &'static [u8] = b"\0asli concealed write";
+
     /// Long enough for the slowest platform to report our write, a 500 ms macOS poll plus a
     /// debounce, and short enough that it never swallows a real copy.
     const TTL_MS: u64 = 5_000;
@@ -231,6 +257,8 @@ pub struct SystemClipboard {
     /// makes it stale and it is dropped rather than destroying that copy.
     generation: Arc<AtomicU64>,
     own_writes: OwnWrites,
+    /// Straight into the daemon, for writes that are copies made here rather than arrivals.
+    announce: Sender<Observed>,
 }
 
 impl SystemClipboard {
@@ -247,7 +275,10 @@ impl SystemClipboard {
         match &work {
             Write::Text(text) => self.own_writes.remember(text.as_bytes()),
             Write::Image(png) => self.own_writes.remember(png),
-            Write::TextConcealed(_) | Write::ClearIfUnchanged(..) => {}
+            // The watcher reports this one as sensitive, which would otherwise tell the person a
+            // password was skipped every time they copy their own join string.
+            Write::TextConcealed(_) => self.own_writes.remember(OwnWrites::CONCEALED),
+            Write::ClearIfUnchanged(..) => {}
         }
         let _ = self.to_writer.send(work);
         self.interrupt.store(true, Ordering::Relaxed);
@@ -257,6 +288,18 @@ impl SystemClipboard {
 impl ClipboardIo for SystemClipboard {
     fn write_text(&self, text: &str) -> Result<()> {
         self.queue(Write::Text(text.to_owned()));
+        Ok(())
+    }
+
+    fn write_text_as_copy(&self, text: &str) -> Result<()> {
+        self.queue(Write::Text(text.to_owned()));
+        let _ = self.announce.send(Observed::Text(text.to_owned()));
+        Ok(())
+    }
+
+    fn write_image_as_copy(&self, png: &[u8]) -> Result<()> {
+        self.queue(Write::Image(png.to_vec()));
+        let _ = self.announce.send(Observed::Image(png.to_vec()));
         Ok(())
     }
 
@@ -307,6 +350,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
     let plan = session::plan(&env)?;
 
     let (tx, rx) = mpsc::channel();
+    let announce = tx.clone();
     let watcher_backend = plan.backend;
 
     // The writer connects here rather than inside its thread, because the interrupt has to be the
@@ -360,6 +404,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
             description: format!("{:?} ({})", plan.backend, plan.note),
             generation,
             own_writes,
+            announce,
         },
         rx,
     ))
@@ -381,6 +426,9 @@ fn to_observed(
     own_writes: &OwnWrites,
 ) -> Option<Observed> {
     let observed = if event.sensitive {
+        if own_writes.is_ours(OwnWrites::CONCEALED) {
+            return None;
+        }
         Observed::Sensitive
     } else {
         match event.content {
@@ -580,6 +628,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>, MacPump)> {
     let clipboard = asli_clipboard::macos::MacosClipboard::connect()?;
     let permission = asli_clipboard::macos::MacosClipboard::permission();
     let (tx, rx) = mpsc::channel();
+    let announce = tx.clone();
     let (to_writer, from_daemon) = mpsc::channel::<Write>();
     let generation = Arc::new(AtomicU64::new(0));
     let own_writes = OwnWrites::new();
@@ -597,6 +646,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>, MacPump)> {
             ),
             generation: Arc::clone(&generation),
             own_writes: own_writes.clone(),
+            announce,
         },
         rx,
         MacPump {
@@ -929,6 +979,25 @@ mod own_write_tests {
             "the guard is consumed by the echo, so a deliberate second copy still syncs"
         );
         assert_eq!(generation.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn our_own_concealed_write_is_not_reported_as_a_skipped_password() {
+        let generation = AtomicU64::new(0);
+        let own = OwnWrites::new();
+        let sensitive = || ClipEvent {
+            content: ClipContent::Text(String::new()),
+            sensitive: true,
+        };
+
+        own.remember(OwnWrites::CONCEALED);
+        assert_eq!(to_observed(sensitive(), &generation, &own), None);
+        assert_eq!(
+            to_observed(sensitive(), &generation, &own),
+            Some(Observed::Sensitive),
+            "a password manager's copy afterwards is still reported"
+        );
+        assert_eq!(generation.load(Ordering::Relaxed), 0);
     }
 
     #[test]
