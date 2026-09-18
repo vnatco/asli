@@ -8,6 +8,9 @@
 //! wl-paste --list-types
 //! ```
 
+// The examples drive the Linux backends only; elsewhere they print a message and exit.
+#![cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+
 use asli_clipboard::session::{self, Backend, Env};
 use asli_clipboard::WriteOptions;
 

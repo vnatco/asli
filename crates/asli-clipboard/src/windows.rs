@@ -450,6 +450,86 @@ impl WindowsClipboard {
     }
 }
 
+impl WindowsClipboard {
+    /// Puts a PNG on the clipboard, as PNG and as a device independent bitmap.
+    ///
+    /// Both, because Windows applications split on this. Browsers, Office and most modern software
+    /// read the registered PNG format and keep the alpha channel. Paint and older software read
+    /// only bitmaps, and Windows synthesizes `CF_BITMAP` and `CF_DIBV5` from `CF_DIB` for them. The
+    /// bitmap is written without alpha, as a plain 24 bit DIB, because that is the one layout every
+    /// reader agrees on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Read`] if the bytes are not a PNG or cannot be converted, and
+    /// [`Error::Write`] if the clipboard cannot be opened or written.
+    pub fn set_image(&mut self, png: &[u8], options: WriteOptions) -> Result<WriteReceipt> {
+        image_bytes::validate_png(png)?;
+        let dib = png_to_dib(png)?;
+
+        let seq = {
+            let _guard = Self::open_with_backoff()
+                .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
+
+            raw::empty()
+                .map_err(|e| Error::Write(format!("could not empty the clipboard: {e}")))?;
+            if let Some(id) = self.formats.png {
+                raw::set_without_clear(id, png)
+                    .map_err(|e| Error::Write(format!("could not set the PNG: {e}")))?;
+            }
+            raw::set_without_clear(CF_DIB, &dib)
+                .map_err(|e| Error::Write(format!("could not set the bitmap: {e}")))?;
+
+            if options.concealed {
+                write_exclusion_markers(&self.formats)?;
+            }
+
+            raw::seq_num().map(Into::into)
+        };
+
+        self.last_written_seq = seq;
+        Ok(WriteReceipt {
+            seq: seq.map(u64::from),
+        })
+    }
+
+    /// Empties the clipboard, so nothing we wrote lingers there.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Write`] if the clipboard cannot be opened or emptied.
+    pub fn release_selection(&mut self) -> Result<()> {
+        let _guard = Self::open_with_backoff()
+            .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
+        raw::empty().map_err(|e| Error::Write(format!("could not empty the clipboard: {e}")))?;
+        self.last_written_seq = raw::seq_num().map(Into::into);
+        Ok(())
+    }
+}
+
+/// Converts a PNG into a `CF_DIB` payload: a BMP file without its 14 byte file header.
+///
+/// # Errors
+///
+/// Returns [`Error::Read`] if the PNG cannot be decoded or the bitmap cannot be encoded.
+fn png_to_dib(png: &[u8]) -> Result<Vec<u8>> {
+    /// `BITMAPFILEHEADER` is exactly this long, and a clipboard DIB is everything after it.
+    const FILE_HEADER: usize = 14;
+
+    let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| Error::Read(format!("could not decode the PNG: {e}")))?;
+    let rgb = image::DynamicImage::ImageRgb8(decoded.to_rgb8());
+
+    let mut bmp = std::io::Cursor::new(Vec::new());
+    rgb.write_to(&mut bmp, image::ImageFormat::Bmp)
+        .map_err(|e| Error::Read(format!("could not encode the bitmap: {e}")))?;
+    let bmp = bmp.into_inner();
+
+    bmp.get(FILE_HEADER..)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| Error::Read("the encoded bitmap is shorter than its header".to_owned()))
+}
+
 /// A serialized `DWORD` of zero, which is how Windows spells "no" for these two formats.
 const DWORD_ZERO: [u8; 4] = [0, 0, 0, 0];
 
