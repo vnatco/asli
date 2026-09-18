@@ -151,10 +151,11 @@ function Confirm-Node {
 }
 
 # A running copy holds its executable open, so it has to stop before the file can be replaced or
-# removed. Only copies started from the install directory are touched, never a development build.
+# removed. Every copy stops, not only installed ones: a build started from the source tree holds
+# the single instance lock too, and the newly installed copy would then exit as already running
+# while this script reported it as started. setup.sh does the same.
 function Invoke-StopAsli {
-    $running = @(Get-Process -Name 'asli', 'asliw' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and $_.Path.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) })
+    $running = @(Get-Process -Name 'asli', 'asliw' -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return }
 
     Write-Info 'Stopping the running copy of Asli'
@@ -198,8 +199,16 @@ function Invoke-Install {
     Write-Ok 'Start menu shortcut created'
 
     # The binary writes the login entry itself, pointing at the installed asliw.exe, and it is the
-    # same code that checks the entry every time Asli starts.
-    Invoke-Step (Join-Path $InstallDir 'asli.exe') @('autostart', 'on')
+    # same code that checks the entry every time Asli starts. A failure here is a warning, not the
+    # end of the install: Asli works without starting at login.
+    if ($DryRun) {
+        Write-Host "  would run: $(Join-Path $InstallDir 'asli.exe') autostart on"
+    } else {
+        & (Join-Path $InstallDir 'asli.exe') autostart on
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "could not turn on launch at login. Run 'asli autostart on' later."
+        }
+    }
 
     $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
     if (-not ($userPath -split ';' | Where-Object { $_ -ieq $InstallDir })) {
