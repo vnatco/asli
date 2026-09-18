@@ -375,6 +375,22 @@ pub fn reserve_sequence(paths: &Paths) -> Result<u64> {
     Ok(base)
 }
 
+/// Raises the persisted reservation to at least `ceiling`, never lowering it.
+///
+/// Two places raise it: the clipboard bridge before a long lived connection runs through its
+/// block, and the connection loop after each disconnect. They do not know about each other, so
+/// neither may overwrite a higher value the other already wrote.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::Io`] or [`crate::Error::Parse`] if the state cannot be read or written.
+pub fn raise_reservation(paths: &Paths, ceiling: u64) -> Result<()> {
+    if paths.load_state()?.seq < ceiling {
+        paths.save_state(State { seq: ceiling })?;
+    }
+    Ok(())
+}
+
 /// Runs the daemon until the process is asked to stop.
 ///
 /// # Errors
@@ -403,9 +419,13 @@ pub async fn run(
     spawn_clipboard_bridge(
         observed,
         local_tx,
-        config.max_content_bytes,
-        Arc::clone(&controls.paused),
-        Arc::clone(&history),
+        Bridge {
+            cap: config.max_content_bytes,
+            paused: Arc::clone(&controls.paused),
+            history: Arc::clone(&history),
+            paths: paths.clone(),
+            seq_base: seq,
+        },
     )?;
 
     run_connection_loop(
@@ -426,6 +446,55 @@ pub async fn run(
     .await
 }
 
+/// What the clipboard bridge needs besides its two channels.
+struct Bridge {
+    /// Largest copy this device sends, in bytes.
+    cap: usize,
+    /// Set while sync is paused.
+    paused: Arc<AtomicBool>,
+    /// Where this device's own copies are recorded.
+    history: SharedHistory,
+    /// Where the sequence reservation lives.
+    paths: Paths,
+    /// The first sequence number this process was given.
+    seq_base: u64,
+}
+
+/// Counts sequence numbers this process may have used, and says when to reserve more.
+///
+/// An upper bound, not an exact count: a copy the session then drops as an echo or as too large
+/// uses no number but is counted anyway, which only means reserving a little early.
+#[derive(Debug, Clone, Copy)]
+struct SequenceWatch {
+    /// Highest number that may have been used.
+    issued: u64,
+    /// Highest number reserved on disk.
+    ceiling: u64,
+}
+
+impl SequenceWatch {
+    /// Reserve again when fewer than this many numbers are left in the block.
+    const MARGIN: u64 = SEQ_RESERVATION / 10;
+
+    const fn new(base: u64) -> Self {
+        Self {
+            issued: base,
+            ceiling: base.saturating_add(SEQ_RESERVATION),
+        }
+    }
+
+    /// Accounts for one more copy. Returns the new ceiling to persist when one is due.
+    fn issue(&mut self) -> Option<u64> {
+        self.issued = self.issued.saturating_add(1);
+        if self.issued.saturating_add(Self::MARGIN) >= self.ceiling {
+            self.ceiling = self.ceiling.saturating_add(SEQ_RESERVATION);
+            Some(self.ceiling)
+        } else {
+            None
+        }
+    }
+}
+
 /// Bridges the blocking watcher thread into the async side, dropping what must not be sent.
 ///
 /// # Errors
@@ -434,14 +503,34 @@ pub async fn run(
 fn spawn_clipboard_bridge(
     observed: Receiver<Observed>,
     local_tx: mpsc::Sender<LocalEvent>,
-    cap: usize,
-    paused: Arc<AtomicBool>,
-    history: SharedHistory,
+    bridge: Bridge,
 ) -> Result<()> {
+    let Bridge {
+        cap,
+        paused,
+        history,
+        paths,
+        seq_base,
+    } = bridge;
+
     std::thread::Builder::new()
         .name("asli-clip-bridge".to_owned())
         .spawn(move || {
+            let mut sequence = SequenceWatch::new(seq_base);
             while let Ok(event) = observed.recv() {
+                // Every copy handed on may use one sequence number, so the reservation on disk
+                // is raised before this process could run past it. Otherwise a connection that
+                // stays up for more than a block of copies, then ends without a clean disconnect,
+                // restarts below numbers it already used, and every peer drops its clips as
+                // replays until it catches up.
+                if matches!(event, Observed::Text(_) | Observed::Image(_)) {
+                    if let Some(ceiling) = sequence.issue() {
+                        if let Err(err) = raise_reservation(&paths, ceiling) {
+                            eprintln!("{}", log_line("reservation_failed", &err.to_string()));
+                        }
+                    }
+                }
+
                 // Pause stops copies leaving this machine at the earliest point they can be
                 // stopped, before they are sealed rather than after.
                 if paused.load(Ordering::Relaxed) {
@@ -574,6 +663,60 @@ fn spawn_retained_pump(
     })
 }
 
+/// Records why syncing stopped for good, where the tray and the window will show it, and says so.
+///
+/// Before this the reason was set on a local and the daemon returned, the application quit, and a
+/// person saw the icon simply vanish, with the reason nowhere at all.
+fn stop_with(controls: &Controls, status: &mut Status, reason: &str) {
+    reason.clone_into(&mut status.state);
+    status.peers = 0;
+    controls.status.set(status.clone());
+    notify::action_failed("Asli stopped syncing", reason);
+}
+
+/// Decides what a finished connection means. Returns true when syncing has stopped for good.
+///
+/// Permanent refusals stop, because retrying a bad signature or an unsupported version every few
+/// seconds against a public relay is a self inflicted denial of service. Everything else is
+/// retried.
+fn judge_outcome(
+    outcome: asli_net::Result<Disconnect>,
+    backoff: &mut Backoff,
+    controls: &Controls,
+    status: &mut Status,
+) -> bool {
+    match outcome {
+        Ok(Disconnect::LocalChannelClosed) => {
+            eprintln!("{}", log_line("stopping", "the clipboard watcher ended"));
+            stop_with(controls, status, "Stopped: the clipboard watcher ended");
+            return true;
+        }
+        Ok(Disconnect::AuthFailed(code)) if code.is_permanent() => {
+            eprintln!("{}", log_line("auth_failed", code.as_str()));
+            stop_with(controls, status, &format!("Rejected: {}", code.as_str()));
+            return true;
+        }
+        Ok(Disconnect::Close(code)) => {
+            backoff.on_close(code);
+            if let Some(fatal) = asli_net::Fatal::from_close_code(code) {
+                eprintln!("{}", log_line("fatal_close", fatal.user_message()));
+                stop_with(controls, status, fatal.user_message());
+                return true;
+            }
+            "Offline, retrying".clone_into(&mut status.state);
+        }
+        Ok(other) => {
+            "Offline, retrying".clone_into(&mut status.state);
+            eprintln!("{}", log_line("disconnected", &format!("{other:?}")));
+        }
+        Err(err) => {
+            "Offline, retrying".clone_into(&mut status.state);
+            eprintln!("{}", log_line("connection_failed", &err.to_string()));
+        }
+    }
+    false
+}
+
 /// Connects, pumps, and reconnects forever.
 ///
 /// Split from [`run`] so each half stays readable: this one owns the retry policy, the other owns
@@ -656,37 +799,10 @@ async fn run_connection_loop(
         retained_pump.abort();
 
         // Whatever happened, the counter this connection reached must survive it.
-        let _ = paths.save_state(State {
-            seq: session.seq().saturating_add(SEQ_RESERVATION),
-        });
+        let _ = raise_reservation(paths, session.seq().saturating_add(SEQ_RESERVATION));
 
-        match outcome {
-            Ok(Disconnect::LocalChannelClosed) => {
-                eprintln!("{}", log_line("stopping", "the clipboard watcher ended"));
-                return Ok(());
-            }
-            Ok(Disconnect::AuthFailed(code)) if code.is_permanent() => {
-                status.state = format!("Rejected: {}", code.as_str());
-                eprintln!("{}", log_line("auth_failed", code.as_str()));
-                return Ok(());
-            }
-            Ok(Disconnect::Close(code)) => {
-                backoff.on_close(code);
-                if let Some(fatal) = asli_net::Fatal::from_close_code(code) {
-                    fatal.user_message().clone_into(&mut status.state);
-                    eprintln!("{}", log_line("fatal_close", fatal.user_message()));
-                    return Ok(());
-                }
-                "Offline, retrying".clone_into(&mut status.state);
-            }
-            Ok(other) => {
-                "Offline, retrying".clone_into(&mut status.state);
-                eprintln!("{}", log_line("disconnected", &format!("{other:?}")));
-            }
-            Err(err) => {
-                "Offline, retrying".clone_into(&mut status.state);
-                eprintln!("{}", log_line("connection_failed", &err.to_string()));
-            }
+        if judge_outcome(outcome, &mut backoff, &controls, &mut status) {
+            return Ok(());
         }
 
         controls.status.set(status.clone());
@@ -709,6 +825,35 @@ async fn run_connection_loop(
 mod tests {
     use super::*;
     use crate::clipboard_io::StubClipboard;
+
+    #[test]
+    fn the_reservation_is_raised_before_a_long_connection_runs_past_it() {
+        let mut watch = SequenceWatch::new(5_000);
+        let mut raised = Vec::new();
+        for _ in 0..(3 * SEQ_RESERVATION) {
+            if let Some(ceiling) = watch.issue() {
+                raised.push(ceiling);
+            }
+            assert!(
+                watch.issued < watch.ceiling,
+                "a number was used that is not reserved on disk"
+            );
+        }
+        assert_eq!(raised, vec![7_000, 8_000, 9_000]);
+    }
+
+    #[test]
+    fn raising_the_reservation_never_lowers_it() {
+        let dir = std::env::temp_dir().join(format!("asli-reserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let paths = Paths { dir: dir.clone() };
+
+        raise_reservation(&paths, 9_000).expect("raises");
+        raise_reservation(&paths, 4_000).expect("does not lower");
+        assert_eq!(paths.load_state().expect("reads").seq, 9_000);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn a_live_clip_is_written_once() {
