@@ -266,11 +266,19 @@ impl SystemClipboard {
     ///
     /// Queue first, then interrupt, so the writer always finds work waiting when its loop returns.
     /// The reverse order races: the loop could return, find nothing, and block again.
-    fn queue(&self, work: Write) {
+    ///
+    /// Returns the generation this write produced, taken from the same atomic step that produced
+    /// it. Reading it again afterwards could pick up a clip queued in between, and a clear
+    /// scheduled against that would later erase the other clip.
+    fn queue(&self, work: Write) -> u64 {
         // A clear must not bump the generation, or it would invalidate itself in flight.
-        if !matches!(work, Write::ClearIfUnchanged(..)) {
-            self.generation.fetch_add(1, Ordering::Relaxed);
-        }
+        let generation = if matches!(work, Write::ClearIfUnchanged(..)) {
+            self.generation.load(Ordering::Relaxed)
+        } else {
+            self.generation
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1)
+        };
         // Recorded before the write can happen, so the change it causes is always recognised.
         match &work {
             Write::Text(text) => self.own_writes.remember(text.as_bytes()),
@@ -282,6 +290,7 @@ impl SystemClipboard {
         }
         let _ = self.to_writer.send(work);
         self.interrupt.store(true, Ordering::Relaxed);
+        generation
     }
 }
 
@@ -309,15 +318,13 @@ impl ClipboardIo for SystemClipboard {
     }
 
     fn write_text_concealed(&self, text: &str, clear_after: Duration) -> Result<()> {
-        self.queue(Write::TextConcealed(text.to_owned()));
+        let scheduled_for = self.queue(Write::TextConcealed(text.to_owned()));
 
         // A detached timer rather than a blocking wait: the caller is a tray menu handler and must
         // return immediately.
         let sender = self.to_writer.clone();
         let interrupt = Arc::clone(&self.interrupt);
         let owned = text.to_owned();
-        // Captured after the queue above bumped it, so this is the generation of our own write.
-        let scheduled_for = self.generation.load(Ordering::Relaxed);
         thread::Builder::new()
             .name("asli-token-clear".to_owned())
             .spawn(move || {
@@ -355,8 +362,9 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
 
     // The writer connects here rather than inside its thread, because the interrupt has to be the
     // clipboard's own shutdown flag: that is the only flag its run loop checks.
-    let writer = connect(watcher_backend)?;
+    let mut writer = connect(watcher_backend)?;
     let watcher_seed = watcher_for(&writer);
+    writer.serve_only();
 
     // Shared by the watcher and the writer. An external copy has to bump this too, or a pending
     // clear would still fire and wipe out what the person just copied.
@@ -368,22 +376,37 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
     thread::Builder::new()
         .name("asli-clipboard-watch".to_owned())
         .spawn(move || {
-            let connected = watcher_seed.map_or_else(|| connect(watcher_backend), Ok);
-            let mut backend = match connected {
-                Ok(backend) => backend,
-                Err(err) => {
-                    eprintln!("{}", log_line("clipboard_watch_failed", &err.to_string()));
-                    return;
+            // Reconnects rather than ending. A watcher that stopped for good on its first error
+            // left the tray looking healthy while nothing copied here was ever sent again.
+            let mut seed = watcher_seed;
+            let mut delay = Duration::from_secs(1);
+            loop {
+                let connected = seed.take().map_or_else(|| connect(watcher_backend), Ok);
+                match connected {
+                    Ok(mut backend) => {
+                        let result = backend.run(&mut |event: ClipEvent| {
+                            if let Some(observed) =
+                                to_observed(event, &watcher_generation, &watcher_own_writes)
+                            {
+                                let _ = tx.send(observed);
+                            }
+                        });
+                        match result {
+                            Ok(()) => return,
+                            Err(err) => {
+                                eprintln!(
+                                    "{}",
+                                    log_line("clipboard_watch_ended", &err.to_string())
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("{}", log_line("clipboard_watch_failed", &err.to_string()));
+                    }
                 }
-            };
-            let result = backend.run(&mut |event: ClipEvent| {
-                if let Some(observed) = to_observed(event, &watcher_generation, &watcher_own_writes)
-                {
-                    let _ = tx.send(observed);
-                }
-            });
-            if let Err(err) = result {
-                eprintln!("{}", log_line("clipboard_watch_ended", &err.to_string()));
+                thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(30));
             }
         })
         .map_err(crate::Error::Io)?;
@@ -475,41 +498,89 @@ fn apply_write(
     }
 }
 
+/// What a burst of queued work comes down to.
+///
+/// The clipboard is last write wins, so only the newest write matters, and a large image queued
+/// behind a newer text is rightly never written. A clear is different: it is not a write, and
+/// letting it take the newest slot dropped a clip that arrived just before it, since the clear
+/// then turned out stale and nothing was written at all.
+#[derive(Debug, Default)]
+struct Batch {
+    /// The newest write.
+    write: Option<Write>,
+    /// A clear queued after that write. One queued before it is stale by construction.
+    clear: Option<Write>,
+}
+
+impl Batch {
+    fn push(&mut self, work: Write) {
+        if matches!(work, Write::ClearIfUnchanged(..)) {
+            self.clear = Some(work);
+        } else {
+            self.write = Some(work);
+            self.clear = None;
+        }
+    }
+
+    /// Everything queued right now, starting with `first` if there is one.
+    fn drain(first: Option<Write>, inbox: &Receiver<Write>) -> Self {
+        let mut batch = Self::default();
+        if let Some(first) = first {
+            batch.push(first);
+        }
+        while let Ok(next) = inbox.try_recv() {
+            batch.push(next);
+        }
+        batch
+    }
+
+    /// Applies the write, then the clear. Returns whether the clipboard ends up holding
+    /// something we wrote, which on X11 and Wayland means it must be served.
+    fn apply(self, clipboard: &mut AnyClipboard, generation: &AtomicU64) -> bool {
+        let mut holding = false;
+        for work in [self.write, self.clear].into_iter().flatten() {
+            let (outcome, released) = apply_write(clipboard, &work, generation);
+            match outcome {
+                Ok(()) if released => holding = false,
+                Ok(()) => holding |= !matches!(work, Write::ClearIfUnchanged(..)),
+                Err(err) => {
+                    eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
+                }
+            }
+        }
+        holding
+    }
+}
+
 /// The writer thread: take ownership of the selection, then serve it until new content arrives.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation: &Arc<AtomicU64>) {
     let interrupt = clipboard.shutdown_flag();
 
-    while let Ok(work) = inbox.recv() {
-        // Drain anything queued behind it: the clipboard is last write wins, so only the newest
-        // matters. This is also why a large image queued behind a newer text copy is discarded
-        // rather than written and immediately overwritten.
-        let mut latest = work;
-        while let Ok(newer) = inbox.try_recv() {
-            latest = newer;
-        }
+    while let Ok(first) = inbox.recv() {
+        // Reset before draining, never after. Work queued once the reset has happened sets the
+        // flag again and ends the serve loop at once. Resetting after the drain instead could
+        // erase the signal of a write queued in between, which then sat unwritten behind the old
+        // content until some later write happened to arrive.
+        interrupt.store(false, Ordering::Relaxed);
 
-        let (outcome, released) = apply_write(&mut clipboard, &latest, generation);
-
-        if let Err(err) = outcome {
-            eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
-            continue;
-        }
+        let holding = Batch::drain(Some(first), inbox).apply(&mut clipboard, generation);
 
         // After a release there is nothing to serve, and re-entering the loop would keep us
         // registered as the owner, which is the other half of why an emptied clipboard still
         // advertised four text types.
-        if released || !clipboard.must_serve() {
+        if !holding || !clipboard.must_serve() {
             continue;
         }
 
         // Serve the selection until the next write interrupts us. Without this the content
         // disappears the moment another application asks for it, which on X11 and Wayland alike is
         // what "the clipboard is empty after the app that copied it exits" means.
-        interrupt.store(false, Ordering::Relaxed);
+        //
+        // A failure here costs this content, not the writer: returning used to end the thread,
+        // and every clip received afterwards was queued to nobody.
         if let Err(err) = clipboard.run(&mut |_| {}) {
             eprintln!("{}", log_line("clipboard_serve_ended", &err.to_string()));
-            return;
         }
     }
 }
@@ -586,16 +657,7 @@ impl MacPump {
     /// before the next poll, and the poll then recognises it as ours by its change count.
     pub fn tick(&mut self) {
         // Last write wins, exactly as on the other platforms.
-        let mut latest = None;
-        while let Ok(work) = self.inbox.try_recv() {
-            latest = Some(work);
-        }
-        if let Some(work) = latest {
-            let (outcome, _released) = apply_write(&mut self.clipboard, &work, &self.generation);
-            if let Err(err) = outcome {
-                eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
-            }
-        }
+        let _ = Batch::drain(None, &self.inbox).apply(&mut self.clipboard, &self.generation);
 
         let AnyClipboard::Macos(clipboard) = &mut self.clipboard;
         match clipboard.poll_once() {
@@ -718,6 +780,10 @@ impl AnyClipboard {
             Self::Windows(clipboard) => clipboard.shutdown_handle(),
         }
     }
+
+    /// The Windows writer never enters the watch loop, so there is nothing to restrict.
+    #[allow(clippy::unused_self)]
+    const fn serve_only(&mut self) {}
 }
 
 /// The watcher, when it has to be made from the writer rather than connected on its own.
@@ -803,6 +869,14 @@ impl AnyClipboard {
         match self {
             Self::Wayland(clipboard) => clipboard.shutdown_handle(),
             Self::X11(clipboard) => clipboard.shutdown_handle(),
+        }
+    }
+
+    /// Makes this the writer connection, which serves and never reads other clients' copies.
+    fn serve_only(&mut self) {
+        match self {
+            Self::Wayland(clipboard) => clipboard.set_serve_only(),
+            Self::X11(clipboard) => clipboard.set_serve_only(),
         }
     }
 
@@ -1009,5 +1083,50 @@ mod own_write_tests {
             to_observed(text("theirs"), &generation, &own),
             Some(Observed::Text("theirs".to_owned()))
         );
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    fn batch(items: Vec<Write>) -> Batch {
+        let (tx, rx) = mpsc::channel();
+        for item in items {
+            tx.send(item).expect("send");
+        }
+        Batch::drain(None, &rx)
+    }
+
+    #[test]
+    fn a_clip_queued_just_before_a_stale_clear_is_still_written() {
+        let b = batch(vec![
+            Write::Text("arrived".to_owned()),
+            Write::ClearIfUnchanged("token".to_owned(), 1),
+        ]);
+        assert_eq!(b.write, Some(Write::Text("arrived".to_owned())));
+        assert!(
+            b.clear.is_some(),
+            "the clear is still judged, after the write"
+        );
+    }
+
+    #[test]
+    fn a_clear_queued_before_a_newer_write_is_dropped() {
+        let b = batch(vec![
+            Write::ClearIfUnchanged("token".to_owned(), 1),
+            Write::Text("newer".to_owned()),
+        ]);
+        assert_eq!(b.write, Some(Write::Text("newer".to_owned())));
+        assert_eq!(b.clear, None);
+    }
+
+    #[test]
+    fn only_the_newest_write_survives() {
+        let b = batch(vec![
+            Write::Image(vec![1, 2, 3]),
+            Write::Text("newest".to_owned()),
+        ]);
+        assert_eq!(b.write, Some(Write::Text("newest".to_owned())));
     }
 }
