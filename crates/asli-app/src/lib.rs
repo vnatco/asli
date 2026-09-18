@@ -35,6 +35,7 @@
 #![forbid(unsafe_code)]
 
 pub mod autostart;
+pub mod cli;
 pub mod clipboard_io;
 pub mod config;
 pub mod daemon;

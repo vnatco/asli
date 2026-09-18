@@ -5,7 +5,7 @@
 //! reading back what was written rather than by assuming the write worked.
 //!
 //! Each platform has exactly one sanctioned mechanism and they share nothing, so there is no
-//! common abstraction worth inventing. Linux is implemented. Windows and macOS return a clear
+//! common abstraction worth inventing. Linux and Windows are implemented. macOS returns a clear
 //! error saying so, because silently reporting success for something that will not happen is the
 //! failure people only discover after their machine reboots.
 
@@ -225,30 +225,74 @@ mod platform {
 
 #[cfg(target_os = "windows")]
 mod platform {
+    use std::os::windows::process::CommandExt as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
     use crate::error::{Error, Result};
 
-    /// The sanctioned mechanism is a value under
-    /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` holding the quoted executable path.
+    /// The per user key Windows reads at login. No administrator rights are needed to write it,
+    /// and Settings, Apps, Startup lists and toggles what is here.
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE: &str = "Asli";
+
+    /// `CREATE_NO_WINDOW`. `reg.exe` is a console program, and started from the windowed binary
+    /// without this it flashes a console window on screen.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// Runs `reg.exe`, the same tool a person would use, so no registry library is needed.
+    fn reg(args: &[&str]) -> Result<Output> {
+        Command::new("reg")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(Error::Io)
+    }
+
+    /// What login should start: the windowed binary when it sits beside this one, since the
+    /// console one would open a console window at every login.
+    fn launch_target() -> Result<PathBuf> {
+        let exe = std::env::current_exe().map_err(Error::Io)?;
+        Ok(windowed_sibling(&exe).unwrap_or(exe))
+    }
+
+    fn windowed_sibling(exe: &Path) -> Option<PathBuf> {
+        let sibling = exe.with_file_name("asliw.exe");
+        sibling.exists().then_some(sibling)
+    }
+
     pub fn is_enabled() -> Result<bool> {
-        Err(not_implemented())
+        // reg query exits 1 when the value does not exist, which is the answer rather than a
+        // failure.
+        Ok(reg(&["query", RUN_KEY, "/v", VALUE])?.status.success())
     }
 
-    pub fn set_enabled(_enabled: bool) -> Result<()> {
-        Err(not_implemented())
+    pub fn set_enabled(enabled: bool) -> Result<()> {
+        let output = if enabled {
+            let command = format!("\"{}\" tray", launch_target()?.display());
+            reg(&[
+                "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &command, "/f",
+            ])?
+        } else {
+            if !is_enabled()? {
+                return Ok(());
+            }
+            reg(&["delete", RUN_KEY, "/v", VALUE, "/f"])?
+        };
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(Error::ConfigDir(format!(
+                "reg.exe could not update {RUN_KEY}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // Same signature on every platform; Linux can fail.
     pub fn describe_location() -> Result<String> {
-        Ok(
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Asli (not implemented yet)"
-                .to_owned(),
-        )
-    }
-
-    fn not_implemented() -> Error {
-        Error::ConfigDir(
-            "autostart is not implemented on Windows yet. Add a shortcut to the Startup folder in the meantime"
-                .to_owned(),
-        )
+        Ok(format!(r"{RUN_KEY}\{VALUE}"))
     }
 }
 

@@ -1053,12 +1053,33 @@ fn restart_self() {
     eprintln!("{}", log_line("restart_failed", &err.to_string()));
 }
 
+/// Windows has no `exec`, so the replacement is started as a new process and this one exits.
+///
+/// The replacement waits for the single instance lock, which this process holds until it is gone,
+/// because [`crate::instance::RESTART_ENV`] tells it a handover is under way.
 #[cfg(not(unix))]
 fn restart_self() {
-    eprintln!(
-        "{}",
-        log_line("restart_needed", "restart Asli to use the new account")
-    );
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!(
+            "{}",
+            log_line("restart_failed", "could not find this executable")
+        );
+        return;
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    eprintln!("{}", log_line("restarting", "onto the account just stored"));
+    match std::process::Command::new(exe)
+        .args(args)
+        .env(crate::instance::RESTART_ENV, "1")
+        .spawn()
+    {
+        Ok(_) => std::process::exit(0),
+        Err(err) => {
+            eprintln!("{}", log_line("restart_failed", &err.to_string()));
+            notify::action_failed("Restart Asli to use the new account", &err.to_string());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

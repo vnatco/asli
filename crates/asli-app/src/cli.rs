@@ -2,16 +2,19 @@
 //!
 //! Create or join an account, run the daemon with or without a tray, ask what it thinks is going
 //! on, and start over if the key leaks.
-
-#![forbid(unsafe_code)]
+//!
+//! Lives in the library rather than in `main.rs` so that two binaries can share it. On Windows
+//! `asli.exe` is a console program for use from a terminal, and `asliw.exe` is the same program
+//! linked as a windowed one, which is what launching at login starts, so that no console window
+//! appears beside the tray.
 
 use std::sync::Arc;
 
-use asli_app::clipboard_io::log_line;
-use asli_app::config::{Config, Paths};
-use asli_app::daemon::Controls;
-use asli_app::error::{Error, Result};
-use asli_app::{autostart, daemon, instance, notify, qr, secrets, tray};
+use crate::clipboard_io::log_line;
+use crate::config::{Config, Paths};
+use crate::daemon::Controls;
+use crate::error::{Error, Result};
+use crate::{autostart, daemon, instance, notify, qr, secrets, tray};
 use asli_crypto::{token, Identity};
 use clap::{Parser, Subcommand};
 
@@ -57,7 +60,8 @@ enum Command {
     Show,
 }
 
-fn main() {
+/// Parses the command line and runs it, exiting with status 1 on failure.
+pub fn main() {
     if let Err(err) = dispatch() {
         eprintln!("error: {err}");
         std::process::exit(1);
@@ -265,16 +269,16 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         eprintln!("{}", log_line("autostart_failed", &err.to_string()));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        use asli_app::clipboard_io::ClipboardIo as _;
-        use asli_app::window::{self, MemoryHistory, Screen, SharedHistory};
+        use crate::clipboard_io::ClipboardIo as _;
+        use crate::window::{self, MemoryHistory, Screen, SharedHistory};
 
-        let (clipboard, observed) = asli_app::clipboard_io::start()?;
+        let (clipboard, observed) = crate::clipboard_io::start()?;
         eprintln!("{}", log_line("clipboard", &clipboard.describe()));
 
         let controls = Controls::default();
-        let io: Arc<dyn asli_app::clipboard_io::ClipboardIo> = Arc::new(clipboard);
+        let io: Arc<dyn crate::clipboard_io::ClipboardIo> = Arc::new(clipboard);
         let account = secrets::load(paths)?;
 
         // A tray with no account must not simply exit: that is indistinguishable from a crash,
@@ -292,7 +296,7 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         // only as long as the process when there is not. First run has no key yet, and a history
         // written now that nothing could decrypt later is worse than no history at all.
         let history: SharedHistory = match &account {
-            Some((secret, _)) => match asli_app::history_store::open(paths, secret, &config) {
+            Some((secret, _)) => match crate::history_store::open(paths, secret, &config) {
                 Ok(store) => Arc::new(std::sync::Mutex::new(store)),
                 Err(err) => {
                     // Never fatal. Syncing is the product and remembering is the convenience, so
@@ -360,24 +364,24 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         window::run_event_loop()
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (config, with_tray);
-        eprintln!("The daemon supports Linux only so far.");
+        eprintln!("The daemon is not wired up on this platform yet. Linux and Windows are.");
         Ok(())
     }
 }
 
 /// Runs the daemon on a worker thread, leaving the main one for the window.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn start_daemon(
     paths: &Paths,
     config: &Config,
     identity: Identity,
-    io: &Arc<dyn asli_app::clipboard_io::ClipboardIo>,
-    observed: std::sync::mpsc::Receiver<asli_app::clipboard_io::Observed>,
+    io: &Arc<dyn crate::clipboard_io::ClipboardIo>,
+    observed: std::sync::mpsc::Receiver<crate::clipboard_io::Observed>,
     controls: &Controls,
-    history: &asli_app::window::SharedHistory,
+    history: &crate::window::SharedHistory,
 ) -> Result<()> {
     let paths = paths.clone();
     let config = config.clone();
@@ -411,7 +415,7 @@ fn start_daemon(
             }
             // Whether it stopped cleanly or not, there is nothing left to sync, so the window
             // should not sit there implying otherwise.
-            asli_app::window::quit();
+            crate::window::quit();
         })
         .map_err(Error::Io)?;
 
@@ -443,7 +447,7 @@ fn start_tray(
     paths: &Paths,
     config: &Config,
     controls: &Controls,
-    io: &Arc<dyn asli_app::clipboard_io::ClipboardIo>,
+    io: &Arc<dyn crate::clipboard_io::ClipboardIo>,
 ) -> Result<()> {
     if !tray::host_present() {
         // Refusing to start would be worse: syncing works perfectly well with no icon. Saying so
@@ -527,30 +531,93 @@ fn start_tray(
     }
 }
 
+/// Builds the tray on the main thread, inside the window's event loop, and polls it from there.
+///
+/// On Windows the tray is a hidden window of its own, and a window only receives messages on a
+/// thread that pumps them. The Slint event loop is exactly such a pump, so the tray is created
+/// from inside it, and a timer on the same thread drains the menu and click channels. A tray built
+/// on a thread of its own, as on Linux, would register an icon whose menu never opens.
+#[cfg(target_os = "windows")]
+fn start_tray(
+    paths: &Paths,
+    config: &Config,
+    controls: &Controls,
+    io: &Arc<dyn crate::clipboard_io::ClipboardIo>,
+) -> Result<()> {
+    let paths = paths.clone();
+    let config = config.clone();
+    let controls = controls.clone();
+    let io = Arc::clone(io);
+
+    slint::invoke_from_event_loop(move || {
+        let tray = match tray::Tray::new(Arc::clone(&controls.paused)) {
+            Ok(tray) => {
+                eprintln!("{}", log_line("tray", "registered"));
+                tray
+            }
+            Err(err) => {
+                // Syncing works without an icon, so this is reported and not fatal.
+                eprintln!("{}", log_line("tray_failed", &err.to_string()));
+                return;
+            }
+        };
+
+        let menu_events = muda::MenuEvent::receiver();
+        let icon_events = tray_icon::TrayIconEvent::receiver();
+        let mut refreshed_at: Option<std::time::Instant> = None;
+
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(80),
+            move || {
+                if refreshed_at.is_none_or(|at| at.elapsed() >= tray::Tray::refresh_interval()) {
+                    tray.refresh(&controls.status.get(), asli_net::client::now_ms());
+                    refreshed_at = Some(std::time::Instant::now());
+                }
+
+                while let Ok(event) = menu_events.try_recv() {
+                    if let Some(command) = tray.command_for(&event) {
+                        handle_command(command, &paths, &config, &controls, io.as_ref());
+                    }
+                }
+                while let Ok(event) = icon_events.try_recv() {
+                    if let Some(command) = tray::Tray::command_for_icon(&event) {
+                        handle_command(command, &paths, &config, &controls, io.as_ref());
+                    }
+                }
+            },
+        );
+        // Dropping a timer stops it, and this one must run for the life of the process.
+        std::mem::forget(timer);
+    })
+    .map_err(|err| Error::ConfigDir(format!("could not schedule the tray: {err}")))
+}
+
 /// Acts on a tray command. Returns true when the application should exit.
 ///
 /// Most items now open a screen rather than doing something of their own. That is the point of
 /// having a window: a menu item that performs an invisible action is indistinguishable from one
 /// that does nothing, which is exactly how these behaved before.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn handle_command(
     command: tray::Command,
     paths: &Paths,
     config: &Config,
     controls: &Controls,
-    io: &dyn asli_app::clipboard_io::ClipboardIo,
+    io: &dyn crate::clipboard_io::ClipboardIo,
 ) -> bool {
     use std::sync::atomic::Ordering;
 
-    if let Some(screen) = asli_app::window::screen_for(command) {
-        asli_app::window::open(screen);
+    if let Some(screen) = crate::window::screen_for(command) {
+        crate::window::open(screen);
         return false;
     }
 
     match command {
         // The window decides which screen this lands on, because only it knows whether an account
         // exists yet, and that changes while the process is running: first run creates one.
-        tray::Command::Open => asli_app::window::open_default(),
+        tray::Command::Open => crate::window::open_default(),
         tray::Command::Pause => {
             controls.paused.store(true, Ordering::Relaxed);
             eprintln!("{}", log_line("paused", "by the tray menu"));

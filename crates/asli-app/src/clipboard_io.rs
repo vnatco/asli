@@ -377,7 +377,7 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation:
         // After a release there is nothing to serve, and re-entering the loop would keep us
         // registered as the owner, which is the other half of why an emptied clipboard still
         // advertised four text types.
-        if released {
+        if released || !clipboard.must_serve() {
             continue;
         }
 
@@ -422,18 +422,28 @@ impl AnyClipboard {
         }
     }
 
-    /// Writes an image, where the platform backend supports it.
-    ///
-    /// The Windows backend reads images but does not yet offer a write path, so this reports that
-    /// plainly instead of dropping the clip. A received image that silently never appears is worse
-    /// than one that explains itself in the log.
+    /// Writes an image as PNG and as a bitmap, so old and new applications can both paste it.
     fn set_image(&mut self, png: &[u8]) -> asli_clipboard::Result<()> {
-        let _ = png;
         match self {
-            Self::Windows(_) => Err(asli_clipboard::Error::Write(
-                "writing images is not implemented on Windows yet".to_owned(),
-            )),
+            Self::Windows(clipboard) => clipboard.set_image(png, WriteOptions::plain()).map(|_| ()),
         }
+    }
+
+    /// Empties the clipboard.
+    fn release(&mut self) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Windows(clipboard) => clipboard.release_selection(),
+        }
+    }
+
+    /// Windows keeps clipboard data itself once it is written, so there is nothing to serve.
+    ///
+    /// Entering the watch loop to serve, as X11 and Wayland must, would block this thread in the
+    /// clipboard listener until somebody copied something locally, and every clip received in the
+    /// meantime would wait behind it.
+    #[allow(clippy::unused_self)]
+    const fn must_serve(&self) -> bool {
+        false
     }
 
     fn run(&mut self, sink: &mut dyn FnMut(ClipEvent)) -> asli_clipboard::Result<()> {
@@ -510,6 +520,12 @@ impl AnyClipboard {
             Self::Wayland(clipboard) => clipboard.shutdown_handle(),
             Self::X11(clipboard) => clipboard.shutdown_handle(),
         }
+    }
+
+    /// Neither X11 nor Wayland stores clipboard content, so whoever wrote it must keep answering.
+    #[allow(clippy::unused_self)]
+    const fn must_serve(&self) -> bool {
+        true
     }
 }
 

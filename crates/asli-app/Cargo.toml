@@ -17,6 +17,16 @@ workspace = true
 name = "asli"
 path = "src/main.rs"
 
+# The same program without a console, for Windows. See src/asliw.rs.
+[[bin]]
+name = "asliw"
+path = "src/asliw.rs"
+required-features = ["windowed"]
+
+[features]
+# Builds asliw as well. Only meaningful on Windows.
+windowed = []
+
 [dependencies]
 asli-clipboard = { path = "../asli-clipboard", version = "0.1.0" }
 asli-core = { path = "../asli-core", version = "0.1.0" }
