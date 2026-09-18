@@ -32,6 +32,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use objc2::rc::Retained;
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSActivityOptions, NSData, NSProcessInfo, NSString};
 
@@ -312,15 +314,15 @@ impl MacosClipboard {
         let pasteboard = NSPasteboard::generalPasteboard();
         let seq = pasteboard.clearContents();
 
-        if options.concealed {
-            return Err(concealed_unsupported());
-        }
         let data = NSData::with_bytes(png);
         let png_type = NSString::from_str(UTI_PNG);
         if !pasteboard.setData_forType(Some(&data), &png_type) {
             return Err(Error::Write(
                 "the pasteboard refused the image write".to_owned(),
             ));
+        }
+        if options.concealed {
+            mark_concealed(&pasteboard)?;
         }
 
         self.last_written = Some(seq);
@@ -346,12 +348,12 @@ impl MacosClipboard {
         let native = asli_core::to_platform(text, asli_core::LineEnding::Lf);
         let value = NSString::from_str(&native);
 
-        if options.concealed {
-            return Err(concealed_unsupported());
-        }
         let text_type = NSString::from_str(UTI_UTF8_TEXT);
         if !pasteboard.setString_forType(&value, &text_type) {
             return Err(Error::Write("the pasteboard refused the write".to_owned()));
+        }
+        if options.concealed {
+            mark_concealed(&pasteboard)?;
         }
 
         self.last_written = Some(seq);
@@ -363,55 +365,91 @@ impl MacosClipboard {
     }
 }
 
-impl ClipboardWatcher for MacosClipboard {
-    fn run(&mut self, sink: &mut dyn FnMut(ClipEvent)) -> Result<()> {
-        // Fetched here rather than stored, so the pasteboard handle exists only on this thread.
+impl MacosClipboard {
+    /// One pass of the watch loop: read the change counter and, if it moved because somebody
+    /// else copied, read what they copied.
+    ///
+    /// For callers that own a timer of their own on the main thread, which is where the
+    /// application runs this, rather than handing the thread to [`ClipboardWatcher::run`]. Call
+    /// it every [`POLL_INTERVAL`]. The first call only establishes the baseline: whatever is on
+    /// the pasteboard then predates the watcher and is not an event.
+    ///
+    /// # Errors
+    ///
+    /// Only for failures that mean the watcher should stop. A read that lost a race with the
+    /// writing application, or found nothing it carries, is `Ok(None)`.
+    pub fn poll_once(&mut self) -> Result<Option<ClipEvent>> {
         let pasteboard = NSPasteboard::generalPasteboard();
+        let current = pasteboard.changeCount();
 
-        // Without this, App Nap throttles the timer once the app loses focus and sync stops with
-        // no error anywhere. The token is held for the life of the loop and released by being
-        // dropped, which avoids the one unsafe function in this area, endActivity.
-        let process = NSProcessInfo::processInfo();
-        let _activity = process.beginActivityWithOptions_reason(
+        if self.last_seen.is_none() {
+            self.last_seen = Some(current);
+            return Ok(None);
+        }
+        if !changed(current, self.last_seen) {
+            return Ok(None);
+        }
+        self.last_seen = Some(current);
+
+        if is_our_own_write(current, self.last_written) {
+            return Ok(None);
+        }
+
+        // Only now, on a real change, is any gateable call made, and the type list is checked
+        // before the content so a marked secret is never read at all.
+        match Self::read_text(&pasteboard) {
+            Ok(event) => Ok(event),
+            Err(Error::Read(_) | Error::NotUtf8) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Empties the pasteboard, so nothing we wrote lingers there.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible, and returns `Result` to match the other backends.
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn release_selection(&mut self) -> Result<()> {
+        let seq = NSPasteboard::generalPasteboard().clearContents();
+        self.last_written = Some(seq);
+        self.last_seen = Some(seq);
+        Ok(())
+    }
+}
+
+/// Keeps App Nap from throttling the poll while it is held. Released by being dropped.
+///
+/// Without it the timer slows to a crawl once the app is in the background, and sync stops with no
+/// error anywhere. Dropping the token releases it, which avoids the one unsafe function in this
+/// area, `endActivity`.
+pub struct BackgroundActivity {
+    _token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+/// Starts holding off App Nap until the returned value is dropped.
+#[must_use]
+pub fn begin_background_activity() -> BackgroundActivity {
+    BackgroundActivity {
+        _token: NSProcessInfo::processInfo().beginActivityWithOptions_reason(
             NSActivityOptions::Background,
             &NSString::from_str("watching the pasteboard for clipboard sync"),
-        );
+        ),
+    }
+}
 
-        // Establish the baseline without reporting it. Whatever is on the pasteboard now predates
-        // the watcher and is not an event.
-        self.last_seen = Some(pasteboard.changeCount());
+impl ClipboardWatcher for MacosClipboard {
+    fn run(&mut self, sink: &mut dyn FnMut(ClipEvent)) -> Result<()> {
+        let _activity = begin_background_activity();
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 return Ok(());
             }
-
+            if let Some(event) = self.poll_once()? {
+                sink(event);
+            }
             std::thread::sleep(POLL_INTERVAL);
-
-            if self.shutdown.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-
-            let current = pasteboard.changeCount();
-
-            if !changed(current, self.last_seen) {
-                continue;
-            }
-            self.last_seen = Some(current);
-
-            if is_our_own_write(current, self.last_written) {
-                continue;
-            }
-
-            // Only now, on a real change, is any gateable call made, and the type list is checked
-            // before the content so a marked secret is never read at all.
-            match Self::read_text(&pasteboard) {
-                Ok(Some(event)) => sink(event),
-                // No text on the pasteboard, or a read that lost a race with whatever wrote it.
-                // Both are routine and neither should stop the watcher.
-                Ok(None) | Err(Error::Read(_) | Error::NotUtf8) => {}
-                Err(other) => return Err(other),
-            }
         }
     }
 
@@ -420,22 +458,26 @@ impl ClipboardWatcher for MacosClipboard {
     }
 }
 
-/// Why a concealed write is refused on this platform.
+/// Adds the nspasteboard.org concealed marker beside content already written.
 ///
-/// Declaring extra pasteboard types needs `declareTypes:owner:`, which `objc2-app-kit` exposes as
-/// an `unsafe fn`. This crate carries `#![forbid(unsafe_code)]` and holds it with no exceptions on
-/// Linux, Windows and macOS, and a clipboard tool that handles passwords is the last place to
-/// start making exceptions quietly.
+/// After `clearContents`, any type can be set without declaring it first, so the unsafe
+/// `declareTypes:owner:` is not needed. The marker's value is irrelevant: clipboard managers look
+/// for its presence.
 ///
-/// So a concealed write fails here instead of succeeding without the marker. A caller that
-/// believes it protected a secret and did not is worse off than one told plainly that it could
-/// not, which is why this returns an error rather than writing the content unmarked.
-fn concealed_unsupported() -> Error {
-    Error::Write(
-        "marking pasteboard content as concealed is not supported on macOS yet, so the content \
-         was not written: declaring the marker requires an unsafe AppKit call this crate forbids"
-            .to_owned(),
-    )
+/// If the pasteboard refuses the marker, the content has to go too. A caller that believes it
+/// protected a secret and did not is worse off than one told plainly that it could not.
+fn mark_concealed(pasteboard: &NSPasteboard) -> Result<()> {
+    let marker = NSString::from_str(CONCEALED_TYPE);
+    if pasteboard.setData_forType(Some(&NSData::new()), &marker) {
+        Ok(())
+    } else {
+        let _ = pasteboard.clearContents();
+        Err(Error::Write(
+            "the pasteboard refused the concealed marker, so the content was removed rather than \
+             left unmarked"
+                .to_owned(),
+        ))
+    }
 }
 
 #[cfg(test)]
