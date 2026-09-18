@@ -180,6 +180,21 @@ fn status(paths: &Paths) -> Result<()> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        use asli_clipboard::macos::{MacosClipboard, SETTINGS_URL};
+        let permission = MacosClipboard::permission();
+        println!("Pasteboard:    read permission {}", permission.label());
+        if !permission.may_read_in_background() {
+            // Receiving still works, so this is a degraded mode, and the fix is one setting.
+            println!(
+                "               copies made on this Mac will not be sent until it is allowed:"
+            );
+            println!("               System Settings, Privacy and Security, Paste from Other Apps");
+            println!("               open \"{SETTINGS_URL}\"");
+        }
+    }
+
     println!();
     println!("Live connection state is reported by the running daemon. Start it with 'asli tray'.");
     Ok(())
