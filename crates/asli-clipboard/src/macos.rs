@@ -395,6 +395,13 @@ impl MacosClipboard {
             return Ok(None);
         }
 
+        // In the Ask state every content read raises an alert, which for a background poller
+        // means an alert on every copy. So nothing is read until the person allows it in System
+        // Settings. Receiving is unaffected: writes are never gated.
+        if !Self::permission().may_read_in_background() {
+            return Ok(None);
+        }
+
         // Only now, on a real change, is any gateable call made, and the type list is checked
         // before the content so a marked secret is never read at all.
         match Self::read_text(&pasteboard) {
@@ -411,7 +418,14 @@ impl MacosClipboard {
     /// Currently infallible, and returns `Result` to match the other backends.
     #[allow(clippy::unnecessary_wraps)]
     pub fn release_selection(&mut self) -> Result<()> {
-        let seq = NSPasteboard::generalPasteboard().clearContents();
+        let pasteboard = NSPasteboard::generalPasteboard();
+        // Only if what is there is still our own last write. Clearing empties the pasteboard
+        // whoever filled it, so doing it after somebody else copied would erase their copy, which
+        // for the join token clear typically means a password copied a minute later.
+        if !is_our_own_write(pasteboard.changeCount(), self.last_written) {
+            return Ok(());
+        }
+        let seq = pasteboard.clearContents();
         self.last_written = Some(seq);
         self.last_seen = Some(seq);
         Ok(())
