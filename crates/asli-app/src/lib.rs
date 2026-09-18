@@ -40,6 +40,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod history_store;
+pub mod instance;
 pub mod notify;
 pub mod qr;
 pub mod secrets;
