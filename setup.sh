@@ -47,9 +47,10 @@ Usage: ./setup.sh [options]
 
 Options:
   --build-only    Install prerequisites and build. Do not install the binary.
-  --install       Build, then install the binary into ~/.local/bin (override with ASLI_INSTALL_DIR).
+  --install       Build, then install the binary into ~/.local/bin (override with ASLI_INSTALL_DIR),
+                  the application entry and icon, and turn on launch at login.
   --with-server   Also set up the relay server, which is the only part that needs Node.js.
-  --uninstall     Remove an installed binary and its autostart entry. Does not touch your keychain.
+  --uninstall     Remove what --install put in place. Does not touch your keychain.
   --dry-run       Print what would happen and change nothing.
   --help          Show this text.
 
@@ -169,6 +170,69 @@ ensure_node() {
     fi
 }
 
+# Freedesktop locations for the application entry and its icon, so the window and the task
+# manager show the Asli mark rather than a generic one. Without these the icon works only on a
+# machine where somebody copied them by hand.
+readonly DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+readonly DESKTOP_ENTRY="$DATA_HOME/applications/asli.desktop"
+readonly ICON_FILE="$DATA_HOME/icons/hicolor/scalable/apps/asli.svg"
+readonly AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+
+# Tells the desktop about new or removed entries. Every one of these is optional: a desktop that
+# lacks the tool picks the change up at next login instead.
+refresh_desktop_caches() {
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        run update-desktop-database -q "$DATA_HOME/applications" || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -e "$DATA_HOME/icons/hicolor/index.theme" ]; then
+        run gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" || true
+    fi
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        run kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    fi
+}
+
+do_install() {
+    local os="$1"
+    local built="$REPO_ROOT/target/release/asli"
+    [ -x "$built" ] || [ "$DRY_RUN" -eq 1 ] || die "no binary at $built. The build step should have produced it."
+
+    info "Installing"
+    run mkdir -p "$INSTALL_DIR"
+    run install -m 755 "$built" "$INSTALL_DIR/asli"
+    ok "binary installed at $INSTALL_DIR/asli"
+
+    if [ "$os" = "linux" ]; then
+        run mkdir -p "$(dirname "$ICON_FILE")" "$(dirname "$DESKTOP_ENTRY")"
+        run install -m 644 "$REPO_ROOT/packaging/linux/asli.svg" "$ICON_FILE"
+        # The packaged entry says Exec=asli, which relies on PATH. The installed one names the
+        # binary exactly, because ~/.local/bin is not on PATH in every session.
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '  would write: %s
+' "$DESKTOP_ENTRY"
+        else
+            sed "s|^Exec=asli |Exec=$INSTALL_DIR/asli |" \
+                "$REPO_ROOT/packaging/linux/asli.desktop" > "$DESKTOP_ENTRY"
+            chmod 644 "$DESKTOP_ENTRY"
+        fi
+        refresh_desktop_caches
+        ok "application entry and icon installed"
+    fi
+
+    # The binary writes the entry itself, so it points at the installed copy, and it is the same
+    # code that runs every time the tray starts.
+    run "$INSTALL_DIR/asli" autostart on || warn "could not enable launch at login. Run 'asli autostart on' later."
+
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*) ;;
+        *) warn "$INSTALL_DIR is not on your PATH. Add it to use the asli command from a shell." ;;
+    esac
+
+    printf '\n'
+    info "Installed. Start it now with: $INSTALL_DIR/asli tray"
+    printf '  Or launch Asli from your application menu. It also starts by itself at login.\n'
+}
+
 do_uninstall() {
     local target="$INSTALL_DIR/asli"
     if [ -e "$target" ]; then
@@ -179,14 +243,28 @@ do_uninstall() {
         ok "nothing installed at $target"
     fi
 
-    local autostart="$HOME/.config/autostart/asli.desktop"
-    if [ -e "$autostart" ]; then
-        info "Removing autostart entry $autostart"
-        run rm -f "$autostart"
-        ok "autostart entry removed"
-    fi
+    # The second name is what builds before this one wrote, so an older install is cleaned too.
+    local autostart
+    for autostart in "$AUTOSTART_DIR/asli.desktop" "$AUTOSTART_DIR/dev.vnat.asli.desktop"; do
+        if [ -e "$autostart" ]; then
+            info "Removing autostart entry $autostart"
+            run rm -f "$autostart"
+            ok "autostart entry removed"
+        fi
+    done
 
-    local agent="$HOME/Library/LaunchAgents/app.asli.plist"
+    local removed_entry=0
+    local file
+    for file in "$DESKTOP_ENTRY" "$ICON_FILE"; do
+        if [ -e "$file" ]; then
+            info "Removing $file"
+            run rm -f "$file"
+            removed_entry=1
+        fi
+    done
+    [ "$removed_entry" -eq 1 ] && refresh_desktop_caches && ok "application entry and icon removed"
+
+    local agent="$HOME/Library/LaunchAgents/dev.vnat.asli.plist"
     if [ -e "$agent" ]; then
         info "Removing launch agent $agent"
         run rm -f "$agent"
@@ -196,7 +274,7 @@ do_uninstall() {
     printf '\n'
     info "Uninstall complete."
     printf '  Your account key is still in your OS keychain. Nothing here deleted it.\n'
-    printf '  To remove it as well, open the tray menu before uninstalling and choose Reset account,\n'
+    printf '  To remove it as well, run "asli reset" before uninstalling,\n'
     printf '  or delete the "asli" entry from your keychain by hand.\n'
 }
 
@@ -232,29 +310,21 @@ main() {
 
     if [ "$WITH_SERVER" -eq 1 ]; then
         printf '\n'
-        if [ -d "$REPO_ROOT/server" ]; then
-            info "Setting up the relay server"
-            run sh -c "cd '$REPO_ROOT/server' && npm ci"
-            ok "server dependencies installed. Start it with: cd server && npm start"
-        else
-            warn "The relay server is not in this repository yet, so there is nothing to set up."
-            printf '  The server lands in M1.\n'
-        fi
+        info "Setting up the relay server"
+        run sh -c "cd '$REPO_ROOT/server' && npm ci"
+        ok "server dependencies installed. Start it with: cd server && npm start"
     fi
 
     printf '\n'
     if [ "$DO_INSTALL" -eq 1 ]; then
-        warn "There is no installable binary yet."
-        printf '  Asli is at M0: the crypto library builds and is tested, and the tray client is not\n'
-        printf '  written yet. When it exists, --install will place it in %s.\n' "$INSTALL_DIR"
+        do_install "$os"
     elif [ "$BUILD_ONLY" -eq 1 ]; then
         ok "Build only requested, stopping here."
+    else
+        info "Built. Run ./setup.sh --install to install it, or run target/release/asli tray directly."
     fi
 
     printf '\n%sDone.%s\n' "$GREEN" "$RESET"
-    printf 'What exists today: the asli-crypto library, its test suite, and the frozen protocol vectors.\n'
-    printf 'What does not exist yet: the tray client, the relay server, and installable packages.\n'
-    printf 'See docs/BUILDING.md for the details.\n'
 }
 
 main "$@"
