@@ -26,8 +26,10 @@ use clap::{Parser, Subcommand};
     about = "Encrypted clipboard sync across your own machines"
 )]
 struct Cli {
+    /// What to do. With none, Asli starts in the tray, which is what opening the app from Finder,
+    /// Launchpad, the Start menu or a file manager does: none of those pass any arguments.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,6 +66,12 @@ enum Command {
 pub fn main() {
     if let Err(err) = dispatch() {
         eprintln!("error: {err}");
+        // Started at login or from a launcher there is no terminal, and on Windows the windowed
+        // binary has no stderr at all, so a failure to start would otherwise be completely
+        // invisible: the app would simply never appear.
+        if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            notify::action_failed("Asli could not start", &err.to_string());
+        }
         std::process::exit(1);
     }
 }
@@ -72,7 +80,7 @@ fn dispatch() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
 
-    match cli.command {
+    match cli.command.unwrap_or(Command::Tray) {
         Command::Create { force } => create(&paths, force),
         Command::Join { token } => join(&paths, &token),
         Command::Run => run(&paths, false),
@@ -299,7 +307,7 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
 
         let controls = Controls::default();
         let io: Arc<dyn crate::clipboard_io::ClipboardIo> = Arc::new(clipboard);
-        let account = secrets::load(paths)?;
+        let account = load_account_patiently(paths)?;
 
         // A tray with no account must not simply exit: that is indistinguishable from a crash,
         // and the second machine has just been installed precisely in order to join. Without a
@@ -464,6 +472,34 @@ fn start_pump(mut pump: crate::clipboard_io::MacPump) {
     );
     // Dropping a timer stops it, and this one must run for the life of the process.
     std::mem::forget(timer);
+}
+
+/// Loads the account key, waiting a while for a keychain that is still locked.
+///
+/// At login the keychain is often unlocked a few seconds after the applications that start with
+/// the session, and on an automatic login it may stay locked until the person unlocks it. Treating
+/// that as "no account" showed first run and offered to create a new account over the real one.
+fn load_account_patiently(
+    paths: &Paths,
+) -> Result<Option<(zeroize::Zeroizing<[u8; 32]>, secrets::Store)>> {
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+    const STEP: std::time::Duration = std::time::Duration::from_secs(3);
+
+    let started = std::time::Instant::now();
+    loop {
+        match secrets::load(paths) {
+            Err(Error::KeychainLocked(detail)) if started.elapsed() < PATIENCE => {
+                if started.elapsed() < STEP {
+                    eprintln!(
+                        "{}",
+                        log_line("keychain_locked", &format!("waiting for it: {detail}"))
+                    );
+                }
+                std::thread::sleep(STEP);
+            }
+            other => return other,
+        }
+    }
 }
 
 /// The encrypted history when there is an account key to seal it with, and a list that lives
@@ -637,14 +673,16 @@ fn start_tray(
                     if let Ok(event) = menu_events.recv_timeout(POLL) {
                         if let Some(command) = tray.command_for(&event) {
                             if handle_command(command, &paths, &config, &controls, io.as_ref()) {
-                                return;
+                                drop(tray);
+                                std::process::exit(0);
                             }
                         }
                     }
                     if let Ok(event) = icon_events.try_recv() {
                         if let Some(command) = tray::Tray::command_for_icon(&event) {
                             if handle_command(command, &paths, &config, &controls, io.as_ref()) {
-                                return;
+                                drop(tray);
+                                std::process::exit(0);
                             }
                         }
                     }
@@ -689,6 +727,22 @@ fn start_tray(
     // A request left while no instance was running is stale, and must not open a window now.
     let _ = tray::take_raise_request(&paths);
 
+    // Its own timer, so a second launch still brings the window forward if the tray could not be
+    // created at all.
+    let raise_paths = paths.clone();
+    let raise = slint::Timer::default();
+    raise.start(
+        slint::TimerMode::Repeated,
+        tray::Tray::refresh_interval(),
+        move || {
+            // Somebody launched Asli again, and this is the copy they were looking for.
+            if tray::take_raise_request(&raise_paths) {
+                crate::window::open_default();
+            }
+        },
+    );
+    std::mem::forget(raise);
+
     slint::invoke_from_event_loop(move || {
         // A menu bar application: no Dock icon and no entry in the application switcher. The
         // installed bundle says so in its Info.plist, but a binary run straight from a terminal
@@ -697,17 +751,17 @@ fn start_tray(
         #[cfg(target_os = "macos")]
         crate::macos::become_accessory();
 
-        let tray = match tray::Tray::new(Arc::clone(&controls.paused)) {
+        match tray::Tray::new(Arc::clone(&controls.paused)) {
             Ok(tray) => {
                 eprintln!("{}", log_line("tray", "registered"));
-                tray
+                MAIN_TRAY.with_borrow_mut(|slot| *slot = Some(tray));
             }
             Err(err) => {
                 // Syncing works without an icon, so this is reported and not fatal.
                 eprintln!("{}", log_line("tray_failed", &err.to_string()));
                 return;
             }
-        };
+        }
 
         let menu_events = muda::MenuEvent::receiver();
         let icon_events = tray_icon::TrayIconEvent::receiver();
@@ -718,23 +772,30 @@ fn start_tray(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(80),
             move || {
-                if refreshed_at.is_none_or(|at| at.elapsed() >= tray::Tray::refresh_interval()) {
-                    tray.refresh(&controls.status.get(), asli_net::client::now_ms());
-                    refreshed_at = Some(std::time::Instant::now());
-                    // Somebody launched Asli again, and this is the copy they were looking for.
-                    if tray::take_raise_request(&paths) {
-                        crate::window::open_default();
+                // Commands are collected while the tray is borrowed and acted on after, so that
+                // Quit can take the tray out of its slot to drop it.
+                let commands = MAIN_TRAY.with_borrow(|slot| {
+                    let Some(tray) = slot.as_ref() else {
+                        return Vec::new();
+                    };
+                    if refreshed_at.is_none_or(|at| at.elapsed() >= tray::Tray::refresh_interval())
+                    {
+                        tray.refresh(&controls.status.get(), asli_net::client::now_ms());
+                        refreshed_at = Some(std::time::Instant::now());
                     }
-                }
+                    let mut commands = Vec::new();
+                    while let Ok(event) = menu_events.try_recv() {
+                        commands.extend(tray.command_for(&event));
+                    }
+                    while let Ok(event) = icon_events.try_recv() {
+                        commands.extend(tray::Tray::command_for_icon(&event));
+                    }
+                    commands
+                });
 
-                while let Ok(event) = menu_events.try_recv() {
-                    if let Some(command) = tray.command_for(&event) {
-                        handle_command(command, &paths, &config, &controls, io.as_ref());
-                    }
-                }
-                while let Ok(event) = icon_events.try_recv() {
-                    if let Some(command) = tray::Tray::command_for_icon(&event) {
-                        handle_command(command, &paths, &config, &controls, io.as_ref());
+                for command in commands {
+                    if handle_command(command, &paths, &config, &controls, io.as_ref()) {
+                        exit_removing_tray(0);
                     }
                 }
             },
@@ -743,6 +804,23 @@ fn start_tray(
         std::mem::forget(timer);
     })
     .map_err(|err| Error::ConfigDir(format!("could not schedule the tray: {err}")))
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+thread_local! {
+    /// The tray on Windows and macOS, which lives on the main thread. Kept where the exit path
+    /// can reach it, because exiting without dropping it leaves a dead icon behind on Windows.
+    static MAIN_TRAY: std::cell::RefCell<Option<tray::Tray>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Removes the tray icon, then ends the process. Call on the main thread.
+///
+/// Every deliberate exit goes through here: Quit, and the restart after joining an account, which
+/// would otherwise leave two icons side by side, one of them dead.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) fn exit_removing_tray(code: i32) -> ! {
+    drop(MAIN_TRAY.with_borrow_mut(Option::take));
+    std::process::exit(code)
 }
 
 /// Acts on a tray command. Returns true when the application should exit.
@@ -813,9 +891,10 @@ fn handle_command(
         }
         tray::Command::Quit => {
             eprintln!("{}", log_line("stopping", "quit from the tray menu"));
-            // The daemon owns the process lifetime, and there is no clean cross thread shutdown
-            // path into its select loop yet, so this exits directly.
-            std::process::exit(0);
+            // The caller exits, once it has dropped the tray. Exiting here skipped that, and on
+            // Windows the icon of a process that no longer exists stays in the notification area
+            // until the mouse happens to pass over it.
+            return true;
         }
         // Handled above by opening a screen.
         tray::Command::ShowToken

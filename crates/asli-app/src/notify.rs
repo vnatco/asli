@@ -48,11 +48,21 @@ fn send(summary: &str, body: &str) {
         applescript_string(body),
         applescript_string(summary)
     );
-    let _ = std::process::Command::new("osascript")
+    let child = std::process::Command::new("osascript")
         .args(["-e", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    // Reaped on a thread of its own. A child that is never waited for stays in the process table
+    // as a zombie, and a password manager copy notifies every time, so they would pile up for the
+    // life of the process.
+    if let Ok(mut child) = child {
+        let _ = std::thread::Builder::new()
+            .name("asli-notify-reap".to_owned())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
 }
 
 /// Quotes text as an `AppleScript` string literal.

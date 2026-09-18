@@ -810,6 +810,11 @@ fn apply(window: &AppWindow, change: impl FnOnce(&mut Config)) {
 /// Creates an account on this device.
 fn create_account() -> Result<()> {
     let context = CONTEXT.get().ok_or(Error::NoAccount)?;
+    // Never over an account that exists, or one that may exist behind a locked keychain. First run
+    // is the only screen that offers this, and it can be shown while the keychain is unreadable.
+    if secrets::load(&context.paths)?.is_some() {
+        return Err(Error::AccountExists);
+    }
     let identity = Identity::generate()?;
     secrets::store(&context.paths, identity.secret())?;
     eprintln!(
@@ -1081,7 +1086,7 @@ fn restart_self() {
         .env(crate::instance::RESTART_ENV, "1")
         .spawn()
     {
-        Ok(_) => std::process::exit(0),
+        Ok(_) => crate::cli::exit_removing_tray(0),
         Err(err) => {
             eprintln!("{}", log_line("restart_failed", &err.to_string()));
             notify::action_failed("Restart Asli to use the new account", &err.to_string());
