@@ -7,7 +7,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>Asli</string>
 	<key>CFBundleIdentifier</key>
-	<string>app.asli</string>
+	<string>dev.vnat.asli</string>
 	<key>CFBundleExecutable</key>
 	<string>asli</string>
 	<key>CFBundlePackageType</key>
