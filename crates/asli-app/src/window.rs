@@ -1046,7 +1046,10 @@ fn restart_self() {
 
     eprintln!("{}", log_line("restarting", "onto the account just stored"));
     // exec replaces the image, so nothing after this runs unless it failed.
-    let err = std::process::Command::new(exe).args(args).exec();
+    let err = std::process::Command::new(exe)
+        .args(args)
+        .env(crate::instance::RESTART_ENV, "1")
+        .exec();
     eprintln!("{}", log_line("restart_failed", &err.to_string()));
 }
 

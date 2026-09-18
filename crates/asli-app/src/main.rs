@@ -11,7 +11,7 @@ use asli_app::clipboard_io::log_line;
 use asli_app::config::{Config, Paths};
 use asli_app::daemon::Controls;
 use asli_app::error::{Error, Result};
-use asli_app::{autostart, daemon, notify, qr, secrets, tray};
+use asli_app::{autostart, daemon, instance, notify, qr, secrets, tray};
 use asli_crypto::{token, Identity};
 use clap::{Parser, Subcommand};
 
@@ -233,6 +233,29 @@ fn autostart_command(paths: &Paths, state: Option<&str>) -> Result<()> {
 /// of its own. Without a tray this is a headless daemon and the main thread runs it directly, as
 /// it always did.
 fn run(paths: &Paths, with_tray: bool) -> Result<()> {
+    // Held until this function returns, and released by the operating system if the process ends
+    // any other way, including the direct exit behind Quit.
+    let _instance = match instance::claim(paths)? {
+        instance::Claim::Acquired(guard) => guard,
+        instance::Claim::AlreadyRunning => {
+            // Launching twice is normal, so this is a clean exit and not an error. The courtesy is
+            // to bring the running one forward, which is what the person was trying to reach.
+            let raised = with_tray && tray::raise_running(paths);
+            eprintln!(
+                "{}",
+                log_line(
+                    "already_running",
+                    if raised {
+                        "asked the running instance to show its window"
+                    } else {
+                        "another instance is running for this configuration"
+                    }
+                )
+            );
+            return Ok(());
+        }
+    };
+
     let config = paths.load_config()?;
 
     // The stored preference is applied on every start, so an entry deleted by hand comes back and

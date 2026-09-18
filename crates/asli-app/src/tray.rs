@@ -133,6 +133,32 @@ pub fn host_present() -> bool {
     }
 }
 
+/// Asks an already running instance to show its window.
+///
+/// The running instance writes its pid into the lock file, and its tray item carries that pid in
+/// its bus name, so the item can be found and activated exactly as a click on the icon would.
+/// Advisory: returns false when it could not be delivered, and the caller exits either way.
+#[must_use]
+pub fn raise_running(paths: &crate::config::Paths) -> bool {
+    let Some(pid) = std::fs::read_to_string(paths.dir.join("asli.lock"))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        zbus_lite::activate_item_of(pid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// The advice printed when no tray host exists, so the application explains itself instead of
 /// disappearing.
 #[must_use]
@@ -488,13 +514,49 @@ mod zbus_lite {
     /// answer is advisory, and a missing `busctl` simply means the check is skipped rather than
     /// the application refusing to start.
     pub fn session_has_name(name: &str) -> Result<bool, ()> {
+        Ok(session_names()?.iter().any(|line| line.starts_with(name)))
+    }
+
+    /// Asks the tray item registered by `pid` to activate, which is exactly what a left click on
+    /// the icon does. Returns whether the call was delivered.
+    pub fn activate_item_of(pid: u32) -> bool {
+        let marker = format!("StatusNotifierItem-{pid}-");
+        let Ok(names) = session_names() else {
+            return false;
+        };
+        let Some(bus) = names
+            .iter()
+            .filter_map(|line| line.split_whitespace().next())
+            .find(|name| name.contains(&marker))
+        else {
+            return false;
+        };
+
+        Command::new("busctl")
+            .args([
+                "--user",
+                "call",
+                bus,
+                "/StatusNotifierItem",
+                "org.kde.StatusNotifierItem",
+                "Activate",
+                "ii",
+                "0",
+                "0",
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn session_names() -> Result<Vec<String>, ()> {
         let output = Command::new("busctl")
             .args(["--user", "list", "--no-legend", "--no-pager"])
             .output()
             .map_err(|_| ())?;
-
-        let listing = String::from_utf8_lossy(&output.stdout);
-        Ok(listing.lines().any(|line| line.starts_with(name)))
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect())
     }
 }
 
