@@ -166,6 +166,14 @@ enum AnySource {
 }
 
 impl AnySource {
+    /// The Wayland object id, which is how an event names the source it is about.
+    fn protocol_id(&self) -> u32 {
+        match self {
+            Self::Ext(source) => source.id().protocol_id(),
+            Self::Wlr(source) => source.id().protocol_id(),
+        }
+    }
+
     fn offer(&self, mime_type: String) {
         match self {
             Self::Ext(source) => source.offer(mime_type),
@@ -249,13 +257,34 @@ struct State {
     /// One payload for every type will not do once a concealment hint is offered alongside the
     /// content: a paste asks for `text/plain` and expects the text, while Klipper asks for
     /// `x-kde-passwordManagerHint` and expects `secret`.
-    serving: Option<Arc<OfferTable>>,
+    ///
+    /// Keyed by the source it belongs to. Replacing our own selection makes the compositor cancel
+    /// the previous source, and that cancellation arrives after the new source is already
+    /// serving. Without the key it cleared the new payload, so every write after the first
+    /// advertised text and delivered zero bytes.
+    serving: Option<(u32, Arc<OfferTable>)>,
     /// Set when the compositor tells us the device is finished, which is fatal for this
     /// connection.
     finished: bool,
 }
 
 impl State {
+    /// The payload for `source`, if it is the one we are currently serving.
+    fn table_for(&self, source: u32) -> Option<Arc<OfferTable>> {
+        self.serving
+            .as_ref()
+            .filter(|(id, _)| *id == source)
+            .map(|(_, table)| Arc::clone(table))
+    }
+
+    /// Stops serving, but only if `source` is still the current one. A late cancellation of a
+    /// source we already replaced must not touch its successor.
+    fn forget(&mut self, source: u32) {
+        if self.serving.as_ref().is_some_and(|(id, _)| *id == source) {
+            self.serving = None;
+        }
+    }
+
     fn mimes_for(&self, offer: &AnyOffer) -> &[String] {
         self.offers
             .get(&offer.protocol_id())
@@ -374,11 +403,14 @@ impl WaylandClipboard {
         if options.concealed {
             source.offer(SENSITIVE_MIME.to_owned());
         }
-        self.state.serving = Some(Arc::new(offer_table(
-            TEXT_MIMES.iter().copied(),
-            text.as_bytes(),
-            options.concealed,
-        )));
+        self.state.serving = Some((
+            source.protocol_id(),
+            Arc::new(offer_table(
+                TEXT_MIMES.iter().copied(),
+                text.as_bytes(),
+                options.concealed,
+            )),
+        ));
         self.device.set_selection(Some(&source));
         self.conn
             .flush()
@@ -418,11 +450,14 @@ impl WaylandClipboard {
         for mime in IMAGE_MIMES {
             source.offer((*mime).to_owned());
         }
-        self.state.serving = Some(Arc::new(offer_table(
-            IMAGE_MIMES.iter().copied(),
-            png,
-            options.concealed,
-        )));
+        self.state.serving = Some((
+            source.protocol_id(),
+            Arc::new(offer_table(
+                IMAGE_MIMES.iter().copied(),
+                png,
+                options.concealed,
+            )),
+        ));
         self.device.set_selection(Some(&source));
         self.conn
             .flush()
@@ -720,7 +755,7 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
             ext_data_control_source_v1::Event::Send { mime_type, fd } => {
                 // Something is pasting. Write whatever belongs to the type it asked for, then
                 // close the pipe so the reader sees end of file.
-                if let Some(table) = state.serving.clone() {
+                if let Some(table) = state.table_for(source.id().protocol_id()) {
                     if let Some(bytes) = payload_for(&table, &mime_type) {
                         write_all_to(fd, bytes);
                     }
@@ -728,7 +763,7 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
             }
             ext_data_control_source_v1::Event::Cancelled => {
                 // Another client took the clipboard, so we stop serving and release the source.
-                state.serving = None;
+                state.forget(source.id().protocol_id());
                 source.destroy();
             }
             _ => {}
@@ -809,14 +844,14 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for State {
     ) {
         match event {
             zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
-                if let Some(table) = state.serving.clone() {
+                if let Some(table) = state.table_for(source.id().protocol_id()) {
                     if let Some(bytes) = payload_for(&table, &mime_type) {
                         write_all_to(fd, bytes);
                     }
                 }
             }
             zwlr_data_control_source_v1::Event::Cancelled => {
-                state.serving = None;
+                state.forget(source.id().protocol_id());
                 source.destroy();
             }
             _ => {}
@@ -942,6 +977,38 @@ mod tests {
         let text_hit = TEXT_MIMES.iter().any(|c| offered.iter().any(|m| m == *c));
         let image_hit = IMAGE_MIMES.iter().any(|c| offered.iter().any(|m| m == *c));
         assert!(text_hit && image_hit, "this fixture offers both");
+    }
+
+    #[test]
+    fn a_late_cancel_of_a_replaced_source_keeps_the_new_payload() {
+        let mut state = State {
+            offers: HashMap::new(),
+            pending: Pending::Nothing,
+            serving: None,
+            finished: false,
+        };
+        let table = |text: &str| {
+            Arc::new(offer_table(
+                TEXT_MIMES.iter().copied(),
+                text.as_bytes(),
+                false,
+            ))
+        };
+
+        // First write, then a second one replacing it before the compositor's cancel arrives.
+        state.serving = Some((7, table("first")));
+        state.serving = Some((9, table("second")));
+        state.forget(7);
+
+        let served = state.table_for(9).expect("the new source still serves");
+        assert_eq!(payload_for(&served, TEXT_MIMES[0]), Some(&b"second"[..]));
+        assert!(
+            state.table_for(7).is_none(),
+            "the old source serves nothing"
+        );
+
+        state.forget(9);
+        assert!(state.table_for(9).is_none());
     }
 
     #[test]
