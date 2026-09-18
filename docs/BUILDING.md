@@ -1,8 +1,8 @@
 # Building Asli
 
-> **Status.** Linux builds, installs and runs. Windows builds with the MSVC toolchain and is being
-> verified on real hardware; macOS is not yet wired up beyond its clipboard backend. The platform
-> table in the README is the current word on each.
+> **Status.** Linux builds, installs and runs. Windows and macOS are wired up and type check
+> clean, and are being verified on real hardware. The platform table in the README is the current
+> word on each.
 
 ## 1. Node.js is not required
 
@@ -49,11 +49,15 @@ With no flag the scripts build and run the test suite. `--build-only` and `--ins
 
 Where things land:
 
-| | Linux | Windows |
-|---|---|---|
-| Binary | `~/.local/bin/asli` (`ASLI_INSTALL_DIR` overrides) | `%LOCALAPPDATA%\Programs\Asli\` (`ASLI_INSTALL_DIR` overrides) |
-| Menu entry | `~/.local/share/applications/asli.desktop` and the icon beside it in `hicolor` | Start menu shortcut |
-| Launch at login | `~/.config/autostart/asli.desktop` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Asli` |
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| Binary | `~/.local/bin/asli` (`ASLI_INSTALL_DIR` overrides) | `%LOCALAPPDATA%\Programs\Asli\` (`ASLI_INSTALL_DIR` overrides) | `~/Applications/Asli.app` (`ASLI_MAC_APP` overrides), linked from `~/.local/bin/asli` |
+| Menu entry | `~/.local/share/applications/asli.desktop` and the icon beside it in `hicolor` | Start menu shortcut | The bundle itself, in Applications |
+| Launch at login | `~/.config/autostart/asli.desktop` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Asli` | `~/Library/LaunchAgents/dev.vnat.asli.plist` |
+
+`--install` stops a copy that is already running and starts the new one, so it is also how you
+update. On macOS the bundle gets an ad hoc signature, which Apple Silicon requires to run it and which
+means nothing to any other Mac.
 
 ## 4. Building by hand
 
@@ -128,7 +132,25 @@ cargo clippy --workspace --all-targets --features asli-app/windowed \
 That proves the code compiles for Windows and nothing more. No Win32 call executes. Releases are
 built on Windows with the MSVC toolchain.
 
-## 7. Running the relay locally
+## 7. Checking the macOS build from Linux
+
+macOS can be type checked, but not linked or run, without a Mac. Every dependency is Rust except
+`ring`'s C, which needs only a few standard headers. Rather than Apple's SDK, which may not be
+redistributed, give clang three tiny stand ins: a `TargetConditionals.h` defining the `TARGET_OS_*`
+and `TARGET_CPU_*` macros for arm64 macOS, a `string.h` declaring `memcpy`, `memmove`, `memset`,
+`memcmp` and `strlen`, and an `assert.h` defining `assert` as a no op. With those in a directory of
+your choosing:
+
+```
+rustup target add aarch64-apple-darwin
+export CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar
+export CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11 -ffreestanding -nostdlibinc -I<stubs>"
+cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+```
+
+Builds that run are made on a Mac, with `./setup.sh`.
+
+## 8. Running the relay locally
 
 With Docker, which is how self hosters are expected to run it:
 
@@ -149,7 +171,7 @@ The relay is one process, needs no database and writes nothing to disk. Point a 
 setting the relay URL in Settings, or `relay_url` in the configuration file that `asli status`
 prints.
 
-## 8. Before a pull request
+## 9. Before a pull request
 
 There is no hosted CI. Run the three commands in section 5 on every platform you touched, say in the
 pull request which platforms you actually ran it on, and if your change makes a document inaccurate,

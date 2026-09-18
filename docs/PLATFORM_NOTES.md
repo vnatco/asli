@@ -4,9 +4,9 @@ Everything awkward about clipboards, per operating system, written for someone w
 not syncing. If you are reading this because something is broken, start at section 7.
 
 > **Status.** Linux is implemented and verified on real hardware, for text and for images, over
-> both X11 and Wayland. The Windows and macOS backends are written, but no Win32 or AppKit call in
-> either has been observed running yet, so treat those sections as the mechanism they will use
-> rather than as observed behaviour.
+> both X11 and Wayland. Windows has run under Wine but not yet on Windows itself, and no AppKit call
+> in the macOS build has been observed running yet, so treat those sections as the mechanism they
+> use rather than as observed behaviour.
 
 ## 1. Support matrix
 
@@ -65,9 +65,13 @@ only option is to poll `NSPasteboard.general.changeCount`, which is cheap: it is
 a content read.
 
 **We poll at 500 ms**, matching Maccy, Clipy and CopyQ. Apple's own guidance says to investigate any
-idle application that wakes more than once a second. A watcher holds a background activity token so
-App Nap does not throttle the timer, and uses a timer tolerance so the system can coalesce wakeups
-with other work.
+idle application that wakes more than once a second. The app holds a background activity token for
+its whole life so App Nap does not throttle the poll.
+
+**All pasteboard access happens on the main thread.** `AppKit` is not thread safe, and polling
+`NSPasteboard` from a background thread is a documented crash in a competing tool. So on macOS the
+poll and every write run on a timer inside the main event loop, rather than on watcher and writer
+threads as on Linux and Windows.
 
 **The permission alert, which is the real macOS story.** Starting with macOS 15.4, the system shows
 an alert when an application programmatically reads the general pasteboard, unless the read followed
@@ -84,12 +88,19 @@ a user action the system considers paste related. The important facts:
   which is what makes the design workable. **This is unverified against real macOS 26 hardware and is
   a blocking task before the macOS client ships.**
 
-**What the app will do.** Read the permission state at launch. If clipboard access is blocked, say so
-in the tray menu with a link to the settings pane rather than failing silently. Otherwise, show a
-one time onboarding screen that walks you to System Settings, Privacy and Security, "Paste from Other
-Apps", and asks you to choose Allow. After that the prompt does not return. Content is read only when
-the change counter actually moves, which keeps the number of gate-able reads to at most one per real
-copy.
+**What the app does.** It reads the permission state at start and reports it in its log and in
+`asli status`, which also prints the command that opens the right Settings pane when reads are
+blocked. The fix is System Settings, Privacy and Security, "Paste from Other Apps", Allow, after which
+the prompt does not return. Content is read only when the change counter actually moves, which keeps
+the number of gate-able reads to at most one per real copy. A guided onboarding screen in the window
+is not built yet.
+
+**Notifications** go through `osascript`, because the notification library's macOS backend needs an
+Objective-C build against Apple's SDK. Until Asli ships as a signed bundle, macOS attributes them to
+Script Editor.
+
+**Concealed writes.** Copying the join token from the window adds the `org.nspasteboard.ConcealedType`
+marker, so clipboard managers that honour it skip the token. Unverified on a real Mac.
 
 **Receiving never needs permission.** Writing to the pasteboard is not gated. If you refuse the
 permission, or macOS blocks it, this Mac still receives clips from your other machines and puts them
