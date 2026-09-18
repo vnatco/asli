@@ -549,6 +549,9 @@ fn start_tray(
     let controls = controls.clone();
     let io = Arc::clone(io);
 
+    // A request left while no instance was running is stale, and must not open a window now.
+    let _ = tray::take_raise_request(&paths);
+
     slint::invoke_from_event_loop(move || {
         let tray = match tray::Tray::new(Arc::clone(&controls.paused)) {
             Ok(tray) => {
@@ -574,6 +577,10 @@ fn start_tray(
                 if refreshed_at.is_none_or(|at| at.elapsed() >= tray::Tray::refresh_interval()) {
                     tray.refresh(&controls.status.get(), asli_net::client::now_ms());
                     refreshed_at = Some(std::time::Instant::now());
+                    // Somebody launched Asli again, and this is the copy they were looking for.
+                    if tray::take_raise_request(&paths) {
+                        crate::window::open_default();
+                    }
                 }
 
                 while let Ok(event) = menu_events.try_recv() {

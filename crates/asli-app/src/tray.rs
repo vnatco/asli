@@ -135,28 +135,41 @@ pub fn host_present() -> bool {
 
 /// Asks an already running instance to show its window.
 ///
-/// The running instance writes its pid into the lock file, and its tray item carries that pid in
-/// its bus name, so the item can be found and activated exactly as a click on the icon would.
-/// Advisory: returns false when it could not be delivered, and the caller exits either way.
+/// On Linux the running instance's tray item carries its pid in its bus name, and the pid is in
+/// the lock file, so the item can be activated exactly as a click on the icon would.
+///
+/// Elsewhere there is no bus, so this leaves a request file in the configuration directory, which
+/// the running instance looks for once a second. Advisory either way: returns false when the
+/// request could not be made, and the caller exits regardless.
 #[must_use]
 pub fn raise_running(paths: &crate::config::Paths) -> bool {
-    let Some(pid) = std::fs::read_to_string(paths.dir.join("asli.lock"))
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-    else {
-        return false;
-    };
-
     #[cfg(target_os = "linux")]
     {
+        let Some(pid) = std::fs::read_to_string(paths.dir.join("asli.lock"))
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+        else {
+            return false;
+        };
         zbus_lite::activate_item_of(pid)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = pid;
-        false
+        std::fs::write(raise_request(paths), b"").is_ok()
     }
+}
+
+/// Where a second launch leaves its request to be shown, on platforms without a session bus.
+#[must_use]
+pub fn raise_request(paths: &crate::config::Paths) -> std::path::PathBuf {
+    paths.dir.join("raise")
+}
+
+/// Whether a second launch asked to be shown since the last check. Consumes the request.
+#[must_use]
+pub fn take_raise_request(paths: &crate::config::Paths) -> bool {
+    std::fs::remove_file(raise_request(paths)).is_ok()
 }
 
 /// The advice printed when no tray host exists, so the application explains itself instead of
