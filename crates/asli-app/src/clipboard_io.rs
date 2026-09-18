@@ -20,7 +20,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use asli_clipboard::{ClipContent, ClipEvent, ClipboardWatcher, WriteOptions};
+#[cfg(not(target_os = "macos"))]
+use asli_clipboard::ClipboardWatcher;
+use asli_clipboard::{ClipContent, ClipEvent, WriteOptions};
 
 use crate::error::Result;
 
@@ -181,7 +183,7 @@ enum Write {
 }
 
 /// Handle to the writer thread.
-pub struct LinuxClipboard {
+pub struct SystemClipboard {
     to_writer: Sender<Write>,
     interrupt: Arc<AtomicBool>,
     description: String,
@@ -192,7 +194,7 @@ pub struct LinuxClipboard {
     generation: Arc<AtomicU64>,
 }
 
-impl LinuxClipboard {
+impl SystemClipboard {
     /// Queues one write and wakes the writer.
     ///
     /// Queue first, then interrupt, so the writer always finds work waiting when its loop returns.
@@ -207,7 +209,7 @@ impl LinuxClipboard {
     }
 }
 
-impl ClipboardIo for LinuxClipboard {
+impl ClipboardIo for SystemClipboard {
     fn write_text(&self, text: &str) -> Result<()> {
         self.queue(Write::Text(text.to_owned()));
         Ok(())
@@ -253,7 +255,7 @@ impl ClipboardIo for LinuxClipboard {
 /// Returns [`crate::Error::Clipboard`] if no backend can be started, which happens on GNOME
 /// Wayland without `XWayland` and on river, where no protocol exposes the clipboard at all.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
+pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
     use asli_clipboard::session::{self, Env};
 
     let env = Env::from_process();
@@ -284,31 +286,9 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
                 }
             };
             let result = backend.run(&mut |event: ClipEvent| {
-                let observed = if event.sensitive {
-                    Observed::Sensitive
-                } else {
-                    match event.content {
-                        ClipContent::Text(text) => Observed::Text(text),
-                        ClipContent::ImagePng(png) => Observed::Image(png),
-                        // ClipContent is non exhaustive. A content type added later is dropped
-                        // here rather than sent as something it is not.
-                        _ => return,
-                    }
-                };
-
-                // Someone copied, so any clear scheduled before now is stale.
-                //
-                // Concealed content is the exception, and it has to be, or the token clear can
-                // never fire. Copying the token writes it marked, the compositor hands it
-                // straight back through this watcher as sensitive, and bumping here would
-                // invalidate the clear that was scheduled microseconds earlier. The token then
-                // sits on the clipboard forever, which is exactly the leak the clear exists to
-                // close. A concealed observation is either our own marked write or a password
-                // manager's copy, and neither is a user copy that a pending clear would destroy.
-                if !matches!(observed, Observed::Sensitive) {
-                    watcher_generation.fetch_add(1, Ordering::Relaxed);
+                if let Some(observed) = to_observed(event, &watcher_generation) {
+                    let _ = tx.send(observed);
                 }
-                let _ = tx.send(observed);
             });
             if let Err(err) = result {
                 eprintln!("{}", log_line("clipboard_watch_ended", &err.to_string()));
@@ -326,7 +306,7 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
         .map_err(crate::Error::Io)?;
 
     Ok((
-        LinuxClipboard {
+        SystemClipboard {
             to_writer,
             interrupt,
             description: format!("{:?} ({})", plan.backend, plan.note),
@@ -334,6 +314,61 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
         },
         rx,
     ))
+}
+
+/// Turns a backend event into what the daemon is told, and marks a real copy.
+///
+/// A real copy bumps the generation, so any clear scheduled before it is stale.
+///
+/// Concealed content is the exception, and it has to be, or the token clear can never fire.
+/// Copying the token writes it marked, the platform hands it straight back through the watcher as
+/// sensitive, and bumping here would invalidate the clear that was scheduled microseconds earlier.
+/// The token then sits on the clipboard forever, which is exactly the leak the clear exists to
+/// close. A concealed observation is either our own marked write or a password manager's copy, and
+/// neither is a user copy that a pending clear would destroy.
+fn to_observed(event: ClipEvent, generation: &AtomicU64) -> Option<Observed> {
+    let observed = if event.sensitive {
+        Observed::Sensitive
+    } else {
+        match event.content {
+            ClipContent::Text(text) => Observed::Text(text),
+            ClipContent::ImagePng(png) => Observed::Image(png),
+            // ClipContent is non exhaustive. A content type added later is dropped here rather
+            // than sent as something it is not.
+            _ => return None,
+        }
+    };
+
+    if !matches!(observed, Observed::Sensitive) {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
+    Some(observed)
+}
+
+/// Performs one write. Returns the outcome, and whether it was a release of the clipboard.
+fn apply_write(
+    clipboard: &mut AnyClipboard,
+    work: &Write,
+    generation: &AtomicU64,
+) -> (asli_clipboard::Result<()>, bool) {
+    match work {
+        Write::Text(text) => (clipboard.set_text(text), false),
+        Write::Image(png) => (clipboard.set_image(png), false),
+        Write::TextConcealed(text) => (clipboard.set_text_concealed(text), false),
+        Write::ClearIfUnchanged(_, scheduled_for) => {
+            // Only clear if nothing has been copied since. The generation counter is the signal:
+            // every write bumps it, and the watcher bumps it when an external copy takes the
+            // clipboard away from us. A stale clear is dropped, because wrongly clearing
+            // someone's clipboard is far worse than a token lingering a while.
+            if *scheduled_for == generation.load(Ordering::Relaxed) {
+                // Release, never write an empty string. Writing empty keeps us owning the
+                // selection, so the clipboard still advertises text while serving zero bytes.
+                (clipboard.release(), true)
+            } else {
+                (Ok(()), false)
+            }
+        }
+    }
 }
 
 /// The writer thread: take ownership of the selection, then serve it until new content arrives.
@@ -350,27 +385,7 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation:
             latest = newer;
         }
 
-        let generation = generation.load(Ordering::Relaxed);
-        let mut released = false;
-        let outcome = match &latest {
-            Write::Text(text) => clipboard.set_text(text),
-            Write::Image(png) => clipboard.set_image(png),
-            Write::TextConcealed(text) => clipboard.set_text_concealed(text),
-            Write::ClearIfUnchanged(_, scheduled_for) => {
-                // Only clear if nothing has been copied since. The generation counter is the
-                // signal: every write bumps it, and the watcher bumps it when an external copy
-                // takes the selection away from us. A stale clear is dropped, because wrongly
-                // clearing someone's clipboard is far worse than a token lingering a while.
-                if *scheduled_for == generation {
-                    // Release, never write an empty string. Writing empty keeps us owning the
-                    // selection, so the clipboard still advertises text while serving zero bytes.
-                    released = true;
-                    clipboard.release()
-                } else {
-                    Ok(())
-                }
-            }
-        };
+        let (outcome, released) = apply_write(&mut clipboard, &latest, generation);
 
         if let Err(err) = outcome {
             eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
@@ -400,6 +415,139 @@ fn writer_loop(mut clipboard: AnyClipboard, inbox: &Receiver<Write>, generation:
 enum AnyClipboard {
     Wayland(Box<asli_clipboard::linux_wayland::WaylandClipboard>),
     X11(Box<asli_clipboard::linux_x11::X11Clipboard>),
+}
+
+/// macOS, where there is exactly one mechanism, the polled pasteboard.
+#[cfg(target_os = "macos")]
+enum AnyClipboard {
+    Macos(Box<asli_clipboard::macos::MacosClipboard>),
+}
+
+#[cfg(target_os = "macos")]
+impl AnyClipboard {
+    fn set_text(&mut self, text: &str) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Macos(clipboard) => clipboard.set_text(text, WriteOptions::plain()).map(|_| ()),
+        }
+    }
+
+    /// Writes text with the nspasteboard.org concealed marker beside it.
+    fn set_text_concealed(&mut self, text: &str) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Macos(clipboard) => clipboard
+                .set_text(text, WriteOptions::concealed())
+                .map(|_| ()),
+        }
+    }
+
+    fn set_image(&mut self, png: &[u8]) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Macos(clipboard) => clipboard.set_image(png, WriteOptions::plain()).map(|_| ()),
+        }
+    }
+
+    fn release(&mut self) -> asli_clipboard::Result<()> {
+        match self {
+            Self::Macos(clipboard) => clipboard.release_selection(),
+        }
+    }
+}
+
+/// Everything that touches the macOS pasteboard, driven from the main thread.
+///
+/// `AppKit` is not thread safe, and polling `NSPasteboard` off the main thread is a documented
+/// crash in a competing tool. So on macOS there is no watcher thread and no writer thread. The
+/// daemon queues writes into a channel exactly as on the other platforms, and this drains that
+/// channel and polls the change counter in one place, every [`MacPump::INTERVAL`], on whichever
+/// thread calls [`MacPump::tick`]. The application calls it from the main thread only.
+#[cfg(target_os = "macos")]
+pub struct MacPump {
+    clipboard: AnyClipboard,
+    inbox: Receiver<Write>,
+    observed: Sender<Observed>,
+    generation: Arc<AtomicU64>,
+    _activity: asli_clipboard::macos::BackgroundActivity,
+}
+
+#[cfg(target_os = "macos")]
+impl MacPump {
+    /// How often [`MacPump::tick`] should run. The rate the established macOS clipboard utilities
+    /// poll at.
+    pub const INTERVAL: Duration = asli_clipboard::macos::POLL_INTERVAL;
+
+    /// Applies the newest queued write, then checks whether somebody else copied.
+    ///
+    /// Writes first, so a clip that arrived during the last interval reaches the pasteboard
+    /// before the next poll, and the poll then recognises it as ours by its change count.
+    pub fn tick(&mut self) {
+        // Last write wins, exactly as on the other platforms.
+        let mut latest = None;
+        while let Ok(work) = self.inbox.try_recv() {
+            latest = Some(work);
+        }
+        if let Some(work) = latest {
+            let (outcome, _released) = apply_write(&mut self.clipboard, &work, &self.generation);
+            if let Err(err) = outcome {
+                eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
+            }
+        }
+
+        let AnyClipboard::Macos(clipboard) = &mut self.clipboard;
+        match clipboard.poll_once() {
+            Ok(Some(event)) => {
+                if let Some(observed) = to_observed(event, &self.generation) {
+                    let _ = self.observed.send(observed);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("{}", log_line("clipboard_watch_failed", &err.to_string())),
+        }
+    }
+
+    /// Runs [`MacPump::tick`] forever on the calling thread, for the headless daemon.
+    pub fn run_blocking(mut self) -> ! {
+        loop {
+            self.tick();
+            thread::sleep(Self::INTERVAL);
+        }
+    }
+}
+
+/// Starts the macOS clipboard. Call on the main thread, and keep calling [`MacPump::tick`] there.
+///
+/// # Errors
+///
+/// Currently infallible on macOS, and returns `Result` to match the other platforms.
+#[cfg(target_os = "macos")]
+pub fn start() -> Result<(SystemClipboard, Receiver<Observed>, MacPump)> {
+    let clipboard = asli_clipboard::macos::MacosClipboard::connect()?;
+    let permission = asli_clipboard::macos::MacosClipboard::permission();
+    let (tx, rx) = mpsc::channel();
+    let (to_writer, from_daemon) = mpsc::channel::<Write>();
+    let generation = Arc::new(AtomicU64::new(0));
+
+    Ok((
+        SystemClipboard {
+            to_writer,
+            // Nothing blocks on macOS, so there is nothing to interrupt. The flag exists so the
+            // queueing code is the same on every platform.
+            interrupt: Arc::new(AtomicBool::new(false)),
+            description: format!(
+                "NSPasteboard, polled every {} ms (read permission: {})",
+                MacPump::INTERVAL.as_millis(),
+                permission.label()
+            ),
+            generation: Arc::clone(&generation),
+        },
+        rx,
+        MacPump {
+            clipboard: AnyClipboard::Macos(Box::new(clipboard)),
+            inbox: from_daemon,
+            observed: tx,
+            generation,
+            _activity: asli_clipboard::macos::begin_background_activity(),
+        },
+    ))
 }
 
 /// The same idea on Windows, where there is exactly one mechanism.

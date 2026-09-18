@@ -5,9 +5,8 @@
 //! reading back what was written rather than by assuming the write worked.
 //!
 //! Each platform has exactly one sanctioned mechanism and they share nothing, so there is no
-//! common abstraction worth inventing. Linux and Windows are implemented. macOS returns a clear
-//! error saying so, because silently reporting success for something that will not happen is the
-//! failure people only discover after their machine reboots.
+//! common abstraction worth inventing: an XDG autostart entry on Linux, the `Run` key on Windows,
+//! and a launchd agent on macOS.
 
 use crate::error::{Error, Result};
 
@@ -298,25 +297,143 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::path::PathBuf;
+
+    use super::launch_agent;
     use crate::error::{Error, Result};
 
-    /// The sanctioned mechanism is a LaunchAgent plist in `~/Library/LaunchAgents`.
-    pub fn is_enabled() -> Result<bool> {
-        Err(not_implemented())
+    /// `~/Library/LaunchAgents`, which launchd reads for this user at login.
+    fn agents_dir() -> Result<PathBuf> {
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library/LaunchAgents"))
+            .ok_or_else(|| Error::ConfigDir("HOME is not set".to_owned()))
     }
 
-    pub fn set_enabled(_enabled: bool) -> Result<()> {
-        Err(not_implemented())
+    pub fn is_enabled() -> Result<bool> {
+        Ok(launch_agent::is_enabled_in(&agents_dir()?))
+    }
+
+    pub fn set_enabled(enabled: bool) -> Result<()> {
+        let exe = std::env::current_exe().map_err(Error::Io)?;
+        launch_agent::set_enabled_in(&agents_dir()?, enabled, &exe.display().to_string())
     }
 
     pub fn describe_location() -> Result<String> {
-        Ok("~/Library/LaunchAgents/dev.vnat.asli.plist (not implemented yet)".to_owned())
+        Ok(agents_dir()?.join(launch_agent::FILE).display().to_string())
+    }
+}
+
+/// The macOS login item, as a launchd agent.
+///
+/// A property list in `~/Library/LaunchAgents` is read by launchd at every login. Written and not
+/// loaded: loading it now would start a second copy beside the one already running, which the
+/// single instance lock would only turn away again. It takes effect at the next login, which is
+/// what the setting means.
+///
+/// Pure file handling, so it is compiled and tested on every platform even though only macOS
+/// uses it.
+#[cfg(any(target_os = "macos", test))]
+mod launch_agent {
+    use std::fs;
+    use std::path::Path;
+
+    use crate::error::{Error, Result};
+
+    /// The job label, which launchd requires to be unique, in reverse DNS form.
+    pub const LABEL: &str = "dev.vnat.asli";
+    /// The file launchd reads. Named after the label, which is the convention.
+    pub const FILE: &str = "dev.vnat.asli.plist";
+
+    /// Escapes text for an XML element body.
+    fn xml(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
 
-    fn not_implemented() -> Error {
-        Error::ConfigDir(
-            "autostart is not implemented on macOS yet. Add Asli under System Settings, General, Login Items in the meantime"
-                .to_owned(),
+    pub fn contents(exe: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>Label</key>\n\
+             \t<string>{LABEL}</string>\n\
+             \t<key>ProgramArguments</key>\n\
+             \t<array>\n\
+             \t\t<string>{}</string>\n\
+             \t\t<string>tray</string>\n\
+             \t</array>\n\
+             \t<key>RunAtLoad</key>\n\
+             \t<true/>\n\
+             \t<key>KeepAlive</key>\n\
+             \t<false/>\n\
+             \t<key>ProcessType</key>\n\
+             \t<string>Interactive</string>\n\
+             \t<key>LimitLoadToSessionType</key>\n\
+             \t<string>Aqua</string>\n\
+             </dict>\n\
+             </plist>\n",
+            xml(exe)
         )
+    }
+
+    pub fn is_enabled_in(dir: &Path) -> bool {
+        dir.join(FILE).exists()
+    }
+
+    pub fn set_enabled_in(dir: &Path, enabled: bool, exe: &str) -> Result<()> {
+        let path = dir.join(FILE);
+        if enabled {
+            fs::create_dir_all(dir).map_err(Error::Io)?;
+            fs::write(&path, contents(exe)).map_err(Error::Io)?;
+        } else if path.exists() {
+            fs::remove_file(&path).map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn scratch(tag: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir()
+                .join(format!("asli-launch-agent-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            dir
+        }
+
+        #[test]
+        fn the_agent_starts_the_tray_at_login_and_is_not_restarted_after_quit() {
+            let text = contents("/Applications/Asli.app/Contents/MacOS/asli");
+            assert!(text.contains("<string>dev.vnat.asli</string>"));
+            assert!(text.contains(
+                "<string>/Applications/Asli.app/Contents/MacOS/asli</string>\n\t\t<string>tray</string>"
+            ));
+            assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
+            assert!(
+                text.contains("<key>KeepAlive</key>\n\t<false/>"),
+                "Quit from the menu must stay quit"
+            );
+        }
+
+        #[test]
+        fn a_path_cannot_break_out_of_its_element() {
+            let text = contents("/Users/a&b/<odd>/asli");
+            assert!(text.contains("<string>/Users/a&amp;b/&lt;odd&gt;/asli</string>"));
+        }
+
+        #[test]
+        fn enabling_and_disabling_write_and_remove_the_file() {
+            let dir = scratch("toggle");
+            set_enabled_in(&dir, true, "/usr/local/bin/asli").expect("enables");
+            assert!(is_enabled_in(&dir));
+            set_enabled_in(&dir, true, "/usr/local/bin/asli").expect("enables twice");
+            set_enabled_in(&dir, false, "/usr/local/bin/asli").expect("disables");
+            assert!(!is_enabled_in(&dir));
+            set_enabled_in(&dir, false, "/usr/local/bin/asli").expect("disables twice");
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }

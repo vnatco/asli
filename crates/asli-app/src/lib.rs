@@ -42,6 +42,8 @@ pub mod daemon;
 pub mod error;
 pub mod history_store;
 pub mod instance;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod notify;
 pub mod qr;
 pub mod secrets;
