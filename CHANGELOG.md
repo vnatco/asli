@@ -37,7 +37,15 @@ Nothing is tagged yet and there are no downloads. What exists today:
   of the program for login and the Start menu. `setup.ps1 -Install` installs, starts and
   uninstalls it. Images are written to the clipboard as PNG and as a bitmap.
 
+- macOS: the daemon, the menu bar icon, the window and the login item (a launchd agent), with all
+  pasteboard access on the main thread. `setup.sh --install` builds `~/Applications/Asli.app`, so it
+  stays out of the Dock. Type checked from Linux; not yet run on a Mac.
+- `setup.sh --install` stops a running copy and starts the new one, so it also updates.
+
 ### Fixed
+
+- Our own clipboard writes could come back through the watcher on Wayland, and be logged as queued
+  and recorded in the history twice. The session never sent them, but the history was wrong.
 
 - On a fresh install with no account, the first run window never opened. Work scheduled for the
   window before its event loop started was silently dropped.
@@ -59,5 +67,5 @@ Nothing is tagged yet and there are no downloads. What exists today:
 ### Known gaps
 
 - No release has been tagged, so no artifact has been published.
-- The macOS application layer: tray, autostart and the daemon wiring.
+- macOS on real hardware, including the three pasteboard permission questions.
 - No libsodium interop check yet; the frozen vectors pin our own output only.
