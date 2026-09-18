@@ -11,12 +11,12 @@
 //!
 //! Notification bodies never contain clipboard content. Only sizes, reasons and counts.
 
-use notify_rust::Notification;
-
 /// The application name shown by the notification daemon.
+#[cfg(not(target_os = "macos"))]
 const APP_NAME: &str = "Asli";
 
 /// How long an informational notification stays up, in milliseconds.
+#[cfg(not(target_os = "macos"))]
 const TIMEOUT_MS: i32 = 4000;
 
 /// Sends a notification, swallowing failures.
@@ -24,14 +24,57 @@ const TIMEOUT_MS: i32 = 4000;
 /// A missing or broken notification daemon must never take the daemon down with it. The clipboard
 /// still syncs on a machine with no notification service, so a failure here is logged by the
 /// caller at most, never propagated.
+#[cfg(not(target_os = "macos"))]
 fn send(summary: &str, body: &str) {
-    let _ = Notification::new()
+    let _ = notify_rust::Notification::new()
         .appname(APP_NAME)
         .summary(summary)
         .body(body)
         .icon("edit-copy")
         .timeout(TIMEOUT_MS)
         .show();
+}
+
+/// Sends a notification on macOS through `osascript`, swallowing failures.
+///
+/// `display notification` is the one notification route that needs no bundle identifier, no
+/// Objective-C and no entitlement. Until the app ships as a signed bundle, macOS attributes these
+/// to Script Editor, which is the honest cost of having neither. Spawned and not waited for, so a
+/// slow notification centre never holds up the caller.
+#[cfg(target_os = "macos")]
+fn send(summary: &str, body: &str) {
+    let script = format!(
+        "display notification {} with title \"Asli\" subtitle {}",
+        applescript_string(body),
+        applescript_string(summary)
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Quotes text as an `AppleScript` string literal.
+///
+/// Bodies here are built from sizes and fixed wording, never clipboard content, but an error
+/// message can carry arbitrary text, and an unescaped quote would end the literal and run the rest
+/// as script.
+#[cfg(any(target_os = "macos", test))]
+fn applescript_string(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            // A line break inside a literal is legal AppleScript, but a notification shows one line.
+            '\n' | '\r' => quoted.push(' '),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// A clip arrived from another device.
@@ -210,6 +253,21 @@ mod tests {
         let too_large: fn(usize, usize) = super::clip_too_large;
         let sensitive: fn() = super::clip_sensitive;
         let _ = (too_large, sensitive);
+    }
+
+    /// A quote or backslash in a message must not end the `AppleScript` literal early.
+    #[test]
+    fn applescript_quoting_cannot_be_escaped() {
+        assert_eq!(super::applescript_string("plain"), "\"plain\"");
+        assert_eq!(
+            super::applescript_string("a \" & do shell script \"x"),
+            "\"a \\\" & do shell script \\\"x\""
+        );
+        assert_eq!(
+            super::applescript_string("back\\slash"),
+            "\"back\\\\slash\""
+        );
+        assert_eq!(super::applescript_string("two\nlines"), "\"two lines\"");
     }
 
     /// The optional ones must consult it.
