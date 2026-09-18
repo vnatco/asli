@@ -1107,8 +1107,8 @@ This section summarizes. `docs/THREAT_MODEL.md` is authoritative.
 
 ## 16. Test vectors
 
-Authoritative vectors live in `testdata/vectors.json`. That file does not exist yet; it is created
-alongside the `asli-crypto` implementation, and CI treats a mismatch as a hard failure. Any change to
+Authoritative vectors live in `testdata/vectors.json`, and the test suite treats a mismatch as a
+hard failure. Any change to
 a label, a length prefix, a field order or a truncation length MUST break these tests loudly.
 
 Four layers:

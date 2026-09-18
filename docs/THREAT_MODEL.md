@@ -251,9 +251,9 @@ audit. `libsodium-sys` has been unmaintained since 2021. `rand` is dropped entir
 
 **A note on the standard.** XChaCha20-Poly1305 has no RFC. Its normative reference,
 `draft-irtf-cfrg-xchacha`, expired without being published. The de facto specification is libsodium's
-`crypto_aead_xchacha20poly1305_ietf`, so our CI verifies our own ciphertexts against libsodium on
-every build rather than assuming compatibility. That check is the thing keeping "libsodium
-compatible" from being a claim we have not tested.
+`crypto_aead_xchacha20poly1305_ietf`. The frozen vectors in `testdata/vectors.json` pin our
+output, but no check against libsodium itself exists yet, so "libsodium compatible" is a design
+intent that has not been independently tested. An interop check is item 4 in the list below.
 
 ## 8. What we do NOT claim
 
@@ -277,5 +277,5 @@ compatible" from being a claim we have not tested.
 2. Whether `x-kde-passwordManagerHint` survives Mutter's XWayland selection bridge, which determines
    whether sensitive content filtering works at all on GNOME Wayland.
 3. Whether 1Password and Bitwarden set any of the documented exclusion markers on any platform.
-4. A libsodium interop check running in CI before any release is tagged.
+4. A libsodium interop check, run before any release is tagged.
 5. A manual USPTO and EUIPO check is unrelated to security but is tracked separately.

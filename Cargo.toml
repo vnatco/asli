@@ -6,7 +6,7 @@ members = ["crates/asli-app", "crates/asli-clipboard", "crates/asli-core", "crat
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/asli-sync/asli"
+repository = "https://github.com/vnatco/asli"
 rust-version = "1.82"
 
 [workspace.lints.rust]

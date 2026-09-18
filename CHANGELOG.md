@@ -25,19 +25,31 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Recovery from a relay restart, with full jitter backoff.
 - Content marked sensitive by a password manager is never read, let alone sent.
 
+- A window with six screens, opened from the tray: first run, join, the join token, history,
+  status and settings.
+- A local clipboard history, encrypted at rest.
+- One running instance per configuration. Launching again brings the running one forward instead
+  of starting a second connection.
+- `setup.sh --install` installs the binary, the application entry and icon, and launch at login,
+  and `--uninstall` removes all of it.
+
+### Fixed
+
+- On Wayland, every received clip after the first was advertised on the clipboard but pasted as
+  nothing. The compositor's cancellation of our previous write arrived after the new write and
+  cleared it.
+- Launch at login could start Asli twice, because the app and the uninstaller used different names
+  for the same entry.
+
 ### Written but unverified
 
-- The Windows backend. It cross compiles for the msvc and gnu targets and its
-  decision logic is unit tested, but no Win32 call in it has ever executed.
-- The macOS backend. Same position: it cross compiles for
-  `aarch64-apple-darwin`, but no AppKit call in it has ever executed, and the
-  behaviour of the macOS 15.4 pasteboard alert is inferred from documentation
-  rather than observed.
+- The Windows backend. Its decision logic is unit tested, but no Win32 call in it has been observed
+  running yet.
+- The macOS backend. Same position: no AppKit call in it has been observed running, and the
+  behaviour of the macOS 15.4 pasteboard alert is inferred from documentation rather than observed.
 
 ### Known gaps
 
-- No release has been tagged, so the packaging and release pipeline has never
-  produced an artifact.
-- "Paste last synced clip" in the tray is a stub.
-- The relay's assembly timeout and concurrent assembly caps are exercised by
-  code path, not by tests.
+- No release has been tagged, so no artifact has been published.
+- The macOS application layer: tray, autostart and the daemon wiring.
+- No libsodium interop check yet; the frozen vectors pin our own output only.
