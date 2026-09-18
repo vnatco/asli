@@ -3,25 +3,25 @@
     Asli setup script for Windows.
 
 .DESCRIPTION
-    Installs what is missing, builds, and optionally installs the binary. It is idempotent:
-    running it twice is safe and the second run does almost nothing. It never half succeeds.
-    If something is missing that we cannot install for you, it stops and prints the exact
-    command to fix it.
+    Checks prerequisites, builds, and optionally installs Asli. It is idempotent: running it twice
+    is safe. It never half succeeds. If something is missing that it cannot install for you, it
+    stops and prints the exact command to fix it.
 
-    Building the client does NOT require Node.js. Node is needed only for the relay server,
-    which is what -WithServer sets up.
+    Building the client does NOT require Node.js. Node is needed only for the relay server, which
+    is what -WithServer sets up.
 
 .PARAMETER BuildOnly
-    Install prerequisites and build. Do not install the binary.
+    Check prerequisites and build. Do not run the tests and do not install.
 
 .PARAMETER Install
-    Build, then install the binary into the user programs directory.
+    Build, then install asli.exe and asliw.exe into the user programs directory, add a Start menu
+    shortcut, turn on launch at login, and start Asli.
 
 .PARAMETER WithServer
-    Also set up the relay server, which is the only part that needs Node.js.
+    Also install the relay server's dependencies, which is the only part that needs Node.js.
 
 .PARAMETER Uninstall
-    Remove an installed binary and its autostart entry. Does not touch Credential Manager.
+    Stop Asli and remove what -Install put in place. Does not touch Credential Manager.
 
 .PARAMETER DryRun
     Print what would happen and change nothing.
@@ -29,7 +29,8 @@
 .EXAMPLE
     .\setup.ps1
     .\setup.ps1 -BuildOnly
-    .\setup.ps1 -WithServer
+    .\setup.ps1 -Install
+    .\setup.ps1 -Uninstall
 #>
 
 [CmdletBinding()]
@@ -46,6 +47,9 @@ $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir = if ($env:ASLI_INSTALL_DIR) { $env:ASLI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\Asli' }
+$Shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Asli.lnk'
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$Binaries = @('asli.exe', 'asliw.exe')
 
 function Write-Info { param([string]$Message) Write-Host "==> $Message" -ForegroundColor White }
 function Write-Ok   { param([string]$Message) Write-Host "  ok $Message" -ForegroundColor Green }
@@ -78,7 +82,7 @@ function Confirm-MsvcBuildTools {
     if (-not (Test-Path $vswhere)) {
         Write-Warn 'The Microsoft C++ build tools are missing, and Rust needs them to link on Windows.'
         Write-Host '  Install them, then run this script again:'
-        Write-Host '    winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
+        Write-Host '    winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
         Write-Host '  Or download from https://visualstudio.microsoft.com/visual-cpp-build-tools/ and select'
         Write-Host '  the "Desktop development with C++" workload.'
         Write-Fail 'missing prerequisite: MSVC build tools'
@@ -95,37 +99,44 @@ function Confirm-MsvcBuildTools {
 }
 
 function Confirm-Rust {
-    if (Test-CommandExists 'cargo') {
-        Write-Ok "Rust is present ($(cargo --version))"
-        return
+    if (-not (Test-CommandExists 'cargo')) {
+        $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+        if (Test-Path (Join-Path $cargoBin 'cargo.exe')) {
+            $env:PATH = "$cargoBin;$env:PATH"
+        }
     }
 
-    $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
-    if (Test-Path (Join-Path $cargoBin 'cargo.exe')) {
-        $env:PATH = "$cargoBin;$env:PATH"
-        Write-Ok 'Rust found in %USERPROFILE%\.cargo\bin'
-        return
+    if (-not (Test-CommandExists 'cargo')) {
+        Write-Info 'Rust is not installed. Installing it with rustup (a user level install, no admin needed).'
+        if ($DryRun) {
+            Write-Host '  would run: rustup-init.exe -y --profile minimal --component rustfmt --component clippy'
+            return
+        }
+
+        $installer = Join-Path $env:TEMP 'rustup-init.exe'
+        try {
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $installer -UseBasicParsing
+        } catch {
+            Write-Fail "could not download rustup. Install Rust manually from https://rustup.rs and run this script again. ($($_.Exception.Message))"
+        }
+
+        & $installer -y --profile minimal --component rustfmt --component clippy
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail 'rustup install failed. Install Rust manually from https://rustup.rs and run this script again.'
+        }
+        $env:PATH = "$(Join-Path $env:USERPROFILE '.cargo\bin');$env:PATH"
     }
 
-    Write-Info 'Rust is not installed. Installing it with rustup (a user level install, no admin needed).'
-    if ($DryRun) {
-        Write-Host '  would run: rustup-init.exe -y --profile minimal --component rustfmt --component clippy'
-        return
+    # The GNU toolchain would need MinGW, which this script does not set up. MSVC is the supported
+    # one, and a rustup that defaulted to GNU builds nothing here.
+    $host_triple = (& rustc -vV | Select-String '^host:').ToString()
+    if ($host_triple -notmatch 'msvc') {
+        Write-Warn "Rust is set to the GNU toolchain ($host_triple). Asli builds with MSVC on Windows."
+        Write-Host '  Switch, then run this script again:'
+        Write-Host '    rustup default stable-x86_64-pc-windows-msvc'
+        Write-Fail 'wrong Rust toolchain'
     }
-
-    $installer = Join-Path $env:TEMP 'rustup-init.exe'
-    try {
-        Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $installer -UseBasicParsing
-    } catch {
-        Write-Fail "could not download rustup. Install Rust manually from https://rustup.rs and run this script again. ($($_.Exception.Message))"
-    }
-
-    & $installer -y --profile minimal --component rustfmt --component clippy
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail 'rustup install failed. Install Rust manually from https://rustup.rs and run this script again.'
-    }
-    $env:PATH = "$cargoBin;$env:PATH"
-    Write-Ok "Rust installed ($(cargo --version))"
+    Write-Ok "Rust is present ($(cargo --version))"
 }
 
 function Confirm-Node {
@@ -139,29 +150,110 @@ function Confirm-Node {
     Write-Fail 'missing prerequisite: Node.js (only needed for -WithServer)'
 }
 
-function Invoke-Uninstall {
-    $binary = Join-Path $InstallDir 'asli.exe'
-    if (Test-Path $binary) {
-        Write-Info "Removing $binary"
-        if (-not $DryRun) { Remove-Item $binary -Force }
-        Write-Ok 'binary removed'
-    } else {
-        Write-Ok "nothing installed at $binary"
+# A running copy holds its executable open, so it has to stop before the file can be replaced or
+# removed. Only copies started from the install directory are touched, never a development build.
+function Invoke-StopAsli {
+    $running = @(Get-Process -Name 'asli', 'asliw' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) })
+    if ($running.Count -eq 0) { return }
+
+    Write-Info 'Stopping the running copy of Asli'
+    if (-not $DryRun) {
+        $running | Stop-Process -Force
+        $running | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    }
+    Write-Ok 'stopped'
+}
+
+function Invoke-Install {
+    $built = Join-Path $RepoRoot 'target\release'
+    foreach ($binary in $Binaries) {
+        if (-not $DryRun -and -not (Test-Path (Join-Path $built $binary))) {
+            Write-Fail "no $binary in $built. The build step should have produced it."
+        }
     }
 
-    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $entry = Get-ItemProperty -Path $runKey -Name 'Asli' -ErrorAction SilentlyContinue
+    Write-Info "Installing into $InstallDir"
+    Invoke-StopAsli
+    if (-not $DryRun) {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        foreach ($binary in $Binaries) {
+            Copy-Item -Force (Join-Path $built $binary) (Join-Path $InstallDir $binary)
+        }
+    }
+    Write-Ok 'asli.exe and asliw.exe installed'
+
+    $windowed = Join-Path $InstallDir 'asliw.exe'
+    if ($DryRun) {
+        Write-Host "  would create: $Shortcut"
+    } else {
+        $shell = New-Object -ComObject WScript.Shell
+        $link = $shell.CreateShortcut($Shortcut)
+        $link.TargetPath = $windowed
+        $link.Arguments = 'tray'
+        $link.WorkingDirectory = $InstallDir
+        $link.Description = 'Encrypted clipboard sync across your own machines'
+        $link.Save()
+    }
+    Write-Ok 'Start menu shortcut created'
+
+    # The binary writes the login entry itself, pointing at the installed asliw.exe, and it is the
+    # same code that checks the entry every time Asli starts.
+    Invoke-Step (Join-Path $InstallDir 'asli.exe') @('autostart', 'on')
+
+    $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+    if (-not ($userPath -split ';' | Where-Object { $_ -ieq $InstallDir })) {
+        Write-Warn "$InstallDir is not on your PATH, so 'asli' will not work in a new terminal yet."
+        Write-Host '  To add it for your user only:'
+        Write-Host "    [Environment]::SetEnvironmentVariable('PATH', `"`$([Environment]::GetEnvironmentVariable('PATH','User'));$InstallDir`", 'User')"
+    }
+
+    Write-Host ''
+    Write-Info 'Starting Asli'
+    if ($DryRun) {
+        Write-Host "  would run: $windowed tray"
+    } else {
+        Start-Process -FilePath $windowed -ArgumentList 'tray' -WorkingDirectory $InstallDir
+    }
+    Write-Ok 'Asli is running. Look for its icon in the notification area; it may be under the ^ arrow.'
+    Write-Host '  It also starts by itself when you sign in.'
+    Write-Host "  To watch its log, quit it from the tray and run: & '$(Join-Path $InstallDir 'asli.exe')' tray"
+}
+
+function Invoke-Uninstall {
+    Invoke-StopAsli
+
+    foreach ($binary in $Binaries) {
+        $path = Join-Path $InstallDir $binary
+        if (Test-Path $path) {
+            Write-Info "Removing $path"
+            if (-not $DryRun) { Remove-Item $path -Force }
+        }
+    }
+    if ((Test-Path $InstallDir) -and -not (Get-ChildItem $InstallDir -Force | Select-Object -First 1)) {
+        if (-not $DryRun) { Remove-Item $InstallDir -Force }
+    }
+    Write-Ok 'binaries removed'
+
+    if (Test-Path $Shortcut) {
+        Write-Info "Removing $Shortcut"
+        if (-not $DryRun) { Remove-Item $Shortcut -Force }
+        Write-Ok 'Start menu shortcut removed'
+    }
+
+    $entry = Get-ItemProperty -Path $RunKey -Name 'Asli' -ErrorAction SilentlyContinue
     if ($entry) {
         Write-Info 'Removing the launch at login entry'
-        if (-not $DryRun) { Remove-ItemProperty -Path $runKey -Name 'Asli' }
+        if (-not $DryRun) { Remove-ItemProperty -Path $RunKey -Name 'Asli' }
         Write-Ok 'autostart entry removed'
     }
 
     Write-Host ''
     Write-Info 'Uninstall complete.'
     Write-Host '  Your account key is still in Windows Credential Manager. Nothing here deleted it.'
-    Write-Host '  To remove it as well, use Reset account in the tray menu before uninstalling, or'
-    Write-Host '  delete the "asli" entry from Credential Manager by hand.'
+    Write-Host '  To remove it as well, run "asli reset" before uninstalling, or delete the'
+    Write-Host '  "asli" entry from Credential Manager by hand. Settings and history stay in'
+    Write-Host "  $(Join-Path $env:APPDATA 'vnat\asli') until you delete that folder."
 }
 
 Write-Host 'Asli setup (Windows)' -ForegroundColor White
@@ -180,39 +272,34 @@ if ($WithServer) { Confirm-Node }
 
 Write-Host ''
 Write-Info 'Building'
-Invoke-Step 'cargo' @('build', '--release', '--workspace')
+# The windowed feature also builds asliw.exe, the console free copy that login and the Start menu
+# launch.
+Invoke-Step 'cargo' @('build', '--release', '-p', 'asli-app', '--features', 'windowed')
 Write-Ok 'build finished'
 
-Write-Host ''
-Write-Info 'Running tests'
-Invoke-Step 'cargo' @('test', '--workspace')
-Write-Ok 'tests passed'
+if (-not $BuildOnly -and -not $Install) {
+    Write-Host ''
+    Write-Info 'Running tests'
+    Invoke-Step 'cargo' @('test', '--workspace')
+    Write-Ok 'tests passed'
+}
 
 if ($WithServer) {
     Write-Host ''
-    $serverDir = Join-Path $RepoRoot 'server'
-    if (Test-Path $serverDir) {
-        Write-Info 'Setting up the relay server'
-        Push-Location $serverDir
-        try { Invoke-Step 'npm' @('ci') } finally { Pop-Location }
-        Write-Ok 'server dependencies installed. Start it with: cd server; npm start'
-    } else {
-        Write-Warn 'The relay server is not in this repository yet, so there is nothing to set up.'
-        Write-Host '  The server lands in M1.'
-    }
+    Write-Info 'Setting up the relay server'
+    Push-Location (Join-Path $RepoRoot 'server')
+    try { Invoke-Step 'npm' @('ci') } finally { Pop-Location }
+    Write-Ok 'server dependencies installed. Start it with: cd server; npm start'
 }
 
 Write-Host ''
 if ($Install) {
-    Write-Warn 'There is no installable binary yet.'
-    Write-Host "  Asli is at M0: the crypto library builds and is tested, and the tray client is not"
-    Write-Host "  written yet. When it exists, -Install will place it in $InstallDir."
+    Invoke-Install
 } elseif ($BuildOnly) {
     Write-Ok 'Build only requested, stopping here.'
+} else {
+    Write-Info 'Built. Run .\setup.ps1 -Install to install it, or run target\release\asli.exe tray directly.'
 }
 
 Write-Host ''
 Write-Host 'Done.' -ForegroundColor Green
-Write-Host 'What exists today: the asli-crypto library, its test suite, and the frozen protocol vectors.'
-Write-Host 'What does not exist yet: the tray client, the relay server, and installable packages.'
-Write-Host 'See docs/BUILDING.md for the details.'

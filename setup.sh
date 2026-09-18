@@ -46,7 +46,7 @@ Asli setup, for macOS and Linux.
 Usage: ./setup.sh [options]
 
 Options:
-  --build-only    Install prerequisites and build. Do not install the binary.
+  --build-only    Check prerequisites and build. Do not run the tests and do not install.
   --install       Build, then install the binary into ~/.local/bin (override with ASLI_INSTALL_DIR),
                   the application entry and icon, and turn on launch at login.
   --with-server   Also set up the relay server, which is the only part that needs Node.js.
@@ -300,13 +300,15 @@ main() {
 
     printf '\n'
     info "Building"
-    run cargo build --release --workspace || die "the build failed. The output above says why."
+    run cargo build --release -p asli-app || die "the build failed. The output above says why."
     ok "build finished"
 
-    printf '\n'
-    info "Running tests"
-    run cargo test --workspace || die "tests failed. Please open an issue with the output above."
-    ok "tests passed"
+    if [ "$BUILD_ONLY" -eq 0 ] && [ "$DO_INSTALL" -eq 0 ]; then
+        printf '\n'
+        info "Running tests"
+        run cargo test --workspace || die "tests failed. Please open an issue with the output above."
+        ok "tests passed"
+    fi
 
     if [ "$WITH_SERVER" -eq 1 ]; then
         printf '\n'
