@@ -45,9 +45,6 @@ keyring = "4"
 # Menu definitions. Default features pull gtk3 and libxdo; this project deliberately has no GTK
 # anywhere, so they stay off.
 muda = { version = "0.20", default-features = false }
-# Desktop notifications over the session bus. The default "z" feature is pure Rust zbus, which
-# avoids a C libdbus build dependency.
-notify-rust = "4"
 # The tray. The ksni feature is a pure Rust StatusNotifierItem implementation, replacing the
 # default libappindicator and libxdo backends, which is what keeps GTK out of the dependency tree.
 tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
@@ -67,6 +64,24 @@ slint = { version = "1.18.0", default-features = false, features = [
 ] }
 tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "time"] }
 zeroize = "1"
+
+# Desktop notifications over the session bus on Linux, and toasts on Windows. The default "z"
+# feature is pure Rust zbus, which avoids a C libdbus build dependency. Not on macOS: its backend
+# there compiles Objective-C against Cocoa through the deprecated NSUserNotification API, so macOS
+# notifications go through osascript instead. See src/notify.rs.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust = "4"
+
+# Only to hide the Dock icon when run without a bundle. Already in the tree through the macOS
+# clipboard backend, so this adds features, not crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }

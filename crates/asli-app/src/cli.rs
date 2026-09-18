@@ -269,12 +269,17 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         eprintln!("{}", log_line("autostart_failed", &err.to_string()));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     {
         use crate::clipboard_io::ClipboardIo as _;
-        use crate::window::{self, MemoryHistory, Screen, SharedHistory};
+        use crate::window::{self, Screen};
 
+        #[cfg(not(target_os = "macos"))]
         let (clipboard, observed) = crate::clipboard_io::start()?;
+        // On macOS the pasteboard belongs to the main thread, so it comes back as a pump that
+        // this thread keeps turning rather than as threads of its own.
+        #[cfg(target_os = "macos")]
+        let (clipboard, observed, pump) = crate::clipboard_io::start()?;
         eprintln!("{}", log_line("clipboard", &clipboard.describe()));
 
         let controls = Controls::default();
@@ -295,24 +300,7 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         // The encrypted store when there is an account key to seal it with, and a list that lives
         // only as long as the process when there is not. First run has no key yet, and a history
         // written now that nothing could decrypt later is worse than no history at all.
-        let history: SharedHistory = match &account {
-            Some((secret, _)) => match crate::history_store::open(paths, secret, &config) {
-                Ok(store) => Arc::new(std::sync::Mutex::new(store)),
-                Err(err) => {
-                    // Never fatal. Syncing is the product and remembering is the convenience, so
-                    // a history that will not open costs the history and not the daemon.
-                    eprintln!("{}", log_line("history_failed", &err.to_string()));
-                    Arc::new(std::sync::Mutex::new(MemoryHistory::new(
-                        config.keep_history,
-                        config.history_entries,
-                    )))
-                }
-            },
-            None => Arc::new(std::sync::Mutex::new(MemoryHistory::new(
-                config.keep_history,
-                config.history_entries,
-            ))),
-        };
+        let history = open_history(paths, &config, account.as_ref().map(|(secret, _)| secret));
 
         let identity = account.map(|(secret, _)| Identity::from_secret(&secret));
         if let Some(identity) = &identity {
@@ -322,6 +310,15 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
             );
         }
 
+        #[cfg(target_os = "macos")]
+        if !with_tray {
+            let identity = identity.ok_or(Error::NoAccount)?;
+            run_headless_on_macos(
+                paths, &config, identity, io, observed, controls, history, pump,
+            );
+        }
+
+        #[cfg(not(target_os = "macos"))]
         if !with_tray {
             let Some(identity) = identity else {
                 return Err(Error::NoAccount);
@@ -349,6 +346,8 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
             history: Arc::clone(&history),
         })?;
         start_tray(paths, &config, &controls, &io)?;
+        #[cfg(target_os = "macos")]
+        start_pump(pump);
 
         match identity {
             Some(identity) => {
@@ -364,16 +363,125 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         window::run_event_loop()
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = (config, with_tray);
-        eprintln!("The daemon is not wired up on this platform yet. Linux and Windows are.");
+        eprintln!("The daemon is not wired up on this platform. Linux, Windows and macOS are.");
         Ok(())
     }
 }
 
+/// `asli run` on macOS: the daemon on a worker, the pasteboard pump on this thread, and the
+/// process ending when the daemon does.
+///
+/// The other platforms run the daemon on the main thread here. macOS cannot, because the main
+/// thread is the only one allowed to touch the pasteboard.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+fn run_headless_on_macos(
+    paths: &Paths,
+    config: &Config,
+    identity: Identity,
+    io: Arc<dyn crate::clipboard_io::ClipboardIo>,
+    observed: std::sync::mpsc::Receiver<crate::clipboard_io::Observed>,
+    controls: Controls,
+    history: crate::window::SharedHistory,
+    pump: crate::clipboard_io::MacPump,
+) -> ! {
+    let paths = paths.clone();
+    let config = config.clone();
+    let spawned = std::thread::Builder::new()
+        .name("asli-daemon".to_owned())
+        .spawn(move || {
+            let code =
+                match headless_daemon(&paths, &config, identity, io, observed, &controls, &history)
+                {
+                    Ok(()) => 0,
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        1
+                    }
+                };
+            std::process::exit(code);
+        });
+    if let Err(err) = spawned {
+        eprintln!("error: could not start the daemon: {err}");
+        std::process::exit(1);
+    }
+    pump.run_blocking()
+}
+
+/// The headless daemon on macOS, run on a worker because the main thread polls the pasteboard.
+#[cfg(target_os = "macos")]
+fn headless_daemon(
+    paths: &Paths,
+    config: &Config,
+    identity: Identity,
+    io: Arc<dyn crate::clipboard_io::ClipboardIo>,
+    observed: std::sync::mpsc::Receiver<crate::clipboard_io::Observed>,
+    controls: &Controls,
+    history: &crate::window::SharedHistory,
+) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Io)?;
+
+    runtime.block_on(async {
+        tokio::select! {
+            result = daemon::run(paths, config, identity, io, observed, controls.clone(), Arc::clone(history)) => result,
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("{}", log_line("stopping", "interrupted"));
+                Ok(())
+            }
+        }
+    })
+}
+
+/// Turns the macOS pasteboard pump from the main thread, on a timer inside the window's event loop.
+#[cfg(target_os = "macos")]
+fn start_pump(mut pump: crate::clipboard_io::MacPump) {
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        crate::clipboard_io::MacPump::INTERVAL,
+        move || pump.tick(),
+    );
+    // Dropping a timer stops it, and this one must run for the life of the process.
+    std::mem::forget(timer);
+}
+
+/// The encrypted history when there is an account key to seal it with, and a list that lives
+/// only as long as the process when there is not. First run has no key yet, and a history written
+/// then that nothing could decrypt later is worse than no history at all.
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn open_history(
+    paths: &Paths,
+    config: &Config,
+    secret: Option<&zeroize::Zeroizing<[u8; 32]>>,
+) -> crate::window::SharedHistory {
+    let in_memory = || -> crate::window::SharedHistory {
+        Arc::new(std::sync::Mutex::new(crate::window::MemoryHistory::new(
+            config.keep_history,
+            config.history_entries,
+        )))
+    };
+    let Some(secret) = secret else {
+        return in_memory();
+    };
+    match crate::history_store::open(paths, secret, config) {
+        Ok(store) => Arc::new(std::sync::Mutex::new(store)),
+        Err(err) => {
+            // Never fatal. Syncing is the product and remembering is the convenience, so a
+            // history that will not open costs the history and not the daemon.
+            eprintln!("{}", log_line("history_failed", &err.to_string()));
+            in_memory()
+        }
+    }
+}
+
 /// Runs the daemon on a worker thread, leaving the main one for the window.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn start_daemon(
     paths: &Paths,
     config: &Config,
@@ -537,7 +645,10 @@ fn start_tray(
 /// thread that pumps them. The Slint event loop is exactly such a pump, so the tray is created
 /// from inside it, and a timer on the same thread drains the menu and click channels. A tray built
 /// on a thread of its own, as on Linux, would register an icon whose menu never opens.
-#[cfg(target_os = "windows")]
+///
+/// macOS is stricter still: a status item may only be created on the main thread, after the
+/// application has finished launching, which is exactly when this closure runs.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn start_tray(
     paths: &Paths,
     config: &Config,
@@ -553,6 +664,13 @@ fn start_tray(
     let _ = tray::take_raise_request(&paths);
 
     slint::invoke_from_event_loop(move || {
+        // A menu bar application: no Dock icon and no entry in the application switcher. The
+        // installed bundle says so in its Info.plist, but a binary run straight from a terminal
+        // has no bundle, and the window would otherwise put a Dock icon up the first time it
+        // opens.
+        #[cfg(target_os = "macos")]
+        crate::macos::become_accessory();
+
         let tray = match tray::Tray::new(Arc::clone(&controls.paused)) {
             Ok(tray) => {
                 eprintln!("{}", log_line("tray", "registered"));
@@ -606,7 +724,7 @@ fn start_tray(
 /// Most items now open a screen rather than doing something of their own. That is the point of
 /// having a window: a menu item that performs an invisible action is indistinguishable from one
 /// that does nothing, which is exactly how these behaved before.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn handle_command(
     command: tray::Command,
     paths: &Paths,
