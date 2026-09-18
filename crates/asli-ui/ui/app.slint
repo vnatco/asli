@@ -9,7 +9,6 @@
 // a JSON file opened in whatever editor the desktop had registered. Each of those was a different
 // application appearing on screen, which is why this exists.
 
-import { AboutSlint } from "std-widgets.slint";
 import {
     Palette, Metrics, Heading, Body, Card, Button, Field, Switch, Select, Row, StatusDot
 } from "design.slint";
@@ -703,12 +702,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Attribution, as the toolkit's licence requires, in the About area rather
-                    // than anywhere it would compete with the application itself.
-                    HorizontalLayout {
-                        alignment: start;
-                        AboutSlint { }
-                    }
                 }
             }
 

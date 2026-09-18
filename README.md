@@ -103,3 +103,13 @@ which desktop and which compositor you are on, because that is nearly always the
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The window is drawn with [Slint](https://slint.dev), used under its royalty free licence, which
+asks for this attribution where the application is distributed:
+
+<a href="https://slint.dev">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-dark.svg">
+    <img alt="Made with Slint" src="https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-light.svg" height="48">
+  </picture>
+</a>
