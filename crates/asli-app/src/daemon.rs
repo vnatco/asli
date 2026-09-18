@@ -476,7 +476,10 @@ fn spawn_clipboard_bridge(
                         if local_tx.blocking_send(LocalEvent::Text(text)).is_err() {
                             return;
                         }
-                        eprintln!("{}", log_line("clip_sent", &format!("{bytes} bytes")));
+                        // Queued, not sent: the session still drops an echo of our own write
+                        // and anything over the relay's limit, and a log line claiming a send
+                        // that never happened is how a false diagnosis starts.
+                        eprintln!("{}", log_line("clip_queued", &format!("{bytes} bytes")));
                     }
                     Observed::Image(png) => {
                         if png.len() > cap {
@@ -504,7 +507,7 @@ fn spawn_clipboard_bridge(
                         if local_tx.blocking_send(LocalEvent::Image(png)).is_err() {
                             return;
                         }
-                        eprintln!("{}", log_line("image_sent", &format!("{bytes} bytes")));
+                        eprintln!("{}", log_line("image_queued", &format!("{bytes} bytes")));
                     }
                     Observed::Sensitive => {
                         // Never recorded, and there is nothing to record: the watcher does not

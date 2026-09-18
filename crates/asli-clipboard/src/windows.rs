@@ -23,7 +23,7 @@
 //! Everything here goes through `clipboard-win`'s safe wrappers rather than raw bindings, because
 //! the crate sets `forbid(unsafe_code)` and the `windows` crate is `unsafe` at every call site.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -257,8 +257,13 @@ pub struct WindowsClipboard {
     /// `Shutdown` signals by being dropped, so stopping the loop means taking this and letting it
     /// fall out of scope.
     stopper: Arc<Mutex<Option<Shutdown>>>,
-    /// Sequence number captured immediately after our own last write.
-    last_written_seq: Option<u32>,
+    /// Sequence number captured immediately after our own last write, zero for none.
+    ///
+    /// Shared with every [`WindowsClipboard::sibling`]. The daemon writes through one instance
+    /// and watches through another, and the watcher can only recognise the writer's change if it
+    /// can see the number the writer recorded. Zero is free to mean "none" because Windows never
+    /// hands out a sequence number of zero.
+    last_written_seq: Arc<AtomicU32>,
     /// Whether the first notification has been seen.
     ///
     /// Windows does not announce the existing clipboard on startup the way a Wayland compositor
@@ -279,9 +284,36 @@ impl WindowsClipboard {
             formats: ExclusionFormats::register(),
             shutdown: Arc::new(AtomicBool::new(false)),
             stopper: Arc::new(Mutex::new(None)),
-            last_written_seq: None,
+            last_written_seq: Arc::new(AtomicU32::new(0)),
             seen_first_event: false,
         })
+    }
+
+    /// A second instance that recognises this one's writes as its own, and vice versa.
+    ///
+    /// Everything else is separate, including the shutdown flag, so stopping one does not stop
+    /// the other.
+    #[must_use]
+    pub fn sibling(&self) -> Self {
+        Self {
+            formats: self.formats,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            stopper: Arc::new(Mutex::new(None)),
+            last_written_seq: Arc::clone(&self.last_written_seq),
+            seen_first_event: false,
+        }
+    }
+
+    fn record_written(&self, seq: Option<u32>) {
+        self.last_written_seq
+            .store(seq.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    fn last_written(&self) -> Option<u32> {
+        match self.last_written_seq.load(Ordering::Relaxed) {
+            0 => None,
+            seq => Some(seq),
+        }
     }
 
     /// A handle that can ask the watch loop to stop from another thread.
@@ -424,7 +456,7 @@ impl WindowsClipboard {
     pub fn set_text(&mut self, text: &str, options: WriteOptions) -> Result<WriteReceipt> {
         let native = asli_core::to_platform(text, asli_core::LineEnding::Crlf);
 
-        let seq = {
+        {
             let _guard = Self::open_with_backoff()
                 .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
 
@@ -439,11 +471,14 @@ impl WindowsClipboard {
             if options.concealed {
                 write_exclusion_markers(&self.formats)?;
             }
+        }
+        // Read after the guard has closed the clipboard, never inside it. Closing is itself a
+        // change the counter records, so a number read while the clipboard was still open is
+        // already stale by the time the watcher compares it, and the watcher then takes our own
+        // write for somebody else's copy.
+        let seq = raw::seq_num().map(Into::into);
 
-            raw::seq_num().map(Into::into)
-        };
-
-        self.last_written_seq = seq;
+        self.record_written(seq);
         Ok(WriteReceipt {
             seq: seq.map(u64::from),
         })
@@ -467,7 +502,7 @@ impl WindowsClipboard {
         image_bytes::validate_png(png)?;
         let dib = png_to_dib(png)?;
 
-        let seq = {
+        {
             let _guard = Self::open_with_backoff()
                 .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
 
@@ -483,11 +518,14 @@ impl WindowsClipboard {
             if options.concealed {
                 write_exclusion_markers(&self.formats)?;
             }
+        }
+        // Read after the guard has closed the clipboard, never inside it. Closing is itself a
+        // change the counter records, so a number read while the clipboard was still open is
+        // already stale by the time the watcher compares it, and the watcher then takes our own
+        // write for somebody else's copy.
+        let seq = raw::seq_num().map(Into::into);
 
-            raw::seq_num().map(Into::into)
-        };
-
-        self.last_written_seq = seq;
+        self.record_written(seq);
         Ok(WriteReceipt {
             seq: seq.map(u64::from),
         })
@@ -499,10 +537,12 @@ impl WindowsClipboard {
     ///
     /// Returns [`Error::Write`] if the clipboard cannot be opened or emptied.
     pub fn release_selection(&mut self) -> Result<()> {
-        let _guard = Self::open_with_backoff()
+        let guard = Self::open_with_backoff()
             .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
         raw::empty().map_err(|e| Error::Write(format!("could not empty the clipboard: {e}")))?;
-        self.last_written_seq = raw::seq_num().map(Into::into);
+        // Closed first, for the same reason as in set_text.
+        drop(guard);
+        self.record_written(raw::seq_num().map(Into::into));
         Ok(())
     }
 }
@@ -612,7 +652,7 @@ impl ClipboardWatcher for WindowsClipboard {
                 return Ok(());
             }
 
-            if is_our_own_write(raw::seq_num().map(Into::into), self.last_written_seq) {
+            if is_our_own_write(raw::seq_num().map(Into::into), self.last_written()) {
                 continue;
             }
 

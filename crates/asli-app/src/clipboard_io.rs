@@ -262,6 +262,11 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
     let (tx, rx) = mpsc::channel();
     let watcher_backend = plan.backend;
 
+    // The writer connects here rather than inside its thread, because the interrupt has to be the
+    // clipboard's own shutdown flag: that is the only flag its run loop checks.
+    let writer = connect(watcher_backend)?;
+    let watcher_seed = watcher_for(&writer);
+
     // Shared by the watcher and the writer. An external copy has to bump this too, or a pending
     // clear would still fire and wipe out what the person just copied.
     let generation = Arc::new(AtomicU64::new(0));
@@ -270,7 +275,8 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
     thread::Builder::new()
         .name("asli-clipboard-watch".to_owned())
         .spawn(move || {
-            let mut backend = match connect(watcher_backend) {
+            let connected = watcher_seed.map_or_else(|| connect(watcher_backend), Ok);
+            let mut backend = match connected {
                 Ok(backend) => backend,
                 Err(err) => {
                     eprintln!("{}", log_line("clipboard_watch_failed", &err.to_string()));
@@ -310,9 +316,6 @@ pub fn start() -> Result<(LinuxClipboard, Receiver<Observed>)> {
         })
         .map_err(crate::Error::Io)?;
 
-    // The writer connects here rather than inside its thread, because the interrupt has to be the
-    // clipboard's own shutdown flag: that is the only flag its run loop checks.
-    let writer = connect(watcher_backend)?;
     let interrupt = writer.shutdown_flag();
     let (to_writer, from_daemon) = mpsc::channel::<Write>();
 
@@ -457,6 +460,29 @@ impl AnyClipboard {
             Self::Windows(clipboard) => clipboard.shutdown_handle(),
         }
     }
+}
+
+/// The watcher, when it has to be made from the writer rather than connected on its own.
+///
+/// On Windows the watcher recognises the writer's changes by the clipboard sequence number the
+/// writer recorded, so the two must share it. Without that, every received clip came back through
+/// the watcher as a local copy: the session's hash guard stopped it being sent, but it was logged
+/// as sent and recorded in the history a second time.
+#[cfg(target_os = "windows")]
+#[allow(clippy::unnecessary_wraps)] // Same signature as on Linux, where there is nothing to share.
+fn watcher_for(writer: &AnyClipboard) -> Option<AnyClipboard> {
+    match writer {
+        AnyClipboard::Windows(clipboard) => {
+            Some(AnyClipboard::Windows(Box::new(clipboard.sibling())))
+        }
+    }
+}
+
+/// On X11 and Wayland the watcher needs a connection of its own, made on its own thread, and it
+/// recognises our writes by owner and by content hash instead.
+#[cfg(target_os = "linux")]
+const fn watcher_for(_writer: &AnyClipboard) -> Option<AnyClipboard> {
+    None
 }
 
 #[cfg(target_os = "windows")]
