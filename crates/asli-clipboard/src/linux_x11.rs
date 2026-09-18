@@ -22,11 +22,13 @@
 //! difference between this backend and the 500 ms full clipboard re-read that `clipboard-rs`
 //! performs on Wayland.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::xfixes::{ConnectionExt as _, SelectionEventMask};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Property,
@@ -129,6 +131,18 @@ pub struct X11Clipboard {
     /// Held beside the content rather than inside `Owned`, because it applies to whatever is
     /// being served and the hint is answered the same way for text and for an image.
     concealed: bool,
+    /// Events that arrived while a read was waiting for its own reply.
+    ///
+    /// A read polls the connection until the owner answers, and anything else it sees on the way,
+    /// such as the notification of a second copy, has to be kept for the main loop rather than
+    /// dropped, or that copy is never synced.
+    deferred: RefCell<VecDeque<Event>>,
+    /// Only serve what we own, and never read other clients' copies.
+    ///
+    /// The writer connection runs the event loop purely to answer paste requests. Reading every
+    /// copy another application makes, only to throw it away, cost a full transfer each time, and
+    /// while it waited for the owner, paste requests for our own content went unanswered.
+    serve_only: bool,
 }
 
 impl X11Clipboard {
@@ -195,7 +209,29 @@ impl X11Clipboard {
             shutdown: Arc::new(AtomicBool::new(false)),
             owned: None,
             concealed: false,
+            deferred: RefCell::new(VecDeque::new()),
+            serve_only: false,
         })
+    }
+
+    /// Makes this connection a writer that only serves, as described on the field.
+    pub const fn set_serve_only(&mut self) {
+        self.serve_only = true;
+    }
+
+    /// The next event, taking anything a read deferred first.
+    fn next_event(&self) -> Result<Option<Event>> {
+        if let Some(event) = self.deferred.borrow_mut().pop_front() {
+            return Ok(Some(event));
+        }
+        self.conn
+            .poll_for_event()
+            .map_err(|e| Error::ConnectionLost(format!("{e}")))
+    }
+
+    /// Keeps an event a read did not want, for the main loop to handle.
+    fn defer(&self, event: Event) {
+        self.deferred.borrow_mut().push_back(event);
     }
 
     /// A handle that can ask this watcher to stop from another thread.
@@ -238,6 +274,23 @@ impl X11Clipboard {
     pub fn release_selection(&mut self) -> Result<()> {
         self.owned = None;
         self.concealed = false;
+
+        // Only if it is still ours. Setting the owner to None clears the selection whoever holds
+        // it, so releasing after somebody else copied would erase their copy, which for the join
+        // token clear typically means a password copied from a password manager a minute later.
+        // The server is asked rather than our own bookkeeping, because the event saying somebody
+        // took it may still be sitting unread in the queue.
+        let owner = self
+            .conn
+            .get_selection_owner(self.atoms.CLIPBOARD)
+            .map_err(|e| Error::Write(format!("could not check the selection owner: {e}")))?
+            .reply()
+            .map_err(|e| Error::Write(format!("could not check the selection owner: {e}")))?
+            .owner;
+        if owner != self.window {
+            return Ok(());
+        }
+
         self.conn
             .set_selection_owner(NONE, self.atoms.CLIPBOARD, CURRENT_TIME)
             .map_err(|e| Error::Write(format!("could not release the selection: {e}")))?;
@@ -379,45 +432,82 @@ impl X11Clipboard {
                 .poll_for_event()
                 .map_err(|e| Error::ConnectionLost(format!("{e}")))?
             {
-                Some(Event::SelectionNotify(event)) if event.requestor == self.window => {
+                // The target is checked as well as the requestor. An owner that answers an earlier
+                // request after we gave up on it would otherwise have its late reply taken for
+                // this one, so a target list could be read as text or the reverse.
+                Some(Event::SelectionNotify(event))
+                    if event.requestor == self.window
+                        && event.selection == self.atoms.CLIPBOARD
+                        && event.target == target =>
+                {
                     if event.property == NONE {
                         // The owner refused this target.
                         return Ok(Vec::new());
                     }
                     return self.read_property(limit);
                 }
-                Some(_) => {
-                    // Selection traffic is what we are waiting for. Other events, including a new
-                    // XFixes notification, are handled by the outer loop on the next pass.
+                Some(Event::SelectionNotify(_)) => {
+                    // A late answer to a request already abandoned. Nobody is waiting for it.
                 }
+                // Everything else, including the notification of a newer copy, is for the main
+                // loop, so it is kept rather than dropped.
+                Some(other) => self.defer(other),
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
         }
     }
 
     fn read_property(&self, limit: usize) -> Result<Vec<u8>> {
-        let reply = self
-            .conn
-            .get_property(
-                false,
-                self.window,
-                self.atoms.ASLI_SELECTION,
-                AtomEnum::ANY,
-                0,
-                MAX_PROPERTY_WORDS,
-            )
-            .map_err(|e| Error::Read(format!("could not read the transfer property: {e}")))?
-            .reply()
-            .map_err(|e| Error::Read(format!("could not read the transfer property: {e}")))?;
+        let (type_, value) = self.read_whole_property(limit)?;
 
-        if reply.type_ == self.atoms.INCR {
+        if type_ == self.atoms.INCR {
             return self.read_incr(limit);
         }
 
         self.conn
             .delete_property(self.window, self.atoms.ASLI_SELECTION)
             .map_err(|e| Error::Read(format!("could not clear the transfer property: {e}")))?;
-        Ok(reply.value)
+        Ok(value)
+    }
+
+    /// Reads the transfer property to the end, in pieces if it is larger than one reply.
+    ///
+    /// A single `GetProperty` returns at most [`MAX_PROPERTY_WORDS`], and says how much is left.
+    /// Owners that write large content in one property without switching to INCR, as Qt does, used
+    /// to arrive cut at that size, and a cut PNG or cut text was then synced as if it were whole.
+    fn read_whole_property(&self, limit: usize) -> Result<(Atom, Vec<u8>)> {
+        let mut value = Vec::new();
+        let mut offset_words: u32 = 0;
+        loop {
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    self.window,
+                    self.atoms.ASLI_SELECTION,
+                    AtomEnum::ANY,
+                    offset_words,
+                    MAX_PROPERTY_WORDS,
+                )
+                .map_err(|e| Error::Read(format!("could not read the transfer property: {e}")))?
+                .reply()
+                .map_err(|e| Error::Read(format!("could not read the transfer property: {e}")))?;
+
+            if value.len().saturating_add(reply.value.len()) > limit {
+                return Err(Error::Read(format!(
+                    "the clipboard content exceeds the {limit} byte limit"
+                )));
+            }
+            value.extend_from_slice(&reply.value);
+
+            if reply.bytes_after == 0 || reply.value.is_empty() {
+                return Ok((reply.type_, value));
+            }
+            // Offsets are in 32 bit units, and every piece but the last is a whole number of them.
+            let words = u32::try_from(reply.value.len() / 4)
+                .map_err(|_| Error::Read("the transfer property is too large".to_owned()))?;
+            offset_words = offset_words.saturating_add(words);
+        }
     }
 
     /// Reads a large selection through the INCR protocol.
@@ -427,7 +517,9 @@ impl X11Clipboard {
     /// transfer. Without this, anything past the server's maximum request size is truncated.
     fn read_incr(&self, limit: usize) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        let deadline = Instant::now() + CONVERT_TIMEOUT;
+        // Per chunk, not per transfer. A large image arrives in dozens of chunks, and holding the
+        // whole transfer to one short deadline abandoned it however promptly the owner answered.
+        let mut deadline = Instant::now() + CONVERT_TIMEOUT;
 
         // Deleting the property signals the owner to send the first chunk.
         self.conn
@@ -453,39 +545,35 @@ impl X11Clipboard {
                         && event.atom == self.atoms.ASLI_SELECTION
                         && event.state == Property::NEW_VALUE =>
                 {
-                    let reply = self
-                        .conn
-                        .get_property(
-                            true,
-                            self.window,
-                            self.atoms.ASLI_SELECTION,
-                            AtomEnum::ANY,
-                            0,
-                            MAX_PROPERTY_WORDS,
-                        )
-                        .map_err(|e| Error::Read(format!("could not read an INCR chunk: {e}")))?
-                        .reply()
-                        .map_err(|e| Error::Read(format!("could not read an INCR chunk: {e}")))?;
-
+                    // Read the chunk whole, then delete it to ask for the next. Deleting through
+                    // GetProperty only happens when nothing is left unread, so a chunk larger
+                    // than one reply was never acknowledged and the owner waited forever.
+                    //
+                    // An incremental transfer is the one path where a hostile or broken owner can
+                    // feed us unbounded data a chunk at a time, so the cap is enforced per chunk
+                    // rather than only on the total at the end.
+                    let remaining = limit.saturating_sub(out.len());
+                    let (_, chunk) = self.read_whole_property(remaining).map_err(|_| {
+                        Error::Read(format!(
+                            "an incremental transfer exceeded the {limit} byte limit and was abandoned"
+                        ))
+                    })?;
+                    self.conn
+                        .delete_property(self.window, self.atoms.ASLI_SELECTION)
+                        .map_err(|e| {
+                            Error::Read(format!("could not acknowledge an INCR chunk: {e}"))
+                        })?;
                     self.conn
                         .flush()
                         .map_err(|e| Error::Read(format!("could not flush: {e}")))?;
 
-                    if reply.value.is_empty() {
+                    if chunk.is_empty() {
                         return Ok(out);
                     }
-
-                    // An incremental transfer is the one path where a hostile or broken owner can
-                    // feed us unbounded data a chunk at a time, so the cap is enforced per chunk
-                    // rather than only on the total at the end.
-                    if out.len().saturating_add(reply.value.len()) > limit {
-                        return Err(Error::Read(format!(
-                            "an incremental transfer exceeded the {limit} byte limit and was abandoned"
-                        )));
-                    }
-                    out.extend_from_slice(&reply.value);
+                    out.extend_from_slice(&chunk);
+                    deadline = Instant::now() + CONVERT_TIMEOUT;
                 }
-                Some(_) => {}
+                Some(other) => self.defer(other),
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
         }
@@ -552,6 +640,18 @@ impl X11Clipboard {
             self.refuse(request)?;
             return Ok(());
         };
+
+        // Content is served in one property write, so it has to fit in one request. Serving it
+        // through INCR is not implemented, so something larger is refused cleanly rather than
+        // failing inside the write and taking the whole serve loop down with it.
+        let payload = match owned {
+            Owned::Text(text) => text.len(),
+            Owned::Image(png) => png.len(),
+        };
+        if payload.saturating_add(64) > self.conn.maximum_request_bytes() {
+            self.refuse(request)?;
+            return Ok(());
+        }
 
         let property = if request.property == NONE {
             // Obsolete clients pass None and expect the target atom to be used.
@@ -646,11 +746,7 @@ impl ClipboardWatcher for X11Clipboard {
                 return Ok(());
             }
 
-            match self
-                .conn
-                .poll_for_event()
-                .map_err(|e| Error::ConnectionLost(format!("{e}")))?
-            {
+            match self.next_event()? {
                 Some(Event::XfixesSelectionNotify(event)) => {
                     if event.selection == self.atoms.CLIPBOARD {
                         // Layer three of loop prevention: if we are the new owner, this event is
@@ -661,14 +757,15 @@ impl ClipboardWatcher for X11Clipboard {
                         }
                         // Someone else owns the clipboard now, so we no longer serve content.
                         self.owned = None;
-                        pending_since = Some(Instant::now());
+                        if !self.serve_only {
+                            pending_since = Some(Instant::now());
+                        }
                     }
                 }
                 Some(Event::SelectionRequest(request)) => {
-                    // Another client wants the content we own. Failing to answer would make paste
-                    // hang in that application, so an error here is logged by the caller but must
-                    // not stop the watcher.
-                    self.serve_selection_request(&request)?;
+                    // Another client wants the content we own. A failure to answer costs that one
+                    // paste, and must not stop the loop: every later paste would hang too.
+                    let _ = self.serve_selection_request(&request);
                 }
                 Some(Event::SelectionClear(_)) => {
                     self.owned = None;

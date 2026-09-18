@@ -23,6 +23,14 @@ use crate::error::{Error, Result};
 /// reason rather than silently failing later.
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Largest uncompressed bitmap accepted for conversion to PNG.
+///
+/// Larger than [`MAX_IMAGE_BYTES`] on purpose. A bitmap is raw pixels, four bytes each, so a 4K
+/// screenshot is about 33 MB as a bitmap and a fraction of that as a PNG. Capping the bitmap at the
+/// PNG limit refused every large screenshot from a source that only offers bitmaps, which on
+/// Windows includes Print Screen. The PNG that comes out is still held to [`MAX_IMAGE_BYTES`].
+pub const MAX_BITMAP_BYTES: usize = 64 * 1024 * 1024;
+
 /// The eight byte PNG signature, from the PNG specification.
 pub const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -120,8 +128,22 @@ pub fn bmp_file_header_for_dib(dib: &[u8]) -> Result<[u8; 14]> {
     };
 
     let palette_bytes = palette_entries.saturating_mul(4);
+
+    // With the plain 40 byte header, bit field compression puts the colour masks after the
+    // header rather than inside it: three of them for BI_BITFIELDS, four for BI_ALPHABITFIELDS.
+    // The larger V4 and V5 headers carry their masks inside, so nothing follows those. Leaving
+    // the masks out put the pixel offset 12 bytes short, and the decoder then read mask bytes as
+    // pixels and shifted the whole image.
+    let compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    let mask_bytes = match (header_size, compression) {
+        (40, 3) => 12,
+        (40, 6) => 16,
+        _ => 0,
+    };
+
     let pixel_offset = BMP_FILE_HEADER_LEN
         .saturating_add(header_size)
+        .saturating_add(mask_bytes)
         .saturating_add(palette_bytes);
     let file_size = BMP_FILE_HEADER_LEN.saturating_add(
         u32::try_from(dib.len())
@@ -243,6 +265,39 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes([header[10], header[11], header[12], header[13]]),
             14 + 40 + 16 * 4
+        );
+    }
+
+    #[test]
+    fn bit_field_masks_after_a_plain_header_move_the_pixels() {
+        // BI_BITFIELDS: three masks follow the 40 byte header, before the pixels.
+        let mut dib = info_header(32, 0);
+        dib[16..20].copy_from_slice(&3u32.to_le_bytes());
+        let header = bmp_file_header_for_dib(&dib).expect("valid");
+        assert_eq!(
+            u32::from_le_bytes([header[10], header[11], header[12], header[13]]),
+            14 + 40 + 12
+        );
+
+        // BI_ALPHABITFIELDS: four.
+        dib[16..20].copy_from_slice(&6u32.to_le_bytes());
+        let header = bmp_file_header_for_dib(&dib).expect("valid");
+        assert_eq!(
+            u32::from_le_bytes([header[10], header[11], header[12], header[13]]),
+            14 + 40 + 16
+        );
+    }
+
+    #[test]
+    fn a_v5_header_carries_its_masks_inside() {
+        let mut dib = vec![0u8; 124];
+        dib[0..4].copy_from_slice(&124u32.to_le_bytes());
+        dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+        dib[16..20].copy_from_slice(&3u32.to_le_bytes());
+        let header = bmp_file_header_for_dib(&dib).expect("valid");
+        assert_eq!(
+            u32::from_le_bytes([header[10], header[11], header[12], header[13]]),
+            14 + 124
         );
     }
 

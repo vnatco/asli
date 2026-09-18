@@ -269,6 +269,17 @@ struct State {
 }
 
 impl State {
+    /// Records the newest selection, destroying an older offer nobody will now read.
+    ///
+    /// Several selections can arrive in one batch of events, and only the last matters. The ones
+    /// it replaces used to be dropped without being destroyed, leaking an object on both sides.
+    fn replace_pending(&mut self, next: Pending) {
+        if let Pending::Offer(old) = std::mem::replace(&mut self.pending, next) {
+            self.offers.remove(&old.protocol_id());
+            old.destroy();
+        }
+    }
+
     /// The payload for `source`, if it is the one we are currently serving.
     fn table_for(&self, source: u32) -> Option<Arc<OfferTable>> {
         self.serving
@@ -309,6 +320,13 @@ pub struct WaylandClipboard {
     manager: AnyManager,
     protocol: Protocol,
     shutdown: Arc<AtomicBool>,
+    /// Only serve what we own, and never read other clients' copies.
+    ///
+    /// The writer connection runs the event loop purely to answer paste requests. Data control
+    /// announces every selection to every device, our own included, so without this the writer
+    /// asked its own source for the bytes and then blocked reading a pipe that only this same
+    /// thread could fill, stalling for the full receive timeout after every write.
+    serve_only: bool,
 }
 
 impl WaylandClipboard {
@@ -370,6 +388,7 @@ impl WaylandClipboard {
             manager,
             protocol,
             shutdown: Arc::new(AtomicBool::new(false)),
+            serve_only: false,
         })
     }
 
@@ -377,6 +396,11 @@ impl WaylandClipboard {
     #[must_use]
     pub const fn protocol(&self) -> Protocol {
         self.protocol
+    }
+
+    /// Makes this connection a writer that only serves, as described on the field.
+    pub const fn set_serve_only(&mut self) {
+        self.serve_only = true;
     }
 
     /// A handle that can ask the watch loop to stop from another thread.
@@ -427,6 +451,17 @@ impl WaylandClipboard {
     ///
     /// Returns [`Error::Write`] if the compositor connection cannot be flushed.
     pub fn release_selection(&mut self) -> Result<()> {
+        // Only if it is still ours. Clearing the selection clears it whoever holds it, so
+        // releasing after somebody else copied would erase their copy, which for the join token
+        // clear typically means a password copied a minute later. The round trip delivers any
+        // cancellation still in flight before deciding.
+        self.queue
+            .roundtrip(&mut self.state)
+            .map_err(|e| Error::Write(format!("could not reach the compositor: {e}")))?;
+        if self.state.serving.is_none() {
+            return Ok(());
+        }
+
         self.state.serving = None;
         self.device.set_selection(None);
         self.conn
@@ -547,12 +582,20 @@ impl WaylandClipboard {
             .map_err(|e| Error::Read(format!("could not set a read timeout: {e}")))?;
 
         let mut buf = Vec::new();
+        // One byte past the limit, so content that is too large is told apart from content that
+        // is exactly the limit. Reading only up to the limit returned a silently cut copy, and a
+        // cut PNG passes the signature check.
         // UnixStream implements both Read and Write, so by_ref must be disambiguated.
         Read::by_ref(&mut read_end)
-            .take(u64::try_from(limit).unwrap_or(u64::MAX))
+            .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
             .read_to_end(&mut buf)
             .map_err(|e| Error::Read(format!("the source did not send the selection: {e}")))?;
 
+        if buf.len() > limit {
+            return Err(Error::Read(format!(
+                "the clipboard content exceeds the {limit} byte limit"
+            )));
+        }
         Ok(buf)
     }
 
@@ -623,6 +666,10 @@ impl ClipboardWatcher for WaylandClipboard {
                 Pending::Offer(offer) if !self.seen_initial_selection => {
                     // The clipboard as it was before we started. Baseline only, never reported.
                     self.seen_initial_selection = true;
+                    self.state.offers.remove(&offer.protocol_id());
+                    offer.destroy();
+                }
+                Pending::Offer(offer) if self.serve_only => {
                     self.state.offers.remove(&offer.protocol_id());
                     offer.destroy();
                 }
@@ -704,16 +751,22 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for State {
                 state.offers.insert(id.id().protocol_id(), Vec::new());
             }
             ext_data_control_device_v1::Event::Selection { id } => {
-                state.pending = match id {
+                state.replace_pending(match id {
                     Some(offer) => Pending::Offer(AnyOffer::Ext(offer)),
                     None => Pending::Cleared,
-                };
+                });
             }
             ext_data_control_device_v1::Event::Finished => {
                 state.finished = true;
             }
             // Primary selection is the middle click selection. Syncing it would fire on every
-            // text selection, so it is deliberately ignored.
+            // text selection, so it is ignored, but its offer still has to be destroyed: one is
+            // created for every highlight, and keeping them all grew our memory and the
+            // compositor's for the life of the session.
+            ext_data_control_device_v1::Event::PrimarySelection { id: Some(offer) } => {
+                state.offers.remove(&offer.id().protocol_id());
+                offer.destroy();
+            }
             _ => {}
         }
     }
@@ -756,9 +809,7 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
                 // Something is pasting. Write whatever belongs to the type it asked for, then
                 // close the pipe so the reader sees end of file.
                 if let Some(table) = state.table_for(source.id().protocol_id()) {
-                    if let Some(bytes) = payload_for(&table, &mime_type) {
-                        write_all_to(fd, bytes);
-                    }
+                    write_detached(fd, table, mime_type);
                 }
             }
             ext_data_control_source_v1::Event::Cancelled => {
@@ -797,13 +848,18 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for State {
                 state.offers.insert(id.id().protocol_id(), Vec::new());
             }
             zwlr_data_control_device_v1::Event::Selection { id } => {
-                state.pending = match id {
+                state.replace_pending(match id {
                     Some(offer) => Pending::Offer(AnyOffer::Wlr(offer)),
                     None => Pending::Cleared,
-                };
+                });
             }
             zwlr_data_control_device_v1::Event::Finished => {
                 state.finished = true;
+            }
+            // Destroyed for the same reason as on the ext device.
+            zwlr_data_control_device_v1::Event::PrimarySelection { id: Some(offer) } => {
+                state.offers.remove(&offer.id().protocol_id());
+                offer.destroy();
             }
             _ => {}
         }
@@ -845,9 +901,7 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for State {
         match event {
             zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
                 if let Some(table) = state.table_for(source.id().protocol_id()) {
-                    if let Some(bytes) = payload_for(&table, &mime_type) {
-                        write_all_to(fd, bytes);
-                    }
+                    write_detached(fd, table, mime_type);
                 }
             }
             zwlr_data_control_source_v1::Event::Cancelled => {
@@ -899,6 +953,23 @@ fn write_all_to(fd: OwnedFd, bytes: &[u8]) {
     let mut file = std::fs::File::from(fd);
     let _ = file.write_all(bytes);
     let _ = file.flush();
+}
+
+/// Writes a payload on a thread of its own, so a client that asks and never reads cannot stall us.
+///
+/// A pipe holds about 64 KiB. Writing more than that blocks until the reader reads, and a hung
+/// application pasting an image would otherwise freeze this connection's whole event loop, so no
+/// later clip would ever be written.
+fn write_detached(fd: OwnedFd, table: Arc<OfferTable>, mime: String) {
+    // If no thread can be started, the fd went with the failed closure and is closed, so the
+    // reader sees end of file rather than hanging.
+    let _ = std::thread::Builder::new()
+        .name("asli-wayland-send".to_owned())
+        .spawn(move || {
+            if let Some(bytes) = payload_for(&table, &mime) {
+                write_all_to(fd, bytes);
+            }
+        });
 }
 
 #[cfg(test)]

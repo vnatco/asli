@@ -95,7 +95,13 @@ const CF_UNICODETEXT: u32 = 13;
 ///
 /// Returns [`Error::Read`] if the bitmap is malformed or cannot be re-encoded.
 fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
-    image_bytes::check_size(dib.len())?;
+    if dib.len() > image_bytes::MAX_BITMAP_BYTES {
+        return Err(Error::Read(format!(
+            "bitmap is {} bytes, over the {} byte limit, so it was skipped",
+            dib.len(),
+            image_bytes::MAX_BITMAP_BYTES
+        )));
+    }
 
     let header = image_bytes::bmp_file_header_for_dib(dib)?;
     let mut bmp = Vec::with_capacity(header.len() + dib.len());
@@ -124,6 +130,13 @@ struct ExclusionFormats {
 }
 
 impl ExclusionFormats {
+    /// Whether at least one exclusion marker could be written.
+    const fn can_mark(&self) -> bool {
+        self.exclude_from_monitors.is_some()
+            || self.can_include_in_history.is_some()
+            || self.can_upload_to_cloud.is_some()
+    }
+
     /// Registers the format names this backend needs.
     ///
     /// `RegisterClipboardFormat` returning `None` is not fatal: it means this Windows build does
@@ -417,9 +430,13 @@ impl WindowsClipboard {
         // survives, which a DIB round trip can lose.
         if let Some(png_id) = self.formats.png {
             if offer.formats.contains(&png_id) {
+                // Sized before it is copied, so an enormous image is refused without first
+                // allocating for it.
+                check_available(png_id, image_bytes::MAX_IMAGE_BYTES)?;
                 let mut buf = Vec::new();
                 raw::get_vec(png_id, &mut buf)
                     .map_err(|e| Error::Read(format!("could not read the clipboard image: {e}")))?;
+                trim_after_iend(&mut buf);
                 image_bytes::validate_png(&buf)?;
                 return Ok(Some(ClipEvent {
                     content: ClipContent::ImagePng(buf),
@@ -430,8 +447,14 @@ impl WindowsClipboard {
 
         // Older applications offer only a device independent bitmap, so it is converted here,
         // at the single conversion boundary in the project.
-        for dib_format in [CF_DIBV5, CF_DIB] {
+        //
+        // The plain DIB first. Windows synthesizes each form from the other, and the V5 form can
+        // declare an alpha mask over pixels whose alpha bytes are all zero, which GDI rendering
+        // routinely produces, and which then decodes as a fully transparent image. The plain one
+        // carries no alpha, so it always decodes opaque.
+        for dib_format in [CF_DIB, CF_DIBV5] {
             if offer.formats.contains(&dib_format) {
+                check_available(dib_format, image_bytes::MAX_BITMAP_BYTES)?;
                 let mut buf = Vec::new();
                 raw::get_vec(dib_format, &mut buf).map_err(|e| {
                     Error::Read(format!("could not read the clipboard bitmap: {e}"))
@@ -460,6 +483,12 @@ impl WindowsClipboard {
             let _guard = Self::open_with_backoff()
                 .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
 
+            // Checked before anything is written, so a secret is never put on the clipboard
+            // without the markers that were meant to protect it.
+            if options.concealed && !self.formats.can_mark() {
+                return Err(no_markers());
+            }
+
             // set_string empties the clipboard, converts to UTF-16 and terminates the string
             // itself, so adding a NUL here would put two on the clipboard.
             raw::set_string(&native)
@@ -467,9 +496,13 @@ impl WindowsClipboard {
 
             // The markers have to follow the text, in this same session, because set_string
             // empties the clipboard and would take them with it. set_without_clear is what keeps
-            // them alongside the content rather than replacing it.
+            // them alongside the content rather than replacing it. If they fail, the text goes
+            // too: an unmarked secret is exactly what this write exists to avoid.
             if options.concealed {
-                write_exclusion_markers(&self.formats)?;
+                if let Err(err) = write_exclusion_markers(&self.formats) {
+                    let _ = raw::empty();
+                    return Err(err);
+                }
             }
         }
         // Read after the guard has closed the clipboard, never inside it. Closing is itself a
@@ -516,7 +549,10 @@ impl WindowsClipboard {
                 .map_err(|e| Error::Write(format!("could not set the bitmap: {e}")))?;
 
             if options.concealed {
-                write_exclusion_markers(&self.formats)?;
+                if let Err(err) = write_exclusion_markers(&self.formats) {
+                    let _ = raw::empty();
+                    return Err(err);
+                }
             }
         }
         // Read after the guard has closed the clipboard, never inside it. Closing is itself a
@@ -537,6 +573,15 @@ impl WindowsClipboard {
     ///
     /// Returns [`Error::Write`] if the clipboard cannot be opened or emptied.
     pub fn release_selection(&mut self) -> Result<()> {
+        // Only if what is there is still our own last write. Emptying clears the clipboard
+        // whoever filled it, so doing it after somebody else copied would erase their copy, which
+        // for the join token clear typically means a password copied a minute later, or a file
+        // copied in Explorer that was never read at all.
+        let current: Option<u32> = raw::seq_num().map(Into::into);
+        if current.is_none() || current != self.last_written() {
+            return Ok(());
+        }
+
         let guard = Self::open_with_backoff()
             .map_err(|e| Error::Write(format!("could not open the clipboard: {e}")))?;
         raw::empty().map_err(|e| Error::Write(format!("could not empty the clipboard: {e}")))?;
@@ -605,13 +650,44 @@ fn write_exclusion_markers(formats: &ExclusionFormats) -> Result<()> {
     if wrote_any {
         Ok(())
     } else {
-        // Silently writing an unmarked secret is worse than failing: the caller believes it is
-        // protected and it is not.
-        Err(Error::Write(
-            "none of the clipboard exclusion formats could be registered, so the content would \
-             have been written unmarked"
-                .to_owned(),
-        ))
+        Err(no_markers())
+    }
+}
+
+/// Why a concealed write was refused. Silently writing an unmarked secret is worse than failing:
+/// the caller believes it is protected and it is not.
+fn no_markers() -> Error {
+    Error::Write(
+        "none of the clipboard exclusion formats could be registered, so the content was not \
+         written unmarked"
+            .to_owned(),
+    )
+}
+
+/// Refuses a clipboard format whose data is larger than `limit`, before copying it.
+///
+/// Must be called with the clipboard open. A size the system will not report is let through, and
+/// the checks after the copy still apply.
+fn check_available(format: u32, limit: usize) -> Result<()> {
+    match raw::size(format) {
+        Some(size) if size.get() > limit => Err(Error::Read(format!(
+            "clipboard data is {} bytes, over the {limit} byte limit, so it was skipped",
+            size.get()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Cuts anything after a PNG's final chunk.
+///
+/// Windows hands clipboard data back in whole allocation units, which can be larger than what was
+/// put there, so a PNG can come back with padding after it. Decoders ignore that, but the padding
+/// changes the hash, and our own image written a moment ago would then no longer be recognised.
+fn trim_after_iend(png: &mut Vec<u8>) {
+    // The IEND chunk is its type followed by a four byte CRC, and nothing may follow it.
+    const IEND: &[u8] = b"IEND";
+    if let Some(pos) = png.windows(IEND.len()).rposition(|w| w == IEND) {
+        png.truncate(pos.saturating_add(IEND.len() + 4).min(png.len()));
     }
 }
 
