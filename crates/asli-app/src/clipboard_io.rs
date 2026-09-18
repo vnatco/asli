@@ -182,6 +182,44 @@ enum Write {
     ClearIfUnchanged(String, u64),
 }
 
+/// What this process just wrote to the clipboard, so the watcher can recognise it coming back.
+///
+/// Every platform reports our own write as a clipboard change. Windows and macOS also say whose
+/// change it was, through a sequence number, but Wayland does not, and when the watcher reads it
+/// back it looks exactly like somebody copying. The session's own guard then stops it being sent,
+/// but only after it has been logged as queued and recorded in the history a second time. This
+/// catches it at the clipboard, before any of that.
+///
+/// Each entry is consumed by the first matching observation, and expires after a few seconds, so a
+/// person deliberately copying the same text later is still a copy.
+#[derive(Clone)]
+struct OwnWrites(Arc<Mutex<asli_core::EchoGuard>>);
+
+impl OwnWrites {
+    /// Long enough for the slowest platform to report our write, a 500 ms macOS poll plus a
+    /// debounce, and short enough that it never swallows a real copy.
+    const TTL_MS: u64 = 5_000;
+
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(asli_core::EchoGuard::new(
+            asli_core::echo::DEFAULT_CAPACITY,
+            Self::TTL_MS,
+        ))))
+    }
+
+    fn remember(&self, bytes: &[u8]) {
+        if let Ok(mut guard) = self.0.lock() {
+            guard.remember(asli_core::hash(bytes), asli_net::client::now_ms());
+        }
+    }
+
+    fn is_ours(&self, bytes: &[u8]) -> bool {
+        self.0.lock().is_ok_and(|mut guard| {
+            guard.take_echo(asli_core::hash(bytes), asli_net::client::now_ms())
+        })
+    }
+}
+
 /// Handle to the writer thread.
 pub struct SystemClipboard {
     to_writer: Sender<Write>,
@@ -192,6 +230,7 @@ pub struct SystemClipboard {
     /// A scheduled clear carries the generation it was scheduled at, so anything copied since
     /// makes it stale and it is dropped rather than destroying that copy.
     generation: Arc<AtomicU64>,
+    own_writes: OwnWrites,
 }
 
 impl SystemClipboard {
@@ -203,6 +242,12 @@ impl SystemClipboard {
         // A clear must not bump the generation, or it would invalidate itself in flight.
         if !matches!(work, Write::ClearIfUnchanged(..)) {
             self.generation.fetch_add(1, Ordering::Relaxed);
+        }
+        // Recorded before the write can happen, so the change it causes is always recognised.
+        match &work {
+            Write::Text(text) => self.own_writes.remember(text.as_bytes()),
+            Write::Image(png) => self.own_writes.remember(png),
+            Write::TextConcealed(_) | Write::ClearIfUnchanged(..) => {}
         }
         let _ = self.to_writer.send(work);
         self.interrupt.store(true, Ordering::Relaxed);
@@ -273,6 +318,8 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
     // clear would still fire and wipe out what the person just copied.
     let generation = Arc::new(AtomicU64::new(0));
     let watcher_generation = Arc::clone(&generation);
+    let own_writes = OwnWrites::new();
+    let watcher_own_writes = own_writes.clone();
 
     thread::Builder::new()
         .name("asli-clipboard-watch".to_owned())
@@ -286,7 +333,8 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
                 }
             };
             let result = backend.run(&mut |event: ClipEvent| {
-                if let Some(observed) = to_observed(event, &watcher_generation) {
+                if let Some(observed) = to_observed(event, &watcher_generation, &watcher_own_writes)
+                {
                     let _ = tx.send(observed);
                 }
             });
@@ -311,6 +359,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
             interrupt,
             description: format!("{:?} ({})", plan.backend, plan.note),
             generation,
+            own_writes,
         },
         rx,
     ))
@@ -326,11 +375,18 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>)> {
 /// The token then sits on the clipboard forever, which is exactly the leak the clear exists to
 /// close. A concealed observation is either our own marked write or a password manager's copy, and
 /// neither is a user copy that a pending clear would destroy.
-fn to_observed(event: ClipEvent, generation: &AtomicU64) -> Option<Observed> {
+fn to_observed(
+    event: ClipEvent,
+    generation: &AtomicU64,
+    own_writes: &OwnWrites,
+) -> Option<Observed> {
     let observed = if event.sensitive {
         Observed::Sensitive
     } else {
         match event.content {
+            // Our own write coming back. Not a copy, so it is neither reported nor counted.
+            ClipContent::Text(text) if own_writes.is_ours(text.as_bytes()) => return None,
+            ClipContent::ImagePng(png) if own_writes.is_ours(&png) => return None,
             ClipContent::Text(text) => Observed::Text(text),
             ClipContent::ImagePng(png) => Observed::Image(png),
             // ClipContent is non exhaustive. A content type added later is dropped here rather
@@ -466,6 +522,7 @@ pub struct MacPump {
     inbox: Receiver<Write>,
     observed: Sender<Observed>,
     generation: Arc<AtomicU64>,
+    own_writes: OwnWrites,
     _activity: asli_clipboard::macos::BackgroundActivity,
 }
 
@@ -495,7 +552,7 @@ impl MacPump {
         let AnyClipboard::Macos(clipboard) = &mut self.clipboard;
         match clipboard.poll_once() {
             Ok(Some(event)) => {
-                if let Some(observed) = to_observed(event, &self.generation) {
+                if let Some(observed) = to_observed(event, &self.generation, &self.own_writes) {
                     let _ = self.observed.send(observed);
                 }
             }
@@ -525,6 +582,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>, MacPump)> {
     let (tx, rx) = mpsc::channel();
     let (to_writer, from_daemon) = mpsc::channel::<Write>();
     let generation = Arc::new(AtomicU64::new(0));
+    let own_writes = OwnWrites::new();
 
     Ok((
         SystemClipboard {
@@ -538,6 +596,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>, MacPump)> {
                 permission.label()
             ),
             generation: Arc::clone(&generation),
+            own_writes: own_writes.clone(),
         },
         rx,
         MacPump {
@@ -545,6 +604,7 @@ pub fn start() -> Result<(SystemClipboard, Receiver<Observed>, MacPump)> {
             inbox: from_daemon,
             observed: tx,
             generation,
+            own_writes,
             _activity: asli_clipboard::macos::begin_background_activity(),
         },
     ))
@@ -825,5 +885,60 @@ mod conceal_tests {
             .write_text_concealed("asli1_TOKEN", Duration::from_secs(90))
             .expect_err("the default implementation must refuse");
         assert!(err.to_string().contains("concealed"));
+    }
+}
+
+#[cfg(test)]
+mod own_write_tests {
+    use super::*;
+
+    fn text(t: &str) -> ClipEvent {
+        ClipEvent {
+            content: ClipContent::Text(t.to_owned()),
+            sensitive: false,
+        }
+    }
+
+    #[test]
+    fn our_own_write_coming_back_is_not_a_copy() {
+        let generation = AtomicU64::new(0);
+        let own = OwnWrites::new();
+        own.remember(b"from the other machine");
+
+        assert_eq!(
+            to_observed(text("from the other machine"), &generation, &own),
+            None
+        );
+        assert_eq!(
+            generation.load(Ordering::Relaxed),
+            0,
+            "an echo must not invalidate a scheduled clear"
+        );
+    }
+
+    #[test]
+    fn the_same_text_copied_again_afterwards_is_a_copy() {
+        let generation = AtomicU64::new(0);
+        let own = OwnWrites::new();
+        own.remember(b"same");
+
+        assert_eq!(to_observed(text("same"), &generation, &own), None);
+        assert_eq!(
+            to_observed(text("same"), &generation, &own),
+            Some(Observed::Text("same".to_owned())),
+            "the guard is consumed by the echo, so a deliberate second copy still syncs"
+        );
+        assert_eq!(generation.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn other_content_is_untouched() {
+        let generation = AtomicU64::new(0);
+        let own = OwnWrites::new();
+        own.remember(b"ours");
+        assert_eq!(
+            to_observed(text("theirs"), &generation, &own),
+            Some(Observed::Text("theirs".to_owned()))
+        );
     }
 }
