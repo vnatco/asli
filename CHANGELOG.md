@@ -33,8 +33,14 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - `setup.sh --install` installs the binary, the application entry and icon, and launch at login,
   and `--uninstall` removes all of it.
 
+- Windows: the daemon, tray, window and launch at login, with `asliw.exe`, a console free copy
+  of the program for login and the Start menu. `setup.ps1 -Install` installs, starts and
+  uninstalls it. Images are written to the clipboard as PNG and as a bitmap.
+
 ### Fixed
 
+- On a fresh install with no account, the first run window never opened. Work scheduled for the
+  window before its event loop started was silently dropped.
 - On Wayland, every received clip after the first was advertised on the clipboard but pasted as
   nothing. The compositor's cancellation of our previous write arrived after the new write and
   cleared it.
@@ -43,8 +49,10 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Written but unverified
 
-- The Windows backend. Its decision logic is unit tested, but no Win32 call in it has been observed
-  running yet.
+- Windows on real hardware. The Windows build has run under Wine against the live relay: text in
+  both directions, no echo of received clips, the key in Credential Manager, the login entry, the
+  tray, and a second launch handing over to the first. Wine is not Windows, and the window itself
+  could not be drawn there, so none of it counts until it has run on Windows 11.
 - The macOS backend. Same position: no AppKit call in it has been observed running, and the
   behaviour of the macOS 15.4 pasteboard alert is inferred from documentation rather than observed.
 
