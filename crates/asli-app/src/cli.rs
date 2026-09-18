@@ -523,22 +523,33 @@ fn start_daemon(
                 }
             };
 
+            let status = controls.status.clone();
             let result = runtime.block_on(async {
                 tokio::select! {
-                    result = daemon::run(&paths, &config, identity, io, observed, controls, history) => result,
-                    _ = tokio::signal::ctrl_c() => {
-                        eprintln!("{}", log_line("stopping", "interrupted"));
-                        Ok(())
-                    }
+                    result = daemon::run(&paths, &config, identity, io, observed, controls, history) => Some(result),
+                    _ = tokio::signal::ctrl_c() => None,
                 }
             });
 
-            if let Err(err) = result {
-                eprintln!("{}", log_line("daemon_failed", &err.to_string()));
+            match result {
+                // Interrupted from a terminal: the person asked for the whole thing to stop.
+                None => {
+                    eprintln!("{}", log_line("stopping", "interrupted"));
+                    crate::window::quit();
+                }
+                // The daemon has already published why it stopped. The tray stays, so the reason
+                // is visible and Quit is one click away. Quitting here instead made the icon
+                // vanish with no explanation, which reads exactly like a crash.
+                Some(Ok(())) => {}
+                Some(Err(err)) => {
+                    eprintln!("{}", log_line("daemon_failed", &err.to_string()));
+                    let mut current = status.get();
+                    current.state = format!("Stopped: {err}");
+                    current.peers = 0;
+                    status.set(current);
+                    crate::notify::action_failed("Asli stopped syncing", &err.to_string());
+                }
             }
-            // Whether it stopped cleanly or not, there is nothing left to sync, so the window
-            // should not sit there implying otherwise.
-            crate::window::quit();
         })
         .map_err(Error::Io)?;
 
