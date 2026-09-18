@@ -296,7 +296,15 @@ const APP_ID: &str = "asli";
 pub fn install(context: Context) -> Result<()> {
     CONTEXT
         .set(context)
-        .map_err(|_| Error::ConfigDir("the window was installed twice".to_owned()))
+        .map_err(|_| Error::ConfigDir("the window was installed twice".to_owned()))?;
+
+    // The toolkit otherwise creates its platform lazily, on the first window or when the loop
+    // starts. Until then there is no event loop to hand work to, so everything scheduled before
+    // the loop runs, the first run window and on Windows the tray itself, failed with "the
+    // platform does not provide an event loop" and simply never happened.
+    slint::BackendSelector::new()
+        .select()
+        .map_err(|err| Error::ConfigDir(format!("no display available: {err}")))
 }
 
 /// Runs the event loop on the calling thread, which must be the main one.
