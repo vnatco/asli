@@ -17,7 +17,8 @@ DO_UNINSTALL=0
 DRY_RUN=0
 
 readonly INSTALL_DIR="${ASLI_INSTALL_DIR:-$HOME/.local/bin}"
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT
 
 # Colors, but only when attached to a terminal, so logs stay readable when piped.
 if [ -t 1 ]; then
@@ -47,8 +48,9 @@ Usage: ./setup.sh [options]
 
 Options:
   --build-only    Check prerequisites and build. Do not run the tests and do not install.
-  --install       Build, then install the binary into ~/.local/bin (override with ASLI_INSTALL_DIR),
-                  the application entry and icon, and turn on launch at login.
+  --install       Build, then install and start it: on Linux the binary into ~/.local/bin
+                  (override with ASLI_INSTALL_DIR) with its menu entry and icon, on macOS
+                  ~/Applications/Asli.app linked from ~/.local/bin. Turns on launch at login.
   --with-server   Also set up the relay server, which is the only part that needs Node.js.
   --uninstall     Remove what --install put in place. Does not touch your keychain.
   --dry-run       Print what would happen and change nothing.
@@ -177,6 +179,51 @@ readonly DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 readonly DESKTOP_ENTRY="$DATA_HOME/applications/asli.desktop"
 readonly ICON_FILE="$DATA_HOME/icons/hicolor/scalable/apps/asli.svg"
 readonly AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+# On macOS the binary lives inside an application bundle, so the system reads its Info.plist:
+# that is what keeps a menu bar app out of the Dock and gives it a name in permission prompts.
+readonly MAC_APP="${ASLI_MAC_APP:-$HOME/Applications/Asli.app}"
+
+# Stops every running copy, so the new binary is what runs next. Matched on the exact process
+# name, never on a command line, which would also match this script's own shell.
+stop_running() {
+    if pgrep -x asli >/dev/null 2>&1; then
+        info "Stopping the running copy of Asli"
+        run pkill -x asli || true
+        [ "$DRY_RUN" -eq 1 ] || sleep 1
+        ok "stopped"
+    fi
+}
+
+# Starts the tray detached from this terminal, so closing the terminal does not end it.
+start_tray() {
+    local os="$1"
+    info "Starting Asli"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '  would start the tray\n'
+    elif [ "$os" = "macos" ]; then
+        open "$MAC_APP" --args tray
+    else
+        nohup "$INSTALL_DIR/asli" tray >/dev/null 2>&1 &
+    fi
+    ok "Asli is running. Look for its icon in the tray or menu bar."
+}
+
+install_macos_bundle() {
+    local built="$1"
+    info "Building $MAC_APP"
+    run mkdir -p "$MAC_APP/Contents/MacOS"
+    run install -m 755 "$built" "$MAC_APP/Contents/MacOS/asli"
+    run install -m 644 "$REPO_ROOT/packaging/macos/Info.plist" "$MAC_APP/Contents/Info.plist"
+    # Apple Silicon refuses to run unsigned code, and a bundle whose contents changed needs its
+    # signature redone. An ad hoc signature is local only and proves nothing to anyone else, which
+    # is fine for a build made on this Mac.
+    if command -v codesign >/dev/null 2>&1; then
+        run codesign --force --sign - "$MAC_APP" || warn "could not sign the bundle; macOS may refuse to open it"
+    fi
+    run mkdir -p "$INSTALL_DIR"
+    run ln -sf "$MAC_APP/Contents/MacOS/asli" "$INSTALL_DIR/asli"
+    ok "Asli.app installed, and $INSTALL_DIR/asli links into it"
+}
 
 # Tells the desktop about new or removed entries. Every one of these is optional: a desktop that
 # lacks the tool picks the change up at next login instead.
@@ -198,9 +245,14 @@ do_install() {
     [ -x "$built" ] || [ "$DRY_RUN" -eq 1 ] || die "no binary at $built. The build step should have produced it."
 
     info "Installing"
-    run mkdir -p "$INSTALL_DIR"
-    run install -m 755 "$built" "$INSTALL_DIR/asli"
-    ok "binary installed at $INSTALL_DIR/asli"
+    stop_running
+    if [ "$os" = "macos" ]; then
+        install_macos_bundle "$built"
+    else
+        run mkdir -p "$INSTALL_DIR"
+        run install -m 755 "$built" "$INSTALL_DIR/asli"
+        ok "binary installed at $INSTALL_DIR/asli"
+    fi
 
     if [ "$os" = "linux" ]; then
         run mkdir -p "$(dirname "$ICON_FILE")" "$(dirname "$DESKTOP_ENTRY")"
@@ -220,8 +272,10 @@ do_install() {
     fi
 
     # The binary writes the entry itself, so it points at the installed copy, and it is the same
-    # code that runs every time the tray starts.
-    run "$INSTALL_DIR/asli" autostart on || warn "could not enable launch at login. Run 'asli autostart on' later."
+    # code that runs every time the tray starts. On macOS that is the copy inside the bundle.
+    local installed="$INSTALL_DIR/asli"
+    [ "$os" = "macos" ] && installed="$MAC_APP/Contents/MacOS/asli"
+    run "$installed" autostart on || warn "could not enable launch at login. Run 'asli autostart on' later."
 
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
@@ -229,13 +283,20 @@ do_install() {
     esac
 
     printf '\n'
-    info "Installed. Start it now with: $INSTALL_DIR/asli tray"
-    printf '  Or launch Asli from your application menu. It also starts by itself at login.\n'
+    start_tray "$os"
+    printf '  It also starts by itself at login. To watch its log, quit it from the menu and run:\n'
+    printf '    %s tray\n' "$installed"
+    if [ "$os" = "macos" ]; then
+        printf '  If macOS ever asks whether Asli may paste from other apps, choose Allow, or it\n'
+        printf '  cannot send what you copy on this Mac. It still receives either way.\n'
+    fi
 }
 
 do_uninstall() {
+    stop_running
+
     local target="$INSTALL_DIR/asli"
-    if [ -e "$target" ]; then
+    if [ -e "$target" ] || [ -L "$target" ]; then
         info "Removing $target"
         run rm -f "$target"
         ok "binary removed"
@@ -269,6 +330,12 @@ do_uninstall() {
         info "Removing launch agent $agent"
         run rm -f "$agent"
         ok "launch agent removed"
+    fi
+
+    if [ -d "$MAC_APP" ]; then
+        info "Removing $MAC_APP"
+        run rm -rf "$MAC_APP"
+        ok "Asli.app removed"
     fi
 
     printf '\n'
