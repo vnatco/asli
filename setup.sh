@@ -239,6 +239,27 @@ refresh_desktop_caches() {
     fi
 }
 
+# Quotes a program path for a desktop entry Exec= line, the same way the app does. Percent signs
+# are doubled everywhere; inside quotes the quote, backtick, dollar sign and backslash are escaped,
+# and every backslash is then doubled again because the value itself is an escaped string.
+desktop_exec_quote() {
+    local path="${1//%/%%}"
+    case "$1" in
+        *[[:space:]\"\'\\\<\>~\|\&\;\$\*\?#\(\)\`]*) ;;
+        *) printf '%s' "$path"; return ;;
+    esac
+    local bs=$'\\' out='' c i
+    for (( i = 0; i < ${#path}; i++ )); do
+        c="${path:i:1}"
+        case "$c" in
+            "$bs") out+="$bs$bs$bs$bs" ;;
+            '"'|'`'|'$') out+="$bs$bs$c" ;;
+            *) out+="$c" ;;
+        esac
+    done
+    printf '"%s"' "$out"
+}
+
 do_install() {
     local os="$1"
     local built="$REPO_ROOT/target/release/asli"
@@ -258,13 +279,20 @@ do_install() {
         run mkdir -p "$(dirname "$ICON_FILE")" "$(dirname "$DESKTOP_ENTRY")"
         run install -m 644 "$REPO_ROOT/packaging/linux/asli.svg" "$ICON_FILE"
         # The packaged entry says Exec=asli, which relies on PATH. The installed one names the
-        # binary exactly, because ~/.local/bin is not on PATH in every session.
+        # binary exactly, because ~/.local/bin is not on PATH in every session. Written line by
+        # line rather than with sed, so a path containing & or | cannot corrupt the replacement,
+        # and quoted, so a path with a space is still one argument.
         if [ "$DRY_RUN" -eq 1 ]; then
-            printf '  would write: %s
-' "$DESKTOP_ENTRY"
+            printf '  would write: %s\n' "$DESKTOP_ENTRY"
         else
-            sed "s|^Exec=asli |Exec=$INSTALL_DIR/asli |" \
-                "$REPO_ROOT/packaging/linux/asli.desktop" > "$DESKTOP_ENTRY"
+            local program line
+            program="$(desktop_exec_quote "$INSTALL_DIR/asli")"
+            while IFS= read -r line || [ -n "$line" ]; do
+                case "$line" in
+                    "Exec=asli "*) printf 'Exec=%s %s\n' "$program" "${line#Exec=asli }" ;;
+                    *) printf '%s\n' "$line" ;;
+                esac
+            done < "$REPO_ROOT/packaging/linux/asli.desktop" > "$DESKTOP_ENTRY"
             chmod 644 "$DESKTOP_ENTRY"
         fi
         refresh_desktop_caches

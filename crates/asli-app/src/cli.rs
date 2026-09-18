@@ -594,7 +594,18 @@ fn start_daemon(
 
 /// Applies the stored autostart preference, if the platform supports it.
 fn apply_autostart(config: &Config) -> Result<()> {
+    // An isolated instance, as used for testing, has its own configuration but shares the login
+    // entry with the real install. Letting it apply its own fresh default would put the real
+    // entry back after it was turned off, pointing at whatever test binary was running.
+    if std::env::var_os("ASLI_CONFIG_DIR").is_some() {
+        return Ok(());
+    }
+
     match autostart::is_enabled() {
+        // Enabled, but pointing at a binary that has since moved or been deleted: point it here.
+        Ok(true) if config.autostart && autostart::target_missing().unwrap_or(false) => {
+            autostart::set_enabled(true)
+        }
         Ok(current) if current == config.autostart => Ok(()),
         Ok(_) => autostart::set_enabled(config.autostart),
         // Unsupported platforms report clearly rather than pretending, and must not stop the

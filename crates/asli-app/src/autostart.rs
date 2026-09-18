@@ -43,6 +43,19 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     }
 }
 
+/// Whether the entry exists but starts a binary that is no longer there.
+///
+/// Happens when the program moves: a new install location, or an entry first written by a build
+/// run from a source tree that has since been cleaned. Existence alone said "enabled", so the
+/// entry was never rewritten and login quietly started nothing.
+///
+/// # Errors
+///
+/// Returns an error if the entry could not be read.
+pub fn target_missing() -> Result<bool> {
+    Ok(platform::target()?.is_some_and(|target| !std::path::Path::new(&target).exists()))
+}
+
 /// Where the autostart entry lives, for the status output.
 ///
 /// # Errors
@@ -92,18 +105,86 @@ mod platform {
         Ok(path.display().to_string())
     }
 
+    /// Quotes a program path for an `Exec=` line, per the desktop entry specification.
+    ///
+    /// A path with a space in it otherwise splits into two arguments, and a `%` starts a field
+    /// code. Inside quotes, the quote, backtick, dollar sign and backslash are escaped, and then
+    /// every backslash is doubled once more, because the whole value is itself an escaped string.
+    pub(super) fn exec_quote(path: &str) -> String {
+        const RESERVED: &[char] = &[
+            ' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#',
+            '(', ')', '`',
+        ];
+        let percent_safe = path.replace('%', "%%");
+        if !path.contains(RESERVED) {
+            return percent_safe;
+        }
+        let mut quoted = String::from("\"");
+        for c in percent_safe.chars() {
+            match c {
+                '"' | '`' | '$' => {
+                    quoted.push_str("\\\\");
+                    quoted.push(c);
+                }
+                '\\' => quoted.push_str("\\\\\\\\"),
+                other => quoted.push(other),
+            }
+        }
+        quoted.push('"');
+        quoted
+    }
+
+    /// Reverses [`exec_quote`] for the program part of an `Exec=` line this module wrote.
+    pub(super) fn exec_unquote(field: &str) -> String {
+        let Some(inner) = field.strip_prefix('"').and_then(|f| f.strip_suffix('"')) else {
+            return field.replace("%%", "%");
+        };
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                // Value level escape, then argument level escape: two or four backslashes.
+                let mut run = 1;
+                while chars.as_str().starts_with('\\') && run < 4 {
+                    chars.next();
+                    run += 1;
+                }
+                if run == 4 {
+                    out.push('\\');
+                } else if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out.replace("%%", "%")
+    }
+
     fn contents(exe: &str) -> String {
         format!(
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=Asli\n\
              Comment=Encrypted clipboard sync across your own machines\n\
-             Exec={exe} tray\n\
+             Exec={} tray\n\
              Icon=asli\n\
              Terminal=false\n\
              Categories=Utility;\n\
-             X-GNOME-Autostart-enabled=true\n"
+             X-GNOME-Autostart-enabled=true\n",
+            exec_quote(exe)
         )
+    }
+
+    fn target_in(dir: &Path) -> Option<String> {
+        let text = fs::read_to_string(dir.join(ENTRY)).ok()?;
+        let exec = text.lines().find_map(|line| line.strip_prefix("Exec="))?;
+        let program = exec.strip_suffix(" tray").unwrap_or(exec);
+        Some(exec_unquote(program))
+    }
+
+    pub fn target() -> Result<Option<String>> {
+        Ok(target_in(&autostart_dir()?))
     }
 
     fn is_enabled_in(dir: &Path) -> bool {
@@ -209,6 +290,28 @@ mod platform {
         }
 
         #[test]
+        fn a_path_with_spaces_or_percent_survives_the_exec_line() {
+            for path in [
+                "/opt/asli/bin/asli",
+                "/home/a b/My Apps/asli",
+                "/home/x/100%/asli",
+                "/home/q\"uote/$HOME/asli",
+                "/home/back\\slash/asli",
+            ] {
+                let dir = scratch("quote");
+                set_enabled_in(&dir, true, path).expect("enables");
+                assert_eq!(
+                    target_in(&dir).as_deref(),
+                    Some(path),
+                    "round trip for {path}"
+                );
+                let _ = fs::remove_dir_all(dir);
+            }
+            assert_eq!(exec_quote("/home/a b/asli"), "\"/home/a b/asli\"");
+            assert_eq!(exec_quote("/opt/asli"), "/opt/asli");
+        }
+
+        #[test]
         fn the_entry_points_at_the_binary_it_was_written_by() {
             let dir = scratch("exec");
             set_enabled_in(&dir, true, "/opt/asli/bin/asli").expect("enables");
@@ -293,6 +396,20 @@ mod platform {
     pub fn describe_location() -> Result<String> {
         Ok(format!(r"{RUN_KEY}\{VALUE}"))
     }
+
+    /// The program the entry starts, from the quoted path this module wrote.
+    pub fn target() -> Result<Option<String>> {
+        let output = reg(&["query", RUN_KEY, "/v", VALUE])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text
+            .lines()
+            .find(|line| line.trim_start().starts_with(VALUE))
+            .and_then(|line| line.split('"').nth(1))
+            .map(str::to_owned))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -314,8 +431,15 @@ mod platform {
     }
 
     pub fn set_enabled(enabled: bool) -> Result<()> {
+        // Resolved, because the command may have been run through the ~/.local/bin link, and the
+        // agent should start the binary inside the bundle, not a link that may be removed.
         let exe = std::env::current_exe().map_err(Error::Io)?;
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
         launch_agent::set_enabled_in(&agents_dir()?, enabled, &exe.display().to_string())
+    }
+
+    pub fn target() -> Result<Option<String>> {
+        Ok(launch_agent::target_in(&agents_dir()?))
     }
 
     pub fn describe_location() -> Result<String> {
@@ -382,6 +506,20 @@ mod launch_agent {
         dir.join(FILE).exists()
     }
 
+    /// The program the agent starts: the first string of `ProgramArguments`, unescaped.
+    pub fn target_in(dir: &Path) -> Option<String> {
+        let text = fs::read_to_string(dir.join(FILE)).ok()?;
+        let after = text.split("<key>ProgramArguments</key>").nth(1)?;
+        let start = after.find("<string>")? + "<string>".len();
+        let end = after[start..].find("</string>")? + start;
+        Some(
+            after[start..end]
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&"),
+        )
+    }
+
     pub fn set_enabled_in(dir: &Path, enabled: bool, exe: &str) -> Result<()> {
         let path = dir.join(FILE);
         if enabled {
@@ -422,6 +560,18 @@ mod launch_agent {
         fn a_path_cannot_break_out_of_its_element() {
             let text = contents("/Users/a&b/<odd>/asli");
             assert!(text.contains("<string>/Users/a&amp;b/&lt;odd&gt;/asli</string>"));
+        }
+
+        #[test]
+        fn the_target_reads_back_as_written() {
+            let dir = scratch("target");
+            set_enabled_in(&dir, true, "/Users/a&b/Apps/Asli.app/Contents/MacOS/asli")
+                .expect("enables");
+            assert_eq!(
+                target_in(&dir).as_deref(),
+                Some("/Users/a&b/Apps/Asli.app/Contents/MacOS/asli")
+            );
+            let _ = fs::remove_dir_all(dir);
         }
 
         #[test]
