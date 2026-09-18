@@ -1,4 +1,4 @@
-//! Manual smoke test for the Linux and Windows clipboard backends.
+//! Manual smoke test for the clipboard backends on Linux, Windows and macOS.
 //!
 //! Run it, then copy something in any application and watch the events arrive:
 //!
@@ -24,7 +24,6 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use asli_clipboard::session::Backend;
 use asli_clipboard::session::{self, Env};
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use asli_clipboard::{ClipContent, ClipEvent, ClipboardWatcher};
 
 fn main() {
@@ -54,10 +53,43 @@ fn main() {
     #[cfg(target_os = "windows")]
     run_windows(show_content);
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    run_macos(show_content);
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = show_content;
-        eprintln!("this example supports Linux and Windows so far");
+        eprintln!("this example supports Linux, Windows and macOS");
+        std::process::exit(1);
+    }
+}
+
+/// Polls on the main thread, which is where the application polls too.
+#[cfg(target_os = "macos")]
+fn run_macos(show_content: bool) {
+    use asli_clipboard::macos::MacosClipboard;
+
+    println!("read permission: {}", MacosClipboard::permission().label());
+    let mut watcher = MacosClipboard::connect().unwrap_or_else(|err| {
+        eprintln!("could not start: {err}");
+        std::process::exit(1);
+    });
+
+    std::thread::spawn(|| {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        std::process::exit(0);
+    });
+
+    println!();
+    println!("watching. copy something in another application. press Enter to stop.");
+
+    let mut count = 0u32;
+    if let Err(err) = watcher.run(&mut |event| {
+        count += 1;
+        report(count, &event, show_content);
+    }) {
+        eprintln!("watcher stopped: {err}");
         std::process::exit(1);
     }
 }
@@ -150,7 +182,6 @@ fn run_linux(backend: Backend, show_content: bool) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn report(count: u32, event: &ClipEvent, show_content: bool) {
     if event.sensitive {
         println!("[{count}] skipped: the source marked this as a password");
