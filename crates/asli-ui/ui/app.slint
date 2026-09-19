@@ -4,14 +4,17 @@
 // door: nothing here runs at startup, so an idle device pays for a tray icon and a socket and
 // not for a user interface.
 //
-// The screens replaced three improvised mechanisms. The join string used to be written to an
-// HTML file and opened in a browser, joining used to be a zenity prompt, and settings used to be
-// a JSON file opened in whatever editor the desktop had registered. Each of those was a different
-// application appearing on screen, which is why this exists.
+// The window draws its own frame. The title bar, the sidebar and the six screens are laid out to
+// the redesign's measurements, and a frame supplied by the desktop would have put a second, foreign
+// title bar above ours, different on every desktop it ran on.
 
 import {
-    Palette, Metrics, Heading, Body, Card, Button, Field, Switch, Select, Row, StatusDot
+    SoftShadow, GradientFill, Theme, Icons, SyncState, States, Icon, Spinner, ButtonKind, Button, IconButton, Overline,
+    Title, Subtitle, Caption, Label, Card, Divider, BannerKind, Banner, TextField, JoinArea,
+    Toggle, Select, StateDot, Pill, Skeleton, Toast
 } from "design.slint";
+
+export { SyncState }
 
 // Which screen is showing. Held on the window so the tray can open any of them directly.
 export enum Screen {
@@ -27,10 +30,22 @@ export enum Screen {
 // up by row index, so nothing here ever holds a key or a full clipboard payload.
 export struct HistoryRow {
     preview: string,
-    kind: string,
-    age: string,
-    size: string,
+    meta: string,
     is-image: bool,
+    // URLs and code read better in the monospaced face.
+    mono: bool,
+    thumb: image,
+    has-thumb: bool,
+}
+
+// One device on the account, as the Status screen lists it.
+export struct DeviceRow {
+    name: string,
+    os: string,
+    id: string,
+    seen: string,
+    online: bool,
+    this-device: bool,
 }
 
 // How the join field feels about what has been typed into it so far.
@@ -40,48 +55,330 @@ export struct TokenCheck {
     message: string,
 }
 
-// The navigation rail down the left side.
+// A screen fades in over 200 ms with a 6 px rise. The outgoing screen is cut, not cross faded.
+component ScreenFrame inherits Rectangle {
+    property <bool> entered: false;
+    init => { entered = true; }
+    opacity: entered ? 1 : 0;
+    y: entered ? 0px : 6px;
+    animate opacity, y { duration: 200ms; easing: cubic-bezier(0.05, 0.7, 0.1, 1); }
+}
+
+// A scrolling column with the design's overlay scrollbar: a 4 px thumb inset 3 px from the edge,
+// laid over the content rather than taking width from it.
+component Scroller inherits Rectangle {
+    in property <length> content-height;
+    out property <length> scroll-y: -flick.content-y;
+
+    flick := Flickable {
+        width: 100%;
+        height: 100%;
+        content-height: max(root.content-height, self.height);
+        @children
+    }
+
+    if flick.content-height > flick.height + 1px: Rectangle {
+        property <length> track: flick.height - 6px;
+        property <length> span: max(28px, self.track * flick.height / flick.content-height);
+        x: parent.width - 7px;
+        width: 4px;
+        height: self.span;
+        y: 3px + (self.track - self.span) * (-flick.content-y) / (flick.content-height - flick.height);
+        border-radius: 2px;
+        background: thumb-touch.has-hover || thumb-touch.pressed ? Theme.border-strong : Theme.border;
+
+        thumb-touch := TouchArea {
+            property <length> start;
+            moved => {
+                if (self.pressed) {
+                    flick.content-y = max(flick.height - flick.content-height, min(0px,
+                        flick.content-y - (self.mouse-y - self.pressed-y) * flick.content-height / flick.height));
+                }
+            }
+        }
+    }
+}
+
+// An item in the sidebar.
 component NavItem inherits Rectangle {
     in property <string> text;
+    in property <image> icon;
     in property <bool> selected: false;
     callback clicked();
 
-    height: 36px;
-    border-radius: Metrics.radius-small;
-    background: selected
-        ? Palette.raised
-        : touch.has-hover ? Palette.raised.darker(0.35) : transparent;
-    animate background { duration: Metrics.quick; }
+    height: 34px;
+    border-radius: 8px;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.hairline : transparent;
+    animate background { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+    accessible-role: tab;
+    accessible-label: text;
+    accessible-item-selected: selected;
+    accessible-action-default => { clicked(); }
+
+    // The selected item carries a bar at the sidebar's edge as well as a fill, so the current
+    // screen is not indicated by background colour alone.
+    Rectangle {
+        x: -10px;
+        y: 8px;
+        width: 3px;
+        height: 18px;
+        border-top-right-radius: 3px;
+        border-bottom-right-radius: 3px;
+        background: Theme.accent;
+        opacity: root.selected ? 1 : 0;
+        animate opacity { duration: 120ms; }
+    }
 
     HorizontalLayout {
         padding-left: 10px;
         padding-right: 10px;
-        spacing: 9px;
+        spacing: 10px;
 
-        // The selected item carries a bar as well as a fill, so the current screen is not
-        // indicated by background colour alone.
-        Rectangle {
-            width: 3px;
-            height: 16px;
+        Icon {
+            source: root.icon;
+            size: 16px;
+            tint: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
+            opacity: 0.9;
             y: (parent.height - self.height) / 2;
-            border-radius: 1.5px;
-            background: root.selected ? Palette.accent : transparent;
         }
 
         Text {
             text: root.text;
-            color: root.selected ? Palette.text : Palette.text-dim;
+            color: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
             font-size: 13px;
             font-weight: root.selected ? 600 : 400;
+            letter-spacing: -0.05px;
             vertical-alignment: center;
             horizontal-stretch: 1;
+            animate color { duration: 120ms; }
         }
     }
 
     touch := TouchArea {
-        mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
+}
+
+// One of the three caption buttons at the right of the title bar.
+component CaptionButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> close: false;
+    in property <string> label;
+    callback clicked();
+
+    width: 46px;
+    height: 36px;
+    background: touch.has-hover ? (close ? Theme.danger-deep : Theme.hairline) : transparent;
+    animate background { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { clicked(); }
+
+    Icon {
+        source: root.icon;
+        size: 11px;
+        tint: touch.has-hover ? (root.close ? #FFFFFF : Theme.text) : Theme.text-3;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A card on the first run screen: one of the two ways in.
+component ChoiceCard {
+    in property <bool> primary: false;
+    in property <string> title;
+    in property <string> body;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    in property <bool> busy: false;
+    callback clicked();
+
+    min-height: card.min-height;
+    preferred-height: card.preferred-height;
+    horizontal-stretch: 1;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: title;
+    accessible-description: body;
+    accessible-action-default => { clicked(); }
+
+    property <bool> hover: touch.has-hover && enabled;
+
+    if root.primary: SoftShadow {
+        y: card.y;
+        radius: 14px;
+        offset-y: 4px;
+        blur: 12px;
+        spread: -2px;
+        strength: 0.45;
+    }
+
+    card := Rectangle {
+        // Lifts a pixel under the pointer and settles back when pressed.
+        y: root.hover && !touch.pressed ? -1px : 0px;
+        width: 100%;
+        height: 100%;
+        border-radius: 14px;
+        border-width: root.primary ? 0px : 1px;
+        background: root.primary ? transparent : Theme.raised-1;
+        border-color: root.hover ? Theme.border-strong : Theme.border-subtle;
+        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate y { duration: 80ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+
+        if root.primary: GradientFill {
+            radius: 14px;
+            angle: 145deg;
+            from: Theme.hero-from;
+            to: Theme.hero-to;
+        }
+        if root.primary: Rectangle {
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: root.hover ? Theme.accent : Theme.accent-border;
+            animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        }
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 0px;
+
+            HorizontalLayout {
+                alignment: start;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    background: root.primary ? Theme.accent-soft : Theme.raised-2;
+                    border-color: root.primary ? Theme.accent-border : Theme.border;
+
+                    if !root.busy: Icon {
+                        source: root.icon;
+                        size: 16px;
+                        tint: root.primary ? Theme.link : Theme.text-2;
+                    }
+                    if root.busy: Spinner {
+                        size: 16px;
+                        tint: Theme.link;
+                    }
+                }
+            }
+            Rectangle { height: 12px; }
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            Rectangle { height: 3px; }
+            Caption {
+                text: root.body;
+            }
+        }
+    }
+
+    Rectangle {
+        x: -4px;
+        y: -4px;
+        width: parent.width + 8px;
+        height: parent.height + 8px;
+        border-radius: 18px;
+        border-width: 2px;
+        border-color: Theme.focus;
+        opacity: focus.has-focus ? 1 : 0;
+    }
+
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A key and its value, in the Connection card.
+component DetailRow inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> value;
+    spacing: 16px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+
+    Text {
+        width: 96px;
+        text: root.key;
+        color: Theme.text-3;
+        font-size: 12px;
+    }
+    TextInput {
+        horizontal-stretch: 1;
+        text: root.value;
+        read-only: true;
+        color: Theme.text;
+        font-size: 12px;
+        font-family: Theme.mono;
+        wrap: char-wrap;
+        single-line: false;
+        selection-background-color: #4C8DFF66;
+        selection-foreground-color: Theme.text;
+    }
+}
+
+// A switch with its title and explanation, in the This Device card.
+component SettingRow inherits VerticalLayout {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> mono-detail: false;
+    in property <bool> last: false;
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    HorizontalLayout {
+        padding-top: 13px;
+        padding-bottom: 13px;
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 16px;
+
+        VerticalLayout {
+            spacing: 2px;
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            Caption {
+                text: root.detail;
+                font-family: root.mono-detail ? Theme.mono : "";
+                wrap: root.mono-detail ? char-wrap : word-wrap;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Toggle {
+                label: root.title;
+                checked <=> root.checked;
+                toggled(on) => { root.toggled(on); }
+            }
+        }
+    }
+    if !root.last: Divider { }
 }
 
 export component AppWindow inherits Window {
@@ -90,57 +387,97 @@ export component AppWindow inherits Window {
     // named by the app id instead. Rendered from packaging/linux/asli.svg, the one source of the
     // mark, and embedded at build time.
     icon: @image-url("../../../packaging/icons/asli-256.png");
-    background: Palette.bg;
+    no-frame: true;
+    // A frameless window still resizes from its edges, within this many pixels of them.
+    resize-border-width: 6px;
+    // Square, with the design's one pixel edge. The design rounds the window's corners, but the
+    // software renderer hands the desktop an opaque surface, so a transparent corner comes out
+    // black on every platform. Square is the better of the two.
+    background: Theme.canvas;
     min-width: 720px;
-    min-height: 460px;
-    // Landscape. A list of clipboard entries is read across, not down: a portrait window made
-    // every row short and left the screen half empty under a single card.
-    preferred-width: 980px;
-    preferred-height: 620px;
+    min-height: 520px;
+    preferred-width: 880px;
+    preferred-height: 600px;
+    default-font-size: 13px;
+    default-font-family: root.ui-font;
+
+    // Set by the application before the window is shown.
+    in property <string> ui-font: "";
+    in property <bool> is-maximized: false;
 
     // Which screen is showing, and whether this device has an account at all. With no account
-    // there is nothing to navigate between, so the rail is hidden and first run takes the window.
+    // there is nothing to navigate between, so the sidebar is hidden and first run takes the window.
     in-out property <Screen> screen: Screen.Status;
     in property <bool> has-account: false;
+    property <bool> chrome: screen != Screen.FirstRun && screen != Screen.Join;
+
+    // The connection, shared by the Status hero, the sidebar footer and the History banner.
+    in property <SyncState> sync-state: SyncState.connecting;
+    in property <string> state-label: "Connecting…";
+    in property <string> state-detail: "";
+    in property <bool> paused: false;
+    in property <bool> loading: false;
 
     // Status screen.
-    in property <string> connection: "Offline";
-    in property <int> peers: 0;
-    in property <string> last-sync: "never";
-    in property <string> skipped: "0";
-    in property <bool> paused: false;
+    in property <string> stat-connections: "";
+    in property <string> stat-last-sync: "";
+    in property <string> stat-skipped: "0";
     in property <bool> has-retained: false;
-    in property <string> last-error: "";
-    in property <string> relay-host: "";
-    in property <string> device-id: "";
+    in property <[DeviceRow]> devices: [];
+    in property <string> relay-url-live: "";
     in property <string> room-id: "";
+    in property <string> device-id: "";
     in property <string> clipboard-backend: "";
 
-    // Join string screen.
+    // Join String screen.
     in property <image> qr;
     in property <string> token: "";
+
+    // First run.
+    in property <bool> creating: false;
+    in property <string> create-error: "";
 
     // Join screen.
     in-out property <string> join-input: "";
     in property <TokenCheck> join-check: { valid: false, invalid: false, message: "" };
     in property <bool> join-busy: false;
+    in property <string> join-error: "";
 
     // History screen.
     in property <[HistoryRow]> history: [];
     in property <bool> history-enabled: true;
     in property <string> history-note: "";
 
-    // Settings screen. Edited in place and applied by the Save button, except the switches, which
-    // take effect immediately because a switch that needs saving does not feel like a switch.
+    // Settings screen. The fields are applied by Save; the switches take effect immediately,
+    // because a switch that needs saving does not feel like a switch.
     in-out property <string> relay-url: "";
+    in-out property <string> device-name: "";
     in-out property <int> size-cap-index: 1;
     in-out property <int> retention-index: 2;
     in-out property <bool> notifications: true;
     in-out property <bool> autostart: false;
     in-out property <bool> keep-history: true;
-    in property <bool> settings-dirty: false;
+    in property <string> saved-relay-url: "";
+    in property <string> saved-device-name: "";
+    in property <int> saved-size-cap-index: 1;
+    in property <int> saved-retention-index: 2;
     in property <string> settings-note: "";
+    in property <bool> settings-saving: false;
     in property <string> autostart-detail: "";
+    property <string> relay-lower: root.relay-url.to-lowercase();
+    property <bool> relay-invalid: !(relay-lower.starts-with("wss://") || relay-lower.starts-with("ws://"))
+        || relay-lower.character-count < 7;
+    property <bool> settings-dirty: relay-url != saved-relay-url || device-name != saved-device-name
+        || size-cap-index != saved-size-cap-index || retention-index != saved-retention-index;
+    property <bool> settings-saved-flash: false;
+
+    // Transient state owned by the markup.
+    property <string> toast-text;
+    property <bool> toast-good: true;
+    property <bool> toast-shown: false;
+    property <bool> token-copied: false;
+    property <bool> confirm-clear: false;
+    property <bool> confirm-join-other: false;
 
     callback open-screen(Screen);
     callback create-account();
@@ -148,9 +485,11 @@ export component AppWindow inherits Window {
     callback check-token(string);
     callback copy-token();
     callback restore-entry(int);
+    callback copy-entry(int);
     callback forget-entry(int);
     callback clear-history();
     callback set-paused(bool);
+    callback retry-now();
     callback request-retained();
     callback copy-diagnostics();
     callback save-settings();
@@ -159,719 +498,1620 @@ export component AppWindow inherits Window {
     callback set-autostart(bool);
     callback set-keep-history(bool);
     callback hide-window();
+    callback start-drag();
+    callback minimize-window();
+    callback toggle-maximize();
 
-    // Escape closes the window rather than quitting, because the daemon outlives the window and
-    // a person closing a tray window means "go away", never "stop syncing".
+    // Shows a short confirmation near the bottom of the window for 2.4 seconds.
+    public function show-toast(text: string, good: bool) {
+        root.toast-text = text;
+        root.toast-good = good;
+        root.toast-shown = true;
+        toast-timer.running = false;
+        toast-timer.running = true;
+    }
+
+    // Called once a save has gone through.
+    public function settings-saved() {
+        root.settings-saved-flash = true;
+        saved-timer.running = false;
+        saved-timer.running = true;
+    }
+
+    // Flips the Copy join string button to Copied for 1.6 seconds.
+    public function token-was-copied() {
+        root.token-copied = true;
+        copied-timer.running = false;
+        copied-timer.running = true;
+    }
+
+    toast-timer := Timer {
+        interval: 2400ms;
+        running: false;
+        triggered => {
+            root.toast-shown = false;
+            self.running = false;
+        }
+    }
+    saved-timer := Timer {
+        interval: 2000ms;
+        running: false;
+        triggered => {
+            root.settings-saved-flash = false;
+            self.running = false;
+        }
+    }
+    copied-timer := Timer {
+        interval: 1600ms;
+        running: false;
+        triggered => {
+            root.token-copied = false;
+            self.running = false;
+        }
+    }
+    clear-timer := Timer {
+        interval: 4000ms;
+        running: root.confirm-clear;
+        triggered => { root.confirm-clear = false; }
+    }
+
+    // Escape closes a dialog first, then the window, rather than quitting: the daemon outlives
+    // the window, and a person closing a tray window means "go away", never "stop syncing".
     forward-focus: shortcuts;
     shortcuts := FocusScope {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
-                root.hide-window();
+                if (root.confirm-join-other) {
+                    root.confirm-join-other = false;
+                } else {
+                    root.hide-window();
+                }
                 return accept;
+            }
+            if (event.modifiers.control && root.chrome) {
+                if (event.text == "1") { root.open-screen(Screen.Status); return accept; }
+                if (event.text == "2") { root.open-screen(Screen.History); return accept; }
+                if (event.text == "3") { root.open-screen(Screen.Token); return accept; }
+                if (event.text == "4") { root.open-screen(Screen.Settings); return accept; }
             }
             return reject;
         }
 
-        // The content sits inside the scope rather than beside it. A scope with no children only
-        // sees keys while it personally holds focus, so Escape would stop working the moment
-        // somebody clicked into the join field, which is exactly when they most want a way out.
-        // Key events bubble up from the focused item, so wrapping catches them everywhere.
-        HorizontalLayout {
-        // The rail. Absent during first run, when there is nowhere else to go.
-        if root.has-account: Rectangle {
-            width: 168px;
-            background: Palette.surface;
+        // The whole window, with its own one pixel edge, which a maximised window does without.
+        frame := Rectangle {
+            border-width: root.is-maximized ? 0px : 1px;
+            border-color: Theme.border;
+            background: Theme.canvas;
+            clip: true;
 
             VerticalLayout {
-                padding: 10px;
-                spacing: 4px;
+                padding: frame.border-width;
 
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-bottom: 8px;
-                    padding-top: 6px;
-                    spacing: 8px;
-
-                    // The mark: two offset sheets, the same shape the tray icon draws.
-                    Rectangle {
-                        width: 18px;
-                        height: 18px;
-                        y: (parent.height - self.height) / 2;
-                        Rectangle {
-                            x: 0px; y: 0px; width: 12px; height: 14px;
-                            border-radius: 3px;
-                            background: Palette.accent.darker(0.25);
-                        }
-                        Rectangle {
-                            x: 5px; y: 4px; width: 12px; height: 14px;
-                            border-radius: 3px;
-                            background: Palette.accent;
-                        }
-                    }
-
-                    Text {
-                        text: "Asli";
-                        color: Palette.text;
-                        font-size: 15px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                }
-
-                NavItem {
-                    text: "Status";
-                    selected: root.screen == Screen.Status;
-                    clicked => { root.open-screen(Screen.Status); }
-                }
-                NavItem {
-                    text: "History";
-                    selected: root.screen == Screen.History;
-                    clicked => { root.open-screen(Screen.History); }
-                }
-                NavItem {
-                    text: "Join String";
-                    selected: root.screen == Screen.Token;
-                    clicked => { root.open-screen(Screen.Token); }
-                }
-                NavItem {
-                    text: "Settings";
-                    selected: root.screen == Screen.Settings;
-                    clicked => { root.open-screen(Screen.Settings); }
-                }
-
-                Rectangle { vertical-stretch: 1; }
-
-                // Sync state repeated at the foot of the rail, so it is visible from every
-                // screen without having to go back to Status to check.
+                // The title bar. All of it drags the window except the three buttons.
                 Rectangle {
-                    height: 1px;
-                    background: Palette.line;
-                }
-                HorizontalLayout {
-                    padding: 10px;
-                    StatusDot {
-                        tint: root.paused
-                            ? Palette.warn
-                            : root.connection == "Synced" ? Palette.good : Palette.bad;
-                        text: root.paused ? "Paused" : root.connection;
-                    }
-                }
-            }
-        }
+                    height: 36px;
+                    background: Theme.titlebar;
 
-        // The screen itself.
-        Rectangle {
-            background: Palette.bg;
-            horizontal-stretch: 1;
-
-            if root.screen == Screen.FirstRun: first-run := VerticalLayout {
-                padding: 28px;
-                spacing: Metrics.gap;
-                alignment: start;
-
-                Heading { text: "One clipboard, every machine."; }
-                Body {
-                    text: "Copy on one device, paste on another. Everything is encrypted on this "
-                        + "machine before it leaves, and the relay only ever sees sealed bytes.";
-                }
-
-                Rectangle { height: 8px; }
-
-                Card {
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 8px;
-                        Heading { text: "Start Here"; }
-                        Body { text: "Create an account on this device. You get one join string to paste on your other machines."; }
-                        HorizontalLayout {
-                            alignment: start;
-                            Button {
-                                text: "Create Account";
-                                primary: true;
-                                clicked => { root.create-account(); }
+                    drag := TouchArea {
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                root.start-drag();
                             }
                         }
-                    }
-                }
-
-                Card {
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 8px;
-                        Heading { text: "Already Have One"; }
-                        Body { text: "Open Asli on the device that has the account, choose Join String, and paste it here."; }
-                        HorizontalLayout {
-                            alignment: start;
-                            Button {
-                                text: "Join Existing";
-                                clicked => { root.open-screen(Screen.Join); }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if root.screen == Screen.Join: Flickable {
-                // Scrolls when the window is shorter than the screen. Without it the bottom
-                // of the screen was simply cut off, with no way to reach it.
-                content-height: join-screen.preferred-height;
-
-                join-screen := VerticalLayout {
-                    padding: 28px;
-                    spacing: Metrics.gap;
-
-                    Heading { text: "Join Another Account"; }
-                    Body {
-                        text: "Paste the join string from your other device with Ctrl+V. It starts "
-                            + "with asli1_ and is shown there under Join string.";
-                    }
-
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 10px;
-
-                            Row {
-                                label: "Join String";
-                                join-field := Field {
-                                    placeholder: "asli1_...";
-                                    monospace: true;
-                                    text <=> root.join-input;
-                                    valid: root.join-check.valid;
-                                    invalid: root.join-check.invalid;
-                                    edited(value) => { root.check-token(value); }
-                                    accepted(value) => {
-                                        if (root.join-check.valid) { root.join-account(value); }
-                                    }
-                                }
-                            }
-
-                            // The verdict sits under the field and names the specific mistake: a
-                            // wrong prefix, a bad checksum and a truncated string are three different
-                            // problems and only one of them means "you were given the wrong string".
-                            if root.join-check.message != "": Text {
-                                text: root.join-check.message;
-                                color: root.join-check.invalid ? Palette.bad : Palette.good;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
-                                Button {
-                                    text: root.join-busy ? "Joining..." : "Join";
-                                    primary: true;
-                                    enabled: root.join-check.valid && !root.join-busy;
-                                    clicked => { root.join-account(root.join-input); }
-                                }
-                            }
-                        }
-                    }
-
-                    if root.has-account: Card {
-                        background: Palette.surface;
-                        border-color: Palette.warn;
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 6px;
-                            Heading { text: "This replaces the account on this device"; }
-                            Body {
-                                text: "Any device still using the current join string stops syncing with "
-                                    + "this machine, and the current account cannot be recovered unless "
-                                    + "you saved its join string somewhere.";
-                            }
-                        }
-                    }
-
-                    Rectangle { vertical-stretch: 1; }
-                }
-            }
-
-            // Two columns, because the window is wider than it is tall. Stacked down the middle
-            // the symbol pushed its own explanation off the bottom of the screen.
-            if root.screen == Screen.Token: HorizontalLayout {
-                padding: 28px;
-                spacing: 24px;
-                alignment: start;
-
-                VerticalLayout {
-                    // A white plate under the symbol, because a QR inverted by a dark theme is
-                    // unreadable to roughly every camera.
-                    Rectangle {
-                        width: 232px;
-                        height: 232px;
-                        background: #ffffff;
-                        border-radius: Metrics.radius;
-                        Image {
-                            width: 200px;
-                            height: 200px;
-                            x: 16px;
-                            y: 16px;
-                            source: root.qr;
-                            image-rendering: pixelated;
-                        }
-                    }
-                    Rectangle { vertical-stretch: 1; }
-                }
-
-                VerticalLayout {
-                    spacing: Metrics.gap;
-                    horizontal-stretch: 1;
-
-                    Heading { text: "Scan this on your other device"; }
-
-                    Card {
-                        vertical-stretch: 0;
-                        VerticalLayout {
-                            padding: 14px;
-                            Text {
-                                text: root.token;
-                                color: Palette.text;
-                                font-size: 12px;
-                                font-family: "monospace";
-                                wrap: char-wrap;
-                            }
-                        }
+                        double-clicked => { root.toggle-maximize(); }
                     }
 
                     HorizontalLayout {
-                        alignment: start;
+                        padding-left: 12px;
                         spacing: 8px;
-                        Button {
-                            text: "Copy Join String";
-                            primary: true;
-                            clicked => { root.copy-token(); }
+
+                        Image {
+                            source: Icons.mark;
+                            width: 15px;
+                            height: 15px;
+                            y: (parent.height - self.height) / 2;
                         }
-                    }
-
-                    Body {
-                        text: "Anyone who has this has your clipboard. Do not send it over chat or "
-                            + "email. Scanning the QR is safest. Copying it marks it so clipboard "
-                            + "history and cloud sync skip it, and clears it after 90 seconds, but "
-                            + "software that ignores those markers can still read it.";
-                    }
-
-                    Rectangle { vertical-stretch: 1; }
-                }
-            }
-
-            if root.screen == Screen.History: VerticalLayout {
-                padding: 28px;
-                spacing: Metrics.gap;
-
-                HorizontalLayout {
-                    spacing: Metrics.gap;
-                    VerticalLayout {
-                        spacing: 4px;
-                        horizontal-stretch: 1;
-                        Heading { text: "History"; }
-                        Body { text: "Click an entry to put it back on the clipboard of every device."; }
-                    }
-                    if root.history.length > 0: Button {
-                        text: "Clear All";
-                        danger: true;
-                        clicked => { root.clear-history(); }
-                    }
-                }
-
-                // Pinned to its own height. A card left to stretch shares out the leftover space
-                // and drifts into the middle of the screen, taking its own contents apart as it
-                // goes, which is what happened to the empty state here.
-                if !root.history-enabled: Card {
-                    vertical-stretch: 0;
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 8px;
-                        Heading { text: "History is Off"; }
-                        Body { text: "Turn it on in Settings to keep a local, encrypted list of what you copied."; }
+                        Text {
+                            text: "Asli";
+                            color: Theme.text-2;
+                            font-size: 12px;
+                            font-weight: 500;
+                            letter-spacing: 0.1px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
                         HorizontalLayout {
-                            alignment: start;
-                            Button {
-                                text: "Open Settings";
-                                clicked => { root.open-screen(Screen.Settings); }
+                            spacing: 0px;
+                            CaptionButton {
+                                icon: Icons.win-minimize;
+                                label: "Minimize";
+                                clicked => { root.minimize-window(); }
+                            }
+                            CaptionButton {
+                                icon: Icons.win-maximize;
+                                label: root.is-maximized ? "Restore" : "Maximize";
+                                clicked => { root.toggle-maximize(); }
+                            }
+                            CaptionButton {
+                                icon: Icons.win-close;
+                                close: true;
+                                label: "Close";
+                                clicked => { root.hide-window(); }
                             }
                         }
                     }
-                }
 
-                if root.history-enabled && root.history.length == 0: Card {
-                    vertical-stretch: 0;
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 6px;
-                        Heading { text: "Nothing Yet"; }
-                        Body { text: "Copy something and it appears here."; }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.hairline;
                     }
                 }
 
-                if root.history-enabled && root.history.length > 0: Flickable {
-                    vertical-stretch: 1;
-                    content-height: rows.preferred-height;
+                HorizontalLayout {
+                    // The sidebar. Absent on first run and join, which take the whole window.
+                    if root.chrome: Rectangle {
+                        width: 212px;
+                        background: Theme.sidebar-fill;
 
-                    rows := VerticalLayout {
-                        spacing: 6px;
-                        for entry[index] in root.history: Rectangle {
-                            height: max(58px, entry-layout.preferred-height);
-                            border-radius: Metrics.radius-small;
-                            background: entry-touch.has-hover ? Palette.raised : Palette.surface;
-                            border-width: 1px;
-                            border-color: Palette.line;
-                            animate background { duration: Metrics.quick; }
+                        VerticalLayout {
+                            padding-top: 18px;
 
-                            entry-layout := HorizontalLayout {
-                                padding: 12px;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                padding-bottom: 14px;
                                 spacing: 10px;
 
-                                // Type badge, drawn rather than coloured, so text and image are
-                                // told apart by the word and not by the shade.
                                 Rectangle {
-                                    width: 42px;
-                                    height: 20px;
-                                    y: 2px;
-                                    border-radius: 5px;
-                                    background: Palette.raised.darker(0.15);
+                                    width: 24px;
+                                    height: 24px;
+                                    // The glow under the mark, cast by the front sheet.
+                                    Rectangle {
+                                        x: 6.75px;
+                                        y: 6.75px;
+                                        width: 13.5px;
+                                        height: 13.5px;
+                                        SoftShadow {
+                                            radius: 3.75px;
+                                            offset-y: 2px;
+                                            blur: 6px;
+                                            tint: #2F73F0;
+                                            strength: 0.45;
+                                            steps: 4;
+                                        }
+                                    }
+                                    Image {
+                                        source: Icons.mark;
+                                        width: 24px;
+                                        height: 24px;
+                                    }
+                                }
+                                Text {
+                                    text: "Asli";
+                                    color: Theme.text;
+                                    font-size: 15px;
+                                    font-weight: 640;
+                                    letter-spacing: -0.1px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            VerticalLayout {
+                                padding-top: 6px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 2px;
+
+                                NavItem {
+                                    text: "Status";
+                                    icon: Icons.shield;
+                                    selected: root.screen == Screen.Status;
+                                    clicked => { root.open-screen(Screen.Status); }
+                                }
+                                NavItem {
+                                    text: "History";
+                                    icon: Icons.history;
+                                    selected: root.screen == Screen.History;
+                                    clicked => { root.open-screen(Screen.History); }
+                                }
+                                NavItem {
+                                    text: "Join String";
+                                    icon: Icons.key;
+                                    selected: root.screen == Screen.Token;
+                                    clicked => { root.open-screen(Screen.Token); }
+                                }
+                                NavItem {
+                                    text: "Settings";
+                                    icon: Icons.settings;
+                                    selected: root.screen == Screen.Settings;
+                                    clicked => { root.open-screen(Screen.Settings); }
+                                }
+                            }
+
+                            Rectangle { vertical-stretch: 1; }
+
+                            // The state repeated at the foot of the sidebar, so it is visible from
+                            // every screen without going back to Status to check.
+                            Rectangle {
+                                height: 48px;
+                                Rectangle {
+                                    y: 0px;
+                                    height: 1px;
+                                    background: Theme.hairline;
+                                }
+                                HorizontalLayout {
+                                    padding-left: 13px;
+                                    padding-right: 16px;
+                                    spacing: 6px;
+                                    StateDot {
+                                        state: root.sync-state;
+                                        y: (parent.height - self.height) / 2;
+                                    }
                                     Text {
-                                        text: entry.kind;
-                                        color: Palette.text-dim;
-                                        font-size: 10px;
-                                        font-weight: 600;
-                                        width: 100%;
+                                        text: root.state-label;
+                                        color: Theme.text-2;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            background: Theme.hairline;
+                        }
+                    }
+
+                    // The content column.
+                    content := Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.canvas;
+                        clip: true;
+
+                        Image {
+                            source: Icons.wash;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: fill;
+                        }
+
+                        // ─────────────────────────── First run ───────────────────────────
+                        if root.screen == Screen.FirstRun: ScreenFrame {
+                            VerticalLayout {
+                                padding-left: 64px;
+                                padding-right: 64px;
+                                alignment: center;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 72px;
+                                        height: 72px;
+                                        SoftShadow {
+                                            radius: 17px;
+                                            // Wider than the design's 28 px on paper: CSS
+                                            // filter shadows take that as a deviation, not a
+                                            // radius, and this matches what it renders.
+                                            offset-y: 12px;
+                                            blur: 44px;
+                                            tint: #2F73F0;
+                                            strength: 0.42;
+                                            steps: 20;
+                                        }
+                                        Image {
+                                            source: Icons.app-icon;
+                                            width: 72px;
+                                            height: 72px;
+                                        }
+                                    }
+                                }
+                                Rectangle { height: 20px; }
+                                Text {
+                                    text: "Welcome to Asli";
+                                    color: Theme.text;
+                                    font-size: 24px;
+                                    font-weight: 650;
+                                    letter-spacing: -0.3px;
+                                    horizontal-alignment: center;
+                                }
+                                Rectangle { height: 6px; }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Subtitle {
+                                        width: min(380px, parent.width);
+                                        text: "One clipboard across your computers. Copy here, paste there, sealed end to end, so the relay only ever sees noise.";
                                         horizontal-alignment: center;
+                                    }
+                                }
+                                Rectangle { height: 28px; }
+
+                                if root.create-error != "": HorizontalLayout {
+                                    alignment: center;
+                                    padding-bottom: 12px;
+                                    Banner {
+                                        width: min(480px, parent.width);
+                                        kind: BannerKind.error;
+                                        title: "Couldn't create the account";
+                                        body: root.create-error;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    HorizontalLayout {
+                                        width: min(480px, parent.width);
+                                        spacing: 12px;
+                                        opacity: root.creating ? 0.45 : 1;
+                                        ChoiceCard {
+                                            primary: true;
+                                            icon: Icons.plus;
+                                            title: "Create a new account";
+                                            body: "Start fresh on this device and invite the others.";
+                                            enabled: !root.creating;
+                                            busy: root.creating;
+                                            clicked => { root.create-account(); }
+                                        }
+                                        ChoiceCard {
+                                            icon: Icons.key;
+                                            title: "Join an existing account";
+                                            body: "Paste a join string from another device.";
+                                            enabled: !root.creating;
+                                            clicked => { root.open-screen(Screen.Join); }
+                                        }
+                                    }
+                                }
+                                Rectangle { height: 24px; }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 7px;
+                                    Icon {
+                                        source: Icons.shield;
+                                        size: 13px;
+                                        tint: Theme.text-4;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                    Text {
+                                        text: "Keys never leave your devices";
+                                        color: Theme.text-4;
+                                        font-size: 11.5px;
                                         vertical-alignment: center;
                                     }
                                 }
+                            }
+                        }
 
+                        // ───────────────────────────── Join ──────────────────────────────
+                        if root.screen == Screen.Join: ScreenFrame {
+                            VerticalLayout {
+                                padding-top: 20px;
+                                padding-bottom: 20px;
+                                padding-left: 24px;
+                                padding-right: 24px;
+
+                                HorizontalLayout {
+                                    alignment: start;
+                                    back := Rectangle {
+                                        height: 28px;
+                                        width: back-row.preferred-width;
+                                        border-radius: 8px;
+                                        background: back-touch.has-hover ? Theme.hairline : transparent;
+                                        animate background { duration: 120ms; }
+                                        accessible-role: button;
+                                        accessible-label: "Back";
+                                        accessible-action-default => { back-touch.clicked(); }
+
+                                        back-row := HorizontalLayout {
+                                            padding-left: 7px;
+                                            padding-right: 10px;
+                                            spacing: 5px;
+                                            Icon {
+                                                source: Icons.back;
+                                                size: 14px;
+                                                tint: back-touch.has-hover ? Theme.text : Theme.text-2;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+                                            Text {
+                                                text: "Back";
+                                                color: back-touch.has-hover ? Theme.text : Theme.text-2;
+                                                font-size: 12px;
+                                                font-weight: 500;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        back-touch := TouchArea {
+                                            clicked => {
+                                                root.open-screen(root.has-account ? Screen.Settings : Screen.FirstRun);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // The form, centred with a 28 px optical lift.
                                 VerticalLayout {
-                                    spacing: 4px;
-                                    horizontal-stretch: 1;
-                                    Text {
-                                        text: entry.is-image ? "Image" : entry.preview;
-                                        color: Palette.text;
-                                        font-size: 13px;
-                                        font-family: entry.is-image ? "" : "monospace";
-                                        wrap: no-wrap;
-                                        overflow: elide;
+                                    alignment: center;
+                                    vertical-stretch: 1;
+                                    padding-bottom: 28px;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        VerticalLayout {
+                                            width: min(440px, parent.width);
+                                            spacing: 0px;
+
+                                            Title { text: "Join an existing account"; }
+                                            Rectangle { height: 5px; }
+                                            StyledText {
+                                                text: @markdown("Open <font color=\"#E9EDF6\">Join String</font> on a device that is already set up, then paste the string here.");
+                                                default-color: Theme.text-2;
+                                                default-font-size: 13px;
+                                            }
+                                            Rectangle { height: 20px; }
+                                            Label { text: "Join string"; }
+                                            Rectangle { height: 6px; }
+                                            join-field := JoinArea {
+                                                placeholder: "asli1_…";
+                                                text <=> root.join-input;
+                                                invalid: root.join-check.invalid;
+                                                read-only: root.join-busy;
+                                                edited(value) => { root.check-token(value); }
+                                                accepted(value) => {
+                                                    if (root.join-check.valid && !root.join-busy) {
+                                                        root.join-account(value);
+                                                    }
+                                                }
+                                            }
+
+                                            // The verdict names the specific mistake: a wrong prefix,
+                                            // a bad checksum and a truncated string are different
+                                            // problems and only one means "the wrong string".
+                                            if root.join-check.invalid: HorizontalLayout {
+                                                padding-top: 7px;
+                                                spacing: 6px;
+                                                VerticalLayout {
+                                                    padding-top: 1px;
+                                                    alignment: start;
+                                                    Icon {
+                                                        source: Icons.alert;
+                                                        size: 14px;
+                                                        tint: Theme.error;
+                                                    }
+                                                }
+                                                Caption {
+                                                    text: root.join-check.message;
+                                                    color: Theme.error;
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+                                            if !root.join-check.invalid: VerticalLayout {
+                                                padding-top: 7px;
+                                                Caption {
+                                                    text: root.has-account
+                                                        ? "Joining replaces the account on this device."
+                                                        : "Keys stay on this device. The relay only ever sees sealed bytes.";
+                                                }
+                                            }
+
+                                            Rectangle { height: 16px; }
+
+                                            if root.join-error != "": VerticalLayout {
+                                                padding-bottom: 12px;
+                                                Banner {
+                                                    kind: BannerKind.error;
+                                                    title: root.join-error;
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Button {
+                                                    text: root.join-busy ? "Joining…" : "Join account";
+                                                    kind: ButtonKind.primary;
+                                                    busy: root.join-busy;
+                                                    enabled: root.join-check.valid;
+                                                    clicked => { root.join-account(root.join-input); }
+                                                }
+                                                Button {
+                                                    text: "Paste";
+                                                    icon: Icons.paste;
+                                                    show-icon: true;
+                                                    enabled: !root.join-busy;
+                                                    clicked => { join-field.paste-over(); }
+                                                }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                        }
                                     }
-                                    Text {
-                                        text: entry.age + "  ·  " + entry.size;
-                                        color: Palette.text-faint;
-                                        font-size: 11px;
+                                }
+                            }
+                        }
+
+                        // ─────────────────────────── Join String ─────────────────────────
+                        if root.screen == Screen.Token: ScreenFrame {
+                            Scroller {
+                                content-height: token-screen.preferred-height;
+
+                                token-screen := VerticalLayout {
+                                    padding-top: 20px;
+                                    padding-bottom: 24px;
+                                    padding-left: 24px;
+                                    padding-right: 24px;
+                                    spacing: 0px;
+                                    alignment: start;
+
+                                    Title { text: "Join String"; }
+                                    Rectangle { height: 4px; }
+                                    Subtitle { text: "Scan or paste this on the device you want to add."; }
+                                    Rectangle { height: 18px; }
+
+                                    HorizontalLayout {
+                                        spacing: 20px;
+                                        alignment: start;
+
+                                        // The QR plate is white whatever the theme: a symbol
+                                        // inverted by a dark theme is unreadable to most cameras.
+                                        VerticalLayout {
+                                            alignment: start;
+                                            Rectangle {
+                                                width: 199px;
+                                                height: 199px;
+                                                SoftShadow {
+                                                    radius: 14px;
+                                                    offset-y: 12px;
+                                                    blur: 32px;
+                                                    spread: -6px;
+                                                    strength: 0.6;
+                                                    steps: 14;
+                                                }
+                                              Rectangle {
+                                                border-radius: 14px;
+                                                background: #FFFFFF;
+
+                                                Image {
+                                                    x: 12px;
+                                                    y: 12px;
+                                                    width: 175px;
+                                                    height: 175px;
+                                                    source: root.qr;
+                                                    image-rendering: pixelated;
+                                                }
+                                            }
+                                              }
+                                        }
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: start;
+                                            spacing: 0px;
+
+                                            Overline { text: "JOIN STRING"; }
+                                            Rectangle { height: 8px; }
+                                            Rectangle {
+                                                border-radius: 10px;
+                                                border-width: 1px;
+                                                background: Theme.input;
+                                                border-color: Theme.border;
+                                                height: token-text.preferred-height + 22px;
+
+                                                token-text := TextInput {
+                                                    x: 12px;
+                                                    y: 11px;
+                                                    width: parent.width - 24px;
+                                                    text: root.token;
+                                                    read-only: true;
+                                                    color: Theme.text;
+                                                    font-size: 12px;
+                                                    font-family: Theme.mono;
+                                                    letter-spacing: 0.2px;
+                                                    wrap: char-wrap;
+                                                    single-line: false;
+                                                    selection-background-color: #4C8DFF66;
+                                                    selection-foreground-color: Theme.text;
+                                                }
+                                            }
+                                            Rectangle { height: 10px; }
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                alignment: start;
+                                                Button {
+                                                    text: root.token-copied ? "Copied" : "Copy join string";
+                                                    icon: root.token-copied ? Icons.check : Icons.copy;
+                                                    show-icon: true;
+                                                    pad-x: 14px;
+                                                    kind: ButtonKind.primary;
+                                                    latched: root.token-copied;
+                                                    clicked => { root.copy-token(); }
+                                                }
+                                            }
+                                            Rectangle { height: 14px; }
+                                            Banner {
+                                                kind: BannerKind.warning;
+                                                title: "Anyone with this string has your clipboard";
+                                                body: "Don't send it over chat or email. Scanning the QR is safest. Copying marks the clip so history and cloud sync skip it, and clears it after 90 seconds, but software that ignores those markers can still read it.";
+                                            }
+                                            Rectangle { height: 12px; }
+                                            HorizontalLayout {
+                                                spacing: 7px;
+                                                Icon {
+                                                    source: Icons.shield;
+                                                    size: 13px;
+                                                    tint: Theme.text-3;
+                                                    y: (parent.height - self.height) / 2;
+                                                }
+                                                Caption {
+                                                    text: "Valid until you create a new account. Every device that has it stays joined.";
+                                                    horizontal-stretch: 1;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ──────────────────────────── History ────────────────────────────
+                        if root.screen == Screen.History: ScreenFrame {
+                            VerticalLayout {
+                                // The header stays put while the list scrolls under it.
+                                Rectangle {
+                                    height: header.preferred-height;
+                                    header := HorizontalLayout {
+                                        padding-top: 20px;
+                                        padding-bottom: 14px;
+                                        padding-left: 24px;
+                                        padding-right: 24px;
+                                        spacing: 16px;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 4px;
+                                            Title { text: "History"; }
+                                            Subtitle { text: "Click an entry to put it back on the clipboard of every device."; }
+                                        }
+
+                                        if root.history.length > 0 && !root.confirm-clear: VerticalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Clear all";
+                                                icon: Icons.trash;
+                                                show-icon: true;
+                                                kind: ButtonKind.destructive;
+                                                clicked => { root.confirm-clear = true; }
+                                            }
+                                        }
+                                        // Confirmed inline for four seconds rather than in a dialog.
+                                        if root.history.length > 0 && root.confirm-clear: HorizontalLayout {
+                                            alignment: start;
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Clear " + root.history.length + (root.history.length == 1 ? " clip?" : " clips?");
+                                                color: Theme.text-2;
+                                                font-size: 12px;
+                                                font-weight: 500;
+                                                height: 34px;
+                                                vertical-alignment: center;
+                                            }
+                                            VerticalLayout {
+                                                alignment: start;
+                                                Button {
+                                                    text: "Clear";
+                                                    kind: ButtonKind.danger;
+                                                    clicked => {
+                                                        root.confirm-clear = false;
+                                                        root.clear-history();
+                                                    }
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: start;
+                                                Button {
+                                                    text: "Cancel";
+                                                    kind: ButtonKind.ghost;
+                                                    clicked => { root.confirm-clear = false; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        y: parent.height - 1px;
+                                        height: 1px;
+                                        background: Theme.hairline;
                                     }
                                 }
 
-                                // Revealed on hover, so the list stays quiet until pointed at.
-                                // No width of its own: the component measures its own label, and
-                                // pinning a number here is what squeezed the text against the edges.
-                                Button {
-                                    text: "Forget";
-                                    h-pad: 12px;
-                                    height: 30px;
-                                    y: (parent.height - self.height) / 2;
-                                    visible: entry-touch.has-hover;
-                                    clicked => { root.forget-entry(index); }
+                                if root.sync-state == SyncState.offline || root.sync-state == SyncState.error: VerticalLayout {
+                                    padding-top: 12px;
+                                    padding-left: 24px;
+                                    padding-right: 24px;
+                                    Banner {
+                                        kind: BannerKind.info;
+                                        icon: Icons.offline;
+                                        title: "Offline. History is local until you reconnect.";
+                                    }
+                                }
+
+                                if !root.history-enabled: Rectangle {
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        padding-bottom: 24px;
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 64px;
+                                                height: 64px;
+                                                SoftShadow {
+                                                    radius: 18px;
+                                                    offset-y: 12px;
+                                                    blur: 32px;
+                                                    spread: -12px;
+                                                    strength: 0.8;
+                                                    steps: 14;
+                                                }
+                                              GradientFill {
+                                                radius: 18px;
+                                                angle: 145deg;
+                                                from: Theme.hero-from;
+                                                to: Theme.hero-to;
+                                              }
+                                              Rectangle {
+                                                border-radius: 18px;
+                                                border-width: 1px;
+                                                border-color: Theme.border;
+                                                Icon {
+                                                    source: Icons.history;
+                                                    size: 26px;
+                                                    tint: Theme.border-strong;
+                                                }
+                                              }
+                                            }
+                                        }
+                                        Rectangle { height: 16px; }
+                                        Text {
+                                            text: "History is off";
+                                            color: Theme.text;
+                                            font-size: 15px;
+                                            font-weight: 620;
+                                            letter-spacing: -0.1px;
+                                            horizontal-alignment: center;
+                                        }
+                                        Rectangle { height: 5px; }
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Text {
+                                                width: min(300px, parent.width);
+                                                text: "Turn it on in Settings to keep a local, encrypted list of what you copied.";
+                                                color: Theme.text-3;
+                                                font-size: 12.5px;
+                                                wrap: word-wrap;
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                        Rectangle { height: 16px; }
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Button {
+                                                text: "Open Settings";
+                                                small: true;
+                                                clicked => { root.open-screen(Screen.Settings); }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.history-enabled && root.history.length == 0: Rectangle {
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        padding-left: 48px;
+                                        padding-right: 48px;
+                                        padding-bottom: 24px;
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 64px;
+                                                height: 64px;
+                                                SoftShadow {
+                                                    radius: 18px;
+                                                    offset-y: 12px;
+                                                    blur: 32px;
+                                                    spread: -12px;
+                                                    strength: 0.8;
+                                                    steps: 14;
+                                                }
+                                              GradientFill {
+                                                radius: 18px;
+                                                angle: 145deg;
+                                                from: Theme.hero-from;
+                                                to: Theme.hero-to;
+                                              }
+                                              Rectangle {
+                                                border-radius: 18px;
+                                                border-width: 1px;
+                                                border-color: Theme.border;
+                                                Icon {
+                                                    source: Icons.copy;
+                                                    size: 26px;
+                                                    tint: Theme.border-strong;
+                                                }
+                                              }
+                                            }
+                                        }
+                                        Rectangle { height: 16px; }
+                                        Text {
+                                            text: "Nothing copied yet";
+                                            color: Theme.text;
+                                            font-size: 15px;
+                                            font-weight: 620;
+                                            letter-spacing: -0.1px;
+                                            horizontal-alignment: center;
+                                        }
+                                        Rectangle { height: 5px; }
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Text {
+                                                width: min(300px, parent.width);
+                                                text: "Copy something on any paired device and it shows up here within a second.";
+                                                color: Theme.text-3;
+                                                font-size: 12.5px;
+                                                wrap: word-wrap;
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                        Rectangle { height: 16px; }
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Button {
+                                                text: "Add another device";
+                                                small: true;
+                                                clicked => { root.open-screen(Screen.Token); }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.history-enabled && root.history.length > 0: Scroller {
+                                    vertical-stretch: 1;
+                                    content-height: rows.preferred-height;
+
+                                    rows := VerticalLayout {
+                                        padding-top: 12px;
+                                        padding-bottom: 20px;
+                                        padding-left: 24px;
+                                        padding-right: 24px;
+                                        spacing: 8px;
+                                        alignment: start;
+
+                                        for entry[index] in root.history: Rectangle {
+                                            height: entry.has-thumb ? 74px : 62px;
+                                            border-radius: 12px;
+                                            border-width: 1px;
+                                            background: row-touch.has-hover ? Theme.raised-2 : Theme.raised-1;
+                                            border-color: row-touch.has-hover ? Theme.border-strong : Theme.border-subtle;
+                                            transform-origin: { x: self.width / 2, y: self.height / 2 };
+                                            transform-scale-x: row-touch.pressed ? 99.5% : 100%;
+                                            transform-scale-y: row-touch.pressed ? 99.5% : 100%;
+                                            animate background, border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+                                            animate transform-scale-x, transform-scale-y { duration: 80ms; }
+                                            accessible-role: list-item;
+                                            accessible-label: entry.is-image ? "Image" : entry.preview;
+                                            accessible-description: entry.meta;
+                                            accessible-action-default => { root.restore-entry(index); }
+
+                                            row-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.restore-entry(index); }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-top: 11px;
+                                                padding-bottom: 11px;
+                                                padding-left: 12px;
+                                                padding-right: 12px;
+                                                spacing: 12px;
+
+                                                // Type tile: blue for text, green for an image, and
+                                                // a different glyph for each, so the two are told
+                                                // apart by shape as well as by hue.
+                                                if !entry.has-thumb: Rectangle {
+                                                    width: 38px;
+                                                    height: 38px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    border-radius: 9px;
+                                                    border-width: 1px;
+                                                    background: entry.is-image ? #3DD68C1A : #4C8DFF1A;
+                                                    border-color: entry.is-image ? Theme.success-border : Theme.accent-border;
+                                                    Icon {
+                                                        source: entry.is-image ? Icons.image : Icons.text;
+                                                        size: 16px;
+                                                        tint: entry.is-image ? Theme.success : Theme.link;
+                                                    }
+                                                }
+                                                // The thumbnail arrives with its corners already
+                                                // rounded: this renderer cannot clip to a radius.
+                                                if entry.has-thumb: Rectangle {
+                                                    width: 50px;
+                                                    height: 50px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    Image {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        source: entry.thumb;
+                                                        image-fit: cover;
+                                                    }
+                                                    Rectangle {
+                                                        border-radius: 9px;
+                                                        border-width: 1px;
+                                                        border-color: Theme.border;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: center;
+                                                    spacing: 2px;
+                                                    Text {
+                                                        text: entry.preview;
+                                                        color: Theme.text;
+                                                        font-size: entry.mono ? 12.5px : 13px;
+                                                        font-family: entry.mono ? Theme.mono : "";
+                                                        wrap: no-wrap;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        text: entry.meta;
+                                                        color: Theme.text-3;
+                                                        font-size: 11.5px;
+                                                        letter-spacing: 0.1px;
+                                                        overflow: elide;
+                                                    }
+                                                }
+
+                                                HorizontalLayout {
+                                                    spacing: 2px;
+                                                    IconButton {
+                                                        icon: Icons.copy;
+                                                        label: "Copy on this device only";
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.copy-entry(index); }
+                                                    }
+                                                    IconButton {
+                                                        icon: Icons.trash;
+                                                        destructive: true;
+                                                        label: "Delete";
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.forget-entry(index); }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if root.history-note != "": Caption {
+                                            text: root.history-note;
+                                            color: Theme.text-4;
+                                            horizontal-alignment: center;
+                                            height: self.preferred-height + 4px;
+                                            vertical-alignment: bottom;
+                                        }
+                                    }
                                 }
                             }
+                        }
 
-                            entry-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.restore-entry(index); }
+                        // ──────────────────────────── Status ─────────────────────────────
+                        if root.screen == Screen.Status: ScreenFrame {
+                            Scroller {
+                                content-height: status-screen.preferred-height;
+
+                                status-screen := VerticalLayout {
+                                    padding-top: 20px;
+                                    padding-bottom: 24px;
+                                    padding-left: 24px;
+                                    padding-right: 24px;
+                                    spacing: 0px;
+                                    alignment: start;
+
+                                    Title { text: "Status"; }
+                                    Rectangle { height: 14px; }
+
+                                    // The hero: what is happening, and the one thing to do about it.
+                                    Rectangle {
+                                      height: hero.preferred-height;
+                                      SoftShadow {
+                                        radius: 14px;
+                                        offset-y: 4px;
+                                        blur: 12px;
+                                        spread: -2px;
+                                        strength: 0.45;
+                                      }
+                                      GradientFill {
+                                        radius: 14px;
+                                        angle: 145deg;
+                                        from: Theme.hero-from;
+                                        to: Theme.hero-to;
+                                      }
+                                      Rectangle {
+                                        border-radius: 14px;
+                                        border-width: 1px;
+                                        border-color: States.edge(root.sync-state);
+                                        animate border-color { duration: 180ms; }
+
+                                        hero := VerticalLayout {
+                                            HorizontalLayout {
+                                                padding-top: 16px;
+                                                padding-bottom: 16px;
+                                                padding-left: 18px;
+                                                padding-right: 18px;
+                                                spacing: 14px;
+
+                                                Rectangle {
+                                                    width: 40px;
+                                                    height: 40px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    border-radius: 12px;
+                                                    border-width: 1px;
+                                                    background: States.tint(root.sync-state).with-alpha(0.1);
+                                                    border-color: States.edge(root.sync-state);
+                                                    StateDot {
+                                                        state: root.sync-state;
+                                                        hero: true;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: center;
+                                                    spacing: 2px;
+                                                    Text {
+                                                        text: root.state-label;
+                                                        color: States.tint(root.sync-state);
+                                                        font-size: 15px;
+                                                        font-weight: 620;
+                                                        letter-spacing: -0.1px;
+                                                    }
+                                                    Text {
+                                                        text: root.state-detail;
+                                                        color: Theme.text-2;
+                                                        font-size: 12px;
+                                                        wrap: word-wrap;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Button {
+                                                        pad-x: 16px;
+                                                        text: root.paused ? "Resume"
+                                                            : root.sync-state == SyncState.error ? "Retry now" : "Pause";
+                                                        icon: root.paused ? Icons.play
+                                                            : root.sync-state == SyncState.error ? Icons.refresh : Icons.pause;
+                                                        show-icon: true;
+                                                        clicked => {
+                                                            if (root.paused) {
+                                                                root.set-paused(false);
+                                                            } else if (root.sync-state == SyncState.error) {
+                                                                root.retry-now();
+                                                            } else {
+                                                                root.set-paused(true);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle { height: 1px; background: Theme.border; }
+
+                                            HorizontalLayout {
+                                                for stat[i] in [
+                                                    { key: "CONNECTIONS", value: root.stat-connections },
+                                                    { key: "LAST SYNC", value: root.stat-last-sync },
+                                                    { key: "SKIPPED", value: root.stat-skipped },
+                                                ]: Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    height: cell.preferred-height;
+                                                    cell := VerticalLayout {
+                                                        padding-top: 12px;
+                                                        padding-bottom: 12px;
+                                                        padding-left: 18px;
+                                                        padding-right: 18px;
+                                                        spacing: 4px;
+                                                        Overline { text: stat.key; }
+                                                        if !root.loading: Text {
+                                                            text: stat.value;
+                                                            color: Theme.text;
+                                                            font-size: 13px;
+                                                            font-weight: 500;
+                                                            overflow: elide;
+                                                        }
+                                                        if root.loading: Skeleton {
+                                                            width: 48px;
+                                                            height: 13px;
+                                                        }
+                                                    }
+                                                    if i < 2: Rectangle {
+                                                        x: parent.width - 1px;
+                                                        width: 1px;
+                                                        background: Theme.border-subtle;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                      }
+                                    }
+
+                                    // A clip copied while this device was away. Offered, never
+                                    // written unasked, because that would overwrite whatever was
+                                    // copied here since.
+                                    if root.has-retained: VerticalLayout {
+                                        padding-top: 14px;
+                                        Banner {
+                                            kind: BannerKind.info;
+                                            icon: Icons.download;
+                                            title: "The relay is holding a clip";
+                                            body: "Something was copied while this device was away. It isn't written automatically, because that would overwrite what you copied here since.";
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Button {
+                                                    text: "Paste it here";
+                                                    small: true;
+                                                    clicked => { root.request-retained(); }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle { height: 14px; }
+                                    Overline { text: "PAIRED DEVICES"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: device-list.preferred-height;
+                                        device-list := VerticalLayout {
+                                            for device[i] in root.devices: Rectangle {
+                                                height: device-row.preferred-height;
+                                                background: device-touch.has-hover ? Theme.raised-2 : transparent;
+                                                // Rounded where the card is. Clipping in the software
+                                                // renderer ignores the card's corners.
+                                                border-top-left-radius: i == 0 ? 13px : 0px;
+                                                border-top-right-radius: i == 0 ? 13px : 0px;
+                                                border-bottom-left-radius: i == root.devices.length - 1 ? 13px : 0px;
+                                                border-bottom-right-radius: i == root.devices.length - 1 ? 13px : 0px;
+                                                animate background { duration: 120ms; }
+                                                accessible-role: list-item;
+                                                accessible-label: device.name;
+                                                accessible-description: device.os + ", " + device.seen;
+
+                                                device-touch := TouchArea { }
+
+                                                device-row := HorizontalLayout {
+                                                    padding-top: 11px;
+                                                    padding-bottom: 11px;
+                                                    padding-left: 14px;
+                                                    padding-right: 14px;
+                                                    spacing: 11px;
+
+                                                    Rectangle {
+                                                        width: 30px;
+                                                        height: 30px;
+                                                        y: (parent.height - self.height) / 2;
+                                                        border-radius: 9px;
+                                                        border-width: 1px;
+                                                        background: Theme.raised-2;
+                                                        border-color: Theme.border;
+                                                        Icon {
+                                                            source: Icons.device;
+                                                            size: 15px;
+                                                            tint: Theme.text-2;
+                                                        }
+                                                    }
+
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        min-width: 0px;
+                                                        alignment: center;
+                                                        spacing: 1px;
+                                                        HorizontalLayout {
+                                                            spacing: 7px;
+                                                            alignment: start;
+                                                            Text {
+                                                                text: device.name;
+                                                                color: Theme.text;
+                                                                font-size: 13px;
+                                                                font-weight: 500;
+                                                                overflow: elide;
+                                                                vertical-alignment: center;
+                                                            }
+                                                            if device.this-device: Pill {
+                                                                text: "THIS DEVICE";
+                                                                y: (parent.height - self.height) / 2;
+                                                            }
+                                                        }
+                                                        HorizontalLayout {
+                                                            spacing: 0px;
+                                                            alignment: start;
+                                                            if device.os != "": Text {
+                                                                text: device.os + "  ·  ";
+                                                                color: Theme.text-3;
+                                                                font-size: 11.5px;
+                                                                vertical-alignment: center;
+                                                            }
+                                                            Text {
+                                                                text: device.id;
+                                                                color: Theme.text-3;
+                                                                font-size: 11.5px;
+                                                                font-family: Theme.mono;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    HorizontalLayout {
+                                                        spacing: 6px;
+                                                        horizontal-stretch: 0;
+                                                        Rectangle {
+                                                            width: 7px;
+                                                            height: 7px;
+                                                            y: (parent.height - self.height) / 2;
+                                                            border-radius: 3.5px;
+                                                            background: device.online ? Theme.success : Theme.text-3;
+                                                        }
+                                                        Text {
+                                                            text: device.seen;
+                                                            color: Theme.text-2;
+                                                            font-size: 11.5px;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+
+                                                if i < root.devices.length - 1: Rectangle {
+                                                    y: parent.height - 1px;
+                                                    height: 1px;
+                                                    background: Theme.border-subtle;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle { height: 14px; }
+                                    Overline { text: "CONNECTION"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: connection.preferred-height;
+                                        connection := VerticalLayout {
+                                            padding-top: 14px;
+                                            padding-bottom: 14px;
+                                            padding-left: 16px;
+                                            padding-right: 16px;
+
+                                            DetailRow { key: "Relay"; value: root.relay-url-live; }
+                                            DetailRow { key: "Room"; value: root.room-id; }
+                                            DetailRow { key: "Device"; value: root.device-id; }
+                                            DetailRow { key: "Clipboard"; value: root.clipboard-backend; }
+                                            Rectangle { height: 12px; }
+                                            HorizontalLayout {
+                                                alignment: start;
+                                                Button {
+                                                    text: "Copy diagnostics";
+                                                    icon: Icons.copy;
+                                                    show-icon: true;
+                                                    kind: ButtonKind.ghost;
+                                                    small: true;
+                                                    clicked => { root.copy-diagnostics(); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        }
+
+                        // ─────────────────────────── Settings ────────────────────────────
+                        if root.screen == Screen.Settings: ScreenFrame {
+                            Scroller {
+                                content-height: settings-screen.preferred-height;
+
+                                settings-screen := VerticalLayout {
+                                    padding-top: 20px;
+                                    padding-bottom: 24px;
+                                    padding-left: 24px;
+                                    padding-right: 24px;
+                                    spacing: 0px;
+                                    alignment: start;
+
+                                    Title { text: "Settings"; }
+                                    Rectangle { height: 14px; }
+
+                                    Overline { text: "RELAY"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: relay-card.preferred-height;
+                                        relay-card := VerticalLayout {
+                                            padding-top: 14px;
+                                            padding-bottom: 14px;
+                                            padding-left: 16px;
+                                            padding-right: 16px;
+                                            spacing: 0px;
+
+                                            Label { text: "Relay address"; }
+                                            Rectangle { height: 6px; }
+                                            TextField {
+                                                placeholder: "wss://asli.vnat.dev/v1";
+                                                monospace: true;
+                                                invalid: root.relay-invalid;
+                                                text <=> root.relay-url;
+                                            }
+                                            Rectangle { height: 6px; }
+                                            if !root.relay-invalid: Caption {
+                                                text: "Passes sealed bytes between your devices. It cannot read them.";
+                                            }
+                                            if root.relay-invalid: HorizontalLayout {
+                                                spacing: 6px;
+                                                Icon {
+                                                    source: Icons.alert;
+                                                    size: 14px;
+                                                    tint: Theme.error;
+                                                    y: 1px;
+                                                }
+                                                Caption {
+                                                    text: "Must start with wss:// or ws://";
+                                                    color: Theme.error;
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+                                            Rectangle { height: 14px; }
+                                            Label { text: "Largest clip to sync"; }
+                                            Rectangle { height: 6px; }
+                                            Select {
+                                                options: ["256 KB", "700 KB", "1 MB", "4 MB"];
+                                                current <=> root.size-cap-index;
+                                            }
+                                            Rectangle { height: 6px; }
+                                            Caption { text: "Anything bigger is skipped rather than sent."; }
+                                        }
+                                    }
+
+                                    Rectangle { height: 16px; }
+                                    Overline { text: "THIS DEVICE"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: device-card.preferred-height;
+                                        device-card := VerticalLayout {
+                                            VerticalLayout {
+                                                padding-top: 13px;
+                                                padding-bottom: 13px;
+                                                padding-left: 16px;
+                                                padding-right: 16px;
+                                                spacing: 0px;
+                                                Text {
+                                                    text: "Device name";
+                                                    color: Theme.text;
+                                                    font-size: 13px;
+                                                    font-weight: 500;
+                                                }
+                                                Rectangle { height: 6px; }
+                                                TextField {
+                                                    placeholder: "This computer";
+                                                    text <=> root.device-name;
+                                                }
+                                                Rectangle { height: 6px; }
+                                                Caption { text: "How your other devices list this one. Sent to them sealed, like a clip."; }
+                                            }
+                                            Divider { }
+                                            SettingRow {
+                                                title: "Notifications";
+                                                detail: "A short message when a clip arrives or something goes wrong.";
+                                                checked <=> root.notifications;
+                                                toggled(on) => { root.set-notifications(on); }
+                                            }
+                                            SettingRow {
+                                                title: "Start at login";
+                                                detail: root.autostart-detail;
+                                                mono-detail: true;
+                                                checked <=> root.autostart;
+                                                toggled(on) => { root.set-autostart(on); }
+                                            }
+                                            SettingRow {
+                                                title: "Keep history";
+                                                detail: "Stored on this device only, encrypted with your account key. Anything marked as a password is never recorded.";
+                                                checked <=> root.keep-history;
+                                                toggled(on) => { root.set-keep-history(on); }
+                                            }
+                                            VerticalLayout {
+                                                padding-top: 13px;
+                                                padding-bottom: 13px;
+                                                padding-left: 16px;
+                                                padding-right: 16px;
+                                                spacing: 0px;
+                                                Text {
+                                                    text: "Keep at most";
+                                                    color: root.keep-history ? Theme.text : Theme.text-4;
+                                                    font-size: 13px;
+                                                    font-weight: 500;
+                                                }
+                                                Rectangle { height: 6px; }
+                                                Select {
+                                                    options: ["25 entries", "50 entries", "100 entries", "250 entries"];
+                                                    enabled: root.keep-history;
+                                                    current <=> root.retention-index;
+                                                }
+                                                Rectangle { height: 6px; }
+                                                Caption { text: "Older entries are dropped first."; }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle { height: 14px; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Button {
+                                            text: root.settings-saving ? "Saving…" : "Save";
+                                            kind: ButtonKind.primary;
+                                            pad-x: 18px;
+                                            busy: root.settings-saving;
+                                            enabled: root.settings-dirty && !root.relay-invalid;
+                                            clicked => { root.save-settings(); }
+                                        }
+                                        Button {
+                                            text: "Revert";
+                                            kind: ButtonKind.ghost;
+                                            pad-x: 16px;
+                                            enabled: root.settings-dirty && !root.settings-saving;
+                                            clicked => { root.revert-settings(); }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        HorizontalLayout {
+                                            spacing: 5px;
+                                            if root.settings-saved-flash && !root.settings-dirty: Icon {
+                                                source: Icons.check;
+                                                size: 13px;
+                                                tint: Theme.success;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+                                            Text {
+                                                text: root.settings-dirty ? "Unsaved changes"
+                                                    : root.settings-saved-flash ? "Saved" : "All changes saved";
+                                                color: root.settings-dirty ? Theme.warning
+                                                    : root.settings-saved-flash ? Theme.success : Theme.text-4;
+                                                font-size: 11.5px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if root.settings-note != "": VerticalLayout {
+                                        padding-top: 10px;
+                                        Caption { text: root.settings-note; }
+                                    }
+
+                                    Rectangle { height: 20px; }
+                                    Overline {
+                                        text: "DANGER";
+                                        danger: true;
+                                    }
+                                    Rectangle { height: 8px; }
+                                    Rectangle {
+                                        border-radius: 14px;
+                                        border-width: 1px;
+                                        background: #F2555A0D;
+                                        border-color: Theme.error-border;
+                                        height: danger-card.preferred-height;
+
+                                        danger-card := VerticalLayout {
+                                            padding-top: 14px;
+                                            padding-bottom: 14px;
+                                            padding-left: 16px;
+                                            padding-right: 16px;
+                                            spacing: 12px;
+                                            Text {
+                                                text: "Joining another account replaces the one on this device. A single device can't be removed from an account, so if a join string leaked, create a new account and re-join your other devices.";
+                                                color: Theme.text-2;
+                                                font-size: 12px;
+                                                wrap: word-wrap;
+                                            }
+                                            HorizontalLayout {
+                                                alignment: start;
+                                                Button {
+                                                    text: "Join another account";
+                                                    kind: ButtonKind.danger;
+                                                    clicked => { root.confirm-join-other = true; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // The toast, 16 px above the bottom edge, centred.
+                        Toast {
+                            x: (parent.width - self.width) / 2;
+                            y: parent.height - self.height - (root.toast-shown ? 16px : 8px);
+                            text: root.toast-text;
+                            good: root.toast-good;
+                            shown: root.toast-shown;
+                            animate y { duration: 180ms; easing: cubic-bezier(0.05, 0.7, 0.1, 1); }
                         }
                     }
                 }
-
-                if root.history-note != "": Body { text: root.history-note; }
-
-                // Takes the leftover height so nothing else has to. Only when the list is empty:
-                // with rows present the Flickable already absorbs it, and two stretching children
-                // would split the space and shrink the list for no reason.
-                if root.history.length == 0: Rectangle { vertical-stretch: 1; }
             }
 
-            if root.screen == Screen.Settings: Flickable {
-                content-height: settings.preferred-height;
+            // Confirmation before leaving this account, over a scrim.
+            if root.confirm-join-other: Rectangle {
+                background: #00000099;
 
-                settings := VerticalLayout {
-                    padding: 28px;
-                    spacing: Metrics.gap;
-
-                    Heading { text: "Settings"; }
-
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 14px;
-
-                            Row {
-                                label: "Relay";
-                                detail: "The server that passes sealed bytes between your devices. It cannot read them.";
-                                Field {
-                                    placeholder: "wss://asli.vnat.dev/v1";
-                                    text <=> root.relay-url;
-                                }
-                            }
-
-                            Row {
-                                label: "Largest Clip to Sync";
-                                detail: "Anything bigger is skipped rather than sent.";
-                                Select {
-                                    options: ["256 KB", "700 KB", "1 MB", "4 MB"];
-                                    current <=> root.size-cap-index;
-                                }
-                            }
-                        }
-                    }
-
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 14px;
-
-                            Switch {
-                                text: "Notifications";
-                                detail: "A short message when a clip arrives or something goes wrong.";
-                                checked <=> root.notifications;
-                                toggled(on) => { root.set-notifications(on); }
-                            }
-
-                            Rectangle { height: 1px; background: Palette.line; }
-
-                            Switch {
-                                text: "Start at Login";
-                                detail: root.autostart-detail;
-                                checked <=> root.autostart;
-                                toggled(on) => { root.set-autostart(on); }
-                            }
-                        }
-                    }
-
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 14px;
-
-                            Switch {
-                                text: "Keep History";
-                                detail: "Stored on this device only, encrypted with your account key. Anything marked as a password is never recorded.";
-                                checked <=> root.keep-history;
-                                toggled(on) => { root.set-keep-history(on); }
-                            }
-
-                            Row {
-                                label: "Keep at Most";
-                                detail: "Older entries are dropped first.";
-                                Select {
-                                    options: ["25 entries", "50 entries", "100 entries", "250 entries"];
-                                    enabled: root.keep-history;
-                                    current <=> root.retention-index;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.settings-note != "": Body { text: root.settings-note; }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        Button {
-                            text: "Save";
-                            primary: true;
-                            enabled: root.settings-dirty;
-                            clicked => { root.save-settings(); }
-                        }
-                        Button {
-                            text: "Revert";
-                            enabled: root.settings-dirty;
-                            clicked => { root.revert-settings(); }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: Palette.line; }
-
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 10px;
-                            Heading { text: "Danger"; secondary: true; }
-                            Body {
-                                text: "Joining another account replaces the one on this device. There "
-                                    + "is no way to remove a single device from an account, so if a "
-                                    + "join string leaked, create a new account and re-join your "
-                                    + "other devices.";
-                            }
-                            HorizontalLayout {
-                                alignment: start;
-                                Button {
-                                    text: "Join Another Account";
-                                    danger: true;
-                                    clicked => { root.open-screen(Screen.Join); }
-                                }
-                            }
-                        }
-                    }
-
+                TouchArea {
+                    clicked => { root.confirm-join-other = false; }
                 }
-            }
 
-            if root.screen == Screen.Status: Flickable {
-                // Scrolls when the window is shorter than the screen. Without it the bottom
-                // of the screen was simply cut off, with no way to reach it.
-                content-height: status-screen.preferred-height;
+                SoftShadow {
+                    x: (parent.width - 420px) / 2;
+                    y: (parent.height - dialog.preferred-height) / 2;
+                    width: 420px;
+                    height: dialog.preferred-height;
+                    radius: 14px;
+                    offset-y: 12px;
+                    blur: 32px;
+                    spread: -6px;
+                    strength: 0.6;
+                    steps: 14;
+                }
 
-                status-screen := VerticalLayout {
-                    padding: 28px;
-                    spacing: Metrics.gap;
+                Rectangle {
+                    width: 420px;
+                    height: dialog.preferred-height;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    background: Theme.raised-2;
+                    border-color: Theme.border;
 
-                    Heading { text: "Status"; }
+                    TouchArea { }
 
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 12px;
-
-                            HorizontalLayout {
-                                spacing: Metrics.gap;
-                                StatusDot {
-                                    tint: root.paused
-                                        ? Palette.warn
-                                        : root.connection == "Synced" ? Palette.good : Palette.bad;
-                                    text: root.paused ? "Paused" : root.connection;
-                                    horizontal-stretch: 1;
-                                }
-                                Button {
-                                    text: root.paused ? "Resume" : "Pause";
-                                    primary: root.paused;
-                                    clicked => { root.set-paused(!root.paused); }
-                                }
-                            }
-
-                            Rectangle { height: 1px; background: Palette.line; }
-
-                            // Each column packs to the top. Left to fill the row's height instead, a
-                            // label and its own value drifted a hundred pixels apart and stopped
-                            // reading as a pair.
-                            HorizontalLayout {
-                                spacing: Metrics.gap;
-                                VerticalLayout {
-                                    spacing: 3px;
-                                    alignment: start;
-                                    horizontal-stretch: 1;
-                                    Body { text: "Connected"; }
-                                    Text {
-                                        // Connections, not devices: the relay cannot see devices, and
-                                        // saying otherwise would be a number we cannot stand behind.
-                                        text: root.peers == 1 ? "1 connection" : root.peers + " connections";
-                                        color: Palette.text;
-                                        font-size: 13px;
-                                        font-weight: 500;
-                                    }
-                                }
-                                VerticalLayout {
-                                    spacing: 3px;
-                                    alignment: start;
-                                    horizontal-stretch: 1;
-                                    Body { text: "Last Sync"; }
-                                    Text {
-                                        text: root.last-sync;
-                                        color: Palette.text;
-                                        font-size: 13px;
-                                        font-weight: 500;
-                                    }
-                                }
-                                VerticalLayout {
-                                    spacing: 3px;
-                                    alignment: start;
-                                    horizontal-stretch: 1;
-                                    Body { text: "Skipped"; }
-                                    Text {
-                                        text: root.skipped;
-                                        color: Palette.text;
-                                        font-size: 13px;
-                                        font-weight: 500;
-                                    }
-                                }
-                            }
+                    dialog := VerticalLayout {
+                        padding: 20px;
+                        spacing: 0px;
+                        Text {
+                            text: "Join another account?";
+                            color: Theme.text;
+                            font-size: 15px;
+                            font-weight: 620;
+                            letter-spacing: -0.1px;
                         }
-                    }
-
-                    if root.has-retained: Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
+                        Rectangle { height: 6px; }
+                        Text {
+                            text: "This device leaves its current account. Your other devices keep syncing with each other, and the current account can only be rejoined with its join string.";
+                            color: Theme.text-2;
+                            font-size: 12.5px;
+                            wrap: word-wrap;
+                        }
+                        Rectangle { height: 18px; }
+                        HorizontalLayout {
                             spacing: 8px;
-                            Heading { text: "The relay is holding a clip"; }
-                            Body {
-                                text: "Something was copied while this device was away. It is not "
-                                    + "written automatically, because that would overwrite whatever you "
-                                    + "copied here since.";
+                            alignment: end;
+                            Button {
+                                text: "Cancel";
+                                kind: ButtonKind.ghost;
+                                clicked => { root.confirm-join-other = false; }
                             }
-                            HorizontalLayout {
-                                alignment: start;
-                                Button {
-                                    text: "Paste It Here";
-                                    primary: true;
-                                    clicked => { root.request-retained(); }
+                            Button {
+                                text: "Continue";
+                                kind: ButtonKind.danger;
+                                clicked => {
+                                    root.confirm-join-other = false;
+                                    root.open-screen(Screen.Join);
                                 }
                             }
                         }
                     }
-
-                    if root.last-error != "": Card {
-                        border-color: Palette.bad;
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 6px;
-                            Heading { text: "Last Problem"; secondary: true; }
-                            Body { text: root.last-error; strong: true; }
-                        }
-                    }
-
-                    Card {
-                        VerticalLayout {
-                            padding: Metrics.pad;
-                            spacing: 10px;
-                            Heading { text: "This Device"; secondary: true; }
-
-                            // The label column has a fixed width and the value starts immediately
-                            // after it. Pushing the value to the right edge instead put a whole
-                            // screen of empty between a label and the thing it names once the
-                            // window went landscape.
-                            HorizontalLayout {
-                                spacing: Metrics.gap;
-                                Body { text: "Relay"; width: 110px; }
-                                Body { text: root.relay-host; strong: true; horizontal-stretch: 1; }
-                            }
-                            HorizontalLayout {
-                                spacing: Metrics.gap;
-                                Body { text: "Room"; width: 110px; }
-                                Body { text: root.room-id; strong: true; horizontal-stretch: 1; }
-                            }
-                            HorizontalLayout {
-                                spacing: Metrics.gap;
-                                Body { text: "Device"; width: 110px; }
-                                Body { text: root.device-id; strong: true; horizontal-stretch: 1; }
-                            }
-                            HorizontalLayout {
-                                spacing: Metrics.gap;
-                                Body { text: "Clipboard"; width: 110px; }
-                                Body { text: root.clipboard-backend; strong: true; horizontal-stretch: 1; }
-                            }
-
-                            HorizontalLayout {
-                                alignment: start;
-                                Button {
-                                    text: "Copy Diagnostics";
-                                    clicked => { root.copy-diagnostics(); }
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle { vertical-stretch: 1; }
                 }
             }
         }
     }
-}
 }

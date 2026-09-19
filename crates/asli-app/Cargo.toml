@@ -39,6 +39,8 @@ directories = "6"
 # clipboard this app synchronises. fast_qr is the maintained option; qrcode has had no release
 # since 2024.
 fast_qr = "0.14"
+# Decodes a history image into its thumbnail. Already in the tree through the clipboard crate.
+png = "0.18"
 # Default features give Windows Credential Manager, macOS Keychain and Linux Secret Service over
 # pure Rust zbus, which is exactly the set we want and no native libdbus build dependency.
 keyring = "4"

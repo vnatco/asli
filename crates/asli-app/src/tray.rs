@@ -193,7 +193,7 @@ pub struct Tray {
     retained_item: MenuItem,
     paused: Arc<AtomicBool>,
     /// The state the icon currently shows, so it is only redrawn when it actually changes.
-    icon_state: Mutex<IconState>,
+    icon_state: Mutex<(IconState, bool)>,
 }
 
 impl Tray {
@@ -248,7 +248,7 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Asli")
-            .with_icon(icon_for(IconState::Offline)?)
+            .with_icon(icon_for(IconState::Offline, false)?)
             // A left click opens the window and a right click opens the menu, as on every other
             // tray application. The default on Windows and macOS is the menu for both.
             .with_menu_on_left_click(false)
@@ -262,7 +262,7 @@ impl Tray {
             pause_item,
             retained_item,
             paused,
-            icon_state: Mutex::new(IconState::Offline),
+            icon_state: Mutex::new((IconState::Offline, false)),
         })
     }
 
@@ -290,10 +290,14 @@ impl Tray {
 
         // Redrawn only on a change: refresh runs every second, and rebuilding the buffer each
         // time would be pointless work for a picture that almost never changes.
-        let wanted = IconState::from_status(&status.state, paused);
+        let state = IconState::from_status(&status.state, paused);
         let mut current = self.icon_state.lock().expect("icon state lock");
+        // Connecting alternates its badge on every refresh, which is the only state that
+        // redraws without changing.
+        let blink = state == IconState::Connecting && !current.1;
+        let wanted = (state, blink);
         if *current != wanted {
-            if let Ok(icon) = icon_for(wanted) {
+            if let Ok(icon) = icon_for(state, blink) {
                 let _ = self.icon.set_icon(Some(icon));
                 *current = wanted;
             }
@@ -354,11 +358,14 @@ impl Tray {
 /// looks identical whether syncing works or died an hour ago is decoration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconState {
-    /// Connected to the relay.
+    /// Connected to the relay: a green badge.
     Connected,
-    /// Deliberately paused by the person.
+    /// Reaching the relay. Alternates between no badge and the connected one, so it reads as
+    /// something happening rather than something settled.
+    Connecting,
+    /// Deliberately paused by the person: a grey badge.
     Paused,
-    /// Not connected, retrying, or rejected.
+    /// Not connected and retrying, or refused: a red badge.
     Offline,
 }
 
@@ -370,6 +377,8 @@ impl IconState {
             Self::Paused
         } else if state.starts_with("Synced") {
             Self::Connected
+        } else if state.starts_with("Connecting") {
+            Self::Connecting
         } else {
             Self::Offline
         }
@@ -378,16 +387,16 @@ impl IconState {
 
 /// Icon side in pixels.
 ///
-/// Drawn at 32 and scaled down by the host. Trays render at 16 or 22 on most desktops, so the
-/// mark has to survive being halved, which is why it is two heavy shapes rather than fine detail.
+/// The design draws the mark on a 16 unit grid. It is rendered here at twice that and scaled down
+/// by the host, which keeps it sharp on the 22 and 32 pixel trays of high density displays.
 const ICON_SIZE: u32 = 32;
 
-/// Builds the icon for a state.
+/// Builds the icon for a state. `blink` picks the second frame of the connecting animation.
 ///
-/// The mark is two overlapping rounded squares, the back one offset up and right: a copy, which
-/// is what this application does and what the name means. Colour carries the state, and so does
-/// the offset shape, because a person with any common form of colour blindness gets no
-/// information from hue alone.
+/// The mark is two sheets, the back one an outline peeking out on the left and the front one
+/// solid: a copy, which is what this application does. The state is a badge in the lower right,
+/// cut into the front sheet so it reads against any taskbar. A person who cannot tell the badge
+/// colours apart still gets presence or absence of the badge, and its position.
 ///
 /// Generated in code rather than shipped as a file. A runtime file lookup is a packaging problem
 /// on three platforms for something this small, and a missing icon file means an invisible tray.
@@ -396,84 +405,95 @@ const ICON_SIZE: u32 = 32;
 ///
 /// Returns [`Error::ConfigDir`] if the buffer does not match the dimensions, which would be an
 /// arithmetic mistake in the drawing loop rather than anything environmental.
-pub fn icon_for(state: IconState) -> Result<Icon> {
-    // Foreground, and the accent used for the state dot.
-    let (fg, accent) = match state {
-        // Neutral and bright: nothing to report is the normal case and should not shout.
-        IconState::Connected => ([0xe8, 0xe8, 0xe8], [0x4c, 0xd1, 0x64]),
-        // Amber, and the front sheet is hollow, so a paused tray reads as paused at 16 pixels.
-        IconState::Paused => ([0xc8, 0xc8, 0xc8], [0xe0, 0xa8, 0x30]),
-        // Dimmed, so an offline tray recedes rather than demanding attention it cannot satisfy.
-        IconState::Offline => ([0x8a, 0x8a, 0x8a], [0xd0, 0x4c, 0x4c]),
-    };
-
+pub fn icon_for(state: IconState, blink: bool) -> Result<Icon> {
+    let badge = badge_colour(state, blink);
     let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
-
     for y in 0..ICON_SIZE {
         for x in 0..ICON_SIZE {
-            let pixel = draw_pixel(x, y, state, fg, accent);
-            rgba.extend_from_slice(&pixel);
+            rgba.extend_from_slice(&draw_pixel(x, y, badge));
         }
     }
-
     Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
         .map_err(|e| Error::ConfigDir(format!("could not build the tray icon: {e}")))
 }
 
-/// One pixel of the mark.
-///
-/// Split out so the shape is testable without constructing an [`Icon`], and so the loop above
-/// stays readable.
-fn draw_pixel(x: u32, y: u32, state: IconState, fg: [u8; 3], accent: [u8; 3]) -> [u8; 4] {
-    // Back sheet: offset up and to the right, drawn as an outline only where it is not covered.
-    let back = rounded(x, y, 11, 3, 28, 20);
-    let front = rounded(x, y, 4, 10, 21, 27);
-    let front_inner = rounded(x, y, 7, 13, 18, 24);
-
-    // The state dot sits in the lower right, where it survives being scaled to 16 pixels.
-    let dot = {
-        let dx = i64::from(x) - 24;
-        let dy = i64::from(y) - 24;
-        dx * dx + dy * dy <= 25
-    };
-
-    if dot {
-        return [accent[0], accent[1], accent[2], 0xff];
+/// The badge colour for a state, or none.
+const fn badge_colour(state: IconState, blink: bool) -> Option<[u8; 3]> {
+    match state {
+        IconState::Connected => Some([0x3D, 0xD6, 0x8C]),
+        IconState::Connecting if blink => Some([0x3D, 0xD6, 0x8C]),
+        IconState::Connecting => None,
+        IconState::Paused => Some([0x6E, 0x7A, 0x92]),
+        IconState::Offline => Some([0xF2, 0x55, 0x5A]),
     }
-
-    if front {
-        // Paused is hollow, so the state is legible without colour.
-        let hollow = matches!(state, IconState::Paused) && front_inner;
-        if hollow {
-            return [0, 0, 0, 0];
-        }
-        return [fg[0], fg[1], fg[2], 0xff];
-    }
-
-    if back {
-        // The back sheet is dimmer, which is what makes it read as behind rather than beside.
-        // Integer maths on a u8 channel: 3/5 of 255 is 153, so this cannot overflow, but saying
-        // so with saturation is cheaper than an allow attribute.
-        let dim = |c: u8| u8::try_from(u16::from(c) * 3 / 5).unwrap_or(u8::MAX);
-        return [dim(fg[0]), dim(fg[1]), dim(fg[2]), 0xff];
-    }
-
-    [0, 0, 0, 0]
 }
 
-/// Whether a point falls inside a rectangle with its corners cut.
+/// One pixel of the mark, antialiased by sampling it sixteen times.
 ///
-/// A sharp corner at tray size looks like a rendering fault, and a real rounded rectangle needs
-/// antialiasing this does not have, so the corners are simply clipped.
-fn rounded(x: u32, y: u32, left: u32, top: u32, right: u32, bottom: u32) -> bool {
-    if x < left || x >= right || y < top || y >= bottom {
-        return false;
+/// Split out so the shape is testable without constructing an [`Icon`], and so the loop above
+/// stays readable. Coordinates below are the design's 16 unit grid.
+fn draw_pixel(x: u32, y: u32, badge: Option<[u8; 3]>) -> [u8; 4] {
+    const SAMPLES: u32 = 4;
+    #[allow(clippy::cast_precision_loss)]
+    let unit =
+        |p: u32, s: u32| (p as f32 + (s as f32 + 0.5) / SAMPLES as f32) * 16.0 / ICON_SIZE as f32;
+
+    let (mut back, mut front, mut hole, mut dot) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for sy in 0..SAMPLES {
+        for sx in 0..SAMPLES {
+            let (ux, uy) = (unit(x, sx), unit(y, sy));
+            back += f32::from(u8::from(back_sheet(ux, uy)));
+            front += f32::from(u8::from(
+                rounded_box(ux, uy, 4.5, 3.0, 14.5, 13.0, 3.0) <= 0.0,
+            ));
+            let badge_distance = (ux - 12.5).hypot(uy - 12.5);
+            hole += f32::from(u8::from(badge.is_some() && badge_distance <= 3.5));
+            dot += f32::from(u8::from(badge.is_some() && badge_distance <= 2.25));
+        }
     }
-    let near_left = x < left + 2;
-    let near_right = x >= right - 2;
-    let near_top = y < top + 2;
-    let near_bottom = y >= bottom - 2;
-    !((near_left || near_right) && (near_top || near_bottom))
+    #[allow(clippy::cast_precision_loss)]
+    let total = (SAMPLES * SAMPLES) as f32;
+    let (back, front, hole, dot) = (back / total, front / total, hole / total, dot / total);
+
+    // White sheets: the front solid, the back at 55 %, behind it.
+    let sheets = (front + back * 0.55 * (1.0 - front)) * (1.0 - hole);
+    let (colour, alpha) = match badge {
+        Some(badge) if dot > 0.0 => {
+            let alpha = dot + sheets * (1.0 - dot);
+            let mix = |c: u8| {
+                let premultiplied = f32::from(c) * dot + 255.0 * sheets * (1.0 - dot);
+                premultiplied / alpha.max(f32::EPSILON)
+            };
+            ([mix(badge[0]), mix(badge[1]), mix(badge[2])], alpha)
+        }
+        _ => ([255.0; 3], sheets),
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+    [
+        byte(colour[0]),
+        byte(colour[1]),
+        byte(colour[2]),
+        byte(alpha * 255.0),
+    ]
+}
+
+/// The back sheet: the left edge of a rounded square, stroked 1.5 wide with round ends, peeking
+/// out from behind the front one.
+fn back_sheet(x: f32, y: f32) -> bool {
+    const HALF_STROKE: f32 = 0.75;
+    let on_outline = rounded_box(x, y, 1.5, 4.0, 40.0, 13.0, 2.0).abs() <= HALF_STROKE;
+    let within = x <= 4.5;
+    let cap = (x - 4.5).hypot(y - 4.0) <= HALF_STROKE || (x - 4.5).hypot(y - 13.0) <= HALF_STROKE;
+    (on_outline && within) || cap
+}
+
+/// Signed distance from a point to a rounded rectangle: negative inside.
+fn rounded_box(x: f32, y: f32, left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> f32 {
+    let (cx, cy) = (f32::midpoint(left, right), f32::midpoint(top, bottom));
+    let (hx, hy) = ((right - left) / 2.0 - radius, (bottom - top) / 2.0 - radius);
+    let (qx, qy) = ((x - cx).abs() - hx, (y - cy).abs() - hy);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
 }
 
 /// Renders a timestamp as something a person reads at a glance.
@@ -638,26 +658,46 @@ mod tests {
     fn every_icon_state_is_well_formed_rgba() {
         // Icon::from_rgba rejects a buffer whose length does not match the dimensions, so this
         // catches an arithmetic slip in the drawing loop.
-        for state in [IconState::Connected, IconState::Paused, IconState::Offline] {
-            icon_for(state).unwrap_or_else(|e| panic!("{state:?} must be valid: {e}"));
+        for state in [
+            IconState::Connected,
+            IconState::Connecting,
+            IconState::Paused,
+            IconState::Offline,
+        ] {
+            for blink in [false, true] {
+                icon_for(state, blink).unwrap_or_else(|e| panic!("{state:?} must be valid: {e}"));
+            }
         }
     }
 
     #[test]
-    fn the_three_states_actually_look_different() {
+    fn the_states_actually_look_different() {
         // An icon that is identical in every state is decoration, which is the complaint that
         // prompted this. Compare the raw pixels rather than trusting the colour constants.
-        let pixels = |state: IconState| -> Vec<u8> {
-            let fg = [0xe8, 0xe8, 0xe8];
-            let accent = [0x4c, 0xd1, 0x64];
+        let pixels = |state: IconState, blink: bool| -> Vec<u8> {
+            let badge = badge_colour(state, blink);
             (0..ICON_SIZE)
-                .flat_map(|y| (0..ICON_SIZE).flat_map(move |x| draw_pixel(x, y, state, fg, accent)))
+                .flat_map(|y| (0..ICON_SIZE).flat_map(move |x| draw_pixel(x, y, badge)))
                 .collect()
         };
+        let connected = pixels(IconState::Connected, false);
+        assert_ne!(connected, pixels(IconState::Paused, false));
+        assert_ne!(connected, pixels(IconState::Offline, false));
         assert_ne!(
-            pixels(IconState::Connected),
-            pixels(IconState::Paused),
-            "paused must be distinguishable from connected without colour"
+            pixels(IconState::Connecting, false),
+            pixels(IconState::Connecting, true),
+            "connecting must visibly alternate"
+        );
+        // The badge is a hole cut into the sheet, so it reads on any taskbar colour.
+        let at = |x: u32, y: u32| ((y * ICON_SIZE + x) * 4) as usize;
+        let normal = pixels(IconState::Connecting, false);
+        assert!(
+            normal[at(22, 22) + 3] > 200,
+            "without a badge the corner is solid"
+        );
+        assert!(
+            connected[at(28, 21) + 3] < 60,
+            "the badge is ringed by a transparent gap"
         );
     }
 
@@ -668,6 +708,10 @@ mod tests {
             IconState::Connected
         );
         assert_eq!(IconState::from_status("Synced", true), IconState::Paused);
+        assert_eq!(
+            IconState::from_status("Connecting", false),
+            IconState::Connecting
+        );
         assert_eq!(
             IconState::from_status("Offline, retrying", false),
             IconState::Offline

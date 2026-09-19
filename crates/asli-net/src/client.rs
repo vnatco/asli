@@ -13,12 +13,13 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use crate::envelope::{AuthFailCode, ErrorCode};
 use crate::error::{Error, Result};
 use crate::session::{Action, Session};
+pub use crate::session::{DeviceInfo, PeerInfo};
 
 /// Something originating on this device that the connection must carry.
 ///
 /// A channel of `String` could only ever carry text, which silently made images unsendable and
-/// left the retained fetch with no route to the socket at all. Naming the three things a client
-/// can originate makes each one reach the right `Session` method instead.
+/// left the retained fetch with no route to the socket at all. Naming the things a client can
+/// originate makes each one reach the right `Session` method instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LocalEvent {
@@ -31,6 +32,9 @@ pub enum LocalEvent {
     /// Explicit by design: a retained clip is never applied automatically on connect, because a
     /// device that just copied something locally would lose it to a stale clip from the relay.
     FetchRetained,
+    /// This device's name or operating system changed. Announced at once when connected, and
+    /// used for every announcement after.
+    DeviceInfo(DeviceInfo),
 }
 
 /// A clip that arrived, decrypted and validated.
@@ -46,6 +50,8 @@ pub struct ReceivedClip {
     /// an explicit action instead, or a device that just copied something locally will lose it to
     /// a stale clip from the relay.
     pub retained: bool,
+    /// The device that copied it, from inside the ciphertext.
+    pub device_id: [u8; 16],
 }
 
 /// Something worth telling the rest of the application about.
@@ -73,7 +79,14 @@ pub enum ClientEvent {
         png: Vec<u8>,
         /// Capture time from inside the ciphertext.
         ts_ms: u64,
+        /// The device that copied it, from inside the ciphertext.
+        device_id: [u8; 16],
     },
+    /// Another device announced its name and operating system.
+    ///
+    /// Sent by each device when it connects and again whenever the room's connection count
+    /// changes, so after a count goes down, a device that stays silent is the one that left.
+    Peer(PeerInfo),
     /// The room connection count changed.
     Presence {
         /// Connections in the room.
@@ -322,7 +335,8 @@ async fn send_local(
     confirming: &mut Option<u64>,
 ) -> Result<()> {
     for event in events {
-        let copy = (!matches!(event, LocalEvent::FetchRetained)).then(|| event.clone());
+        let copy =
+            matches!(event, LocalEvent::Text(_) | LocalEvent::Image(_)).then(|| event.clone());
         let frames = frames_for(session, event, on_event)?;
         let sent_something = !frames.is_empty();
         for frame in frames {
@@ -370,12 +384,23 @@ async fn apply_action(
             text,
             ts_ms,
             retained,
+            device_id,
         } => on_event(ClientEvent::Clip(ReceivedClip {
             text,
             ts_ms,
             retained,
+            device_id,
         })),
-        Action::Image { png, ts_ms } => on_event(ClientEvent::Image { png, ts_ms }),
+        Action::Image {
+            png,
+            ts_ms,
+            device_id,
+        } => on_event(ClientEvent::Image {
+            png,
+            ts_ms,
+            device_id,
+        }),
+        Action::Peer(peer) => on_event(ClientEvent::Peer(peer)),
         Action::Presence { peers } => on_event(ClientEvent::Presence { peers }),
         Action::RelayError {
             code,
@@ -416,20 +441,24 @@ const SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(70);
 ///
 /// The clipboard is last write wins, so of several copies made while waiting only the newest
 /// matters, and sending them all in one burst would run straight into the relay's rate limit. A
-/// request for the stored clip is kept alongside, since it is not a copy.
+/// request for the stored clip is kept alongside, since it is not a copy, and so is the newest
+/// device information, which goes first so the copy after it is sent under the new name.
 fn coalesce(first: LocalEvent, local_rx: &mut mpsc::Receiver<LocalEvent>) -> Vec<LocalEvent> {
     let mut newest_copy = None;
+    let mut newest_info = None;
     let mut fetch = false;
     let mut take = |event: LocalEvent| match event {
         LocalEvent::FetchRetained => fetch = true,
+        LocalEvent::DeviceInfo(info) => newest_info = Some(LocalEvent::DeviceInfo(info)),
         copy => newest_copy = Some(copy),
     };
     take(first);
     while let Ok(next) = local_rx.try_recv() {
         take(next);
     }
-    newest_copy
+    newest_info
         .into_iter()
+        .chain(newest_copy)
         .chain(fetch.then_some(LocalEvent::FetchRetained))
         .collect()
 }
@@ -479,6 +508,11 @@ fn frames_for(
             Err(Error::OutOfOrder(_)) => Ok(Vec::new()),
             Err(other) => Err(other),
         },
+        // Stored whatever happens, so a name changed while offline is the one announced next.
+        LocalEvent::DeviceInfo(info) => {
+            session.set_device_info(info);
+            Ok(session.announce_frame(now_ms())?.into_iter().collect())
+        }
     }
 }
 
@@ -501,6 +535,25 @@ mod tests {
         assert_eq!(batch.len(), 2);
         assert!(matches!(&batch[0], LocalEvent::Text(text) if text == "newest"));
         assert!(matches!(batch[1], LocalEvent::FetchRetained));
+    }
+
+    #[test]
+    fn device_information_is_never_mistaken_for_a_copy() {
+        let info = |name: &str| {
+            LocalEvent::DeviceInfo(DeviceInfo {
+                name: name.to_owned(),
+                os: "Linux".to_owned(),
+            })
+        };
+        let (tx, mut rx) = mpsc::channel(16);
+        tx.try_send(LocalEvent::Text("copied".to_owned()))
+            .expect("queued");
+        tx.try_send(info("renamed")).expect("queued");
+
+        let batch = coalesce(info("first"), &mut rx);
+        assert_eq!(batch.len(), 2, "one name and one copy, got {batch:?}");
+        assert!(matches!(&batch[0], LocalEvent::DeviceInfo(i) if i.name == "renamed"));
+        assert!(matches!(&batch[1], LocalEvent::Text(text) if text == "copied"));
     }
 
     #[test]

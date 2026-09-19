@@ -5,7 +5,7 @@
 //! the change was deliberate, it is a protocol version bump, not a fixture update.
 
 use asli_crypto::chunk::{self, Assembly, ChunkPos};
-use asli_crypto::{auth, clip, identity, kdf, token};
+use asli_crypto::{announce, auth, clip, identity, kdf, token};
 use serde_json::Value;
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -317,4 +317,57 @@ fn a_frozen_chunk_does_not_open_at_the_wrong_position() {
         &unhex(hex_field(entry, "ciphertext")),
     );
     assert!(moved.is_err(), "a moved chunk must not verify");
+}
+
+#[test]
+fn announcement_sealing_matches_the_frozen_vector() {
+    let v = vectors();
+    let secret: [u8; 32] = array(hex_field(&v, "secret"));
+    let id = identity::Identity::from_secret(&secret);
+    let a = &v["announce"];
+
+    let msg_id: [u8; 16] = array(hex_field(a, "msg_id"));
+    let nonce: [u8; 24] = array(hex_field(a, "nonce"));
+    let epoch = u32::try_from(a["epoch"].as_u64().unwrap()).unwrap();
+
+    let aad = clip::build_aad(
+        clip::PROTOCOL_VERSION,
+        announce::TYPE_ANNOUNCE,
+        epoch,
+        &id.room_id_bytes(),
+        &msg_id,
+    );
+    assert_eq!(unhex(hex_field(a, "aad")), aad);
+
+    let inner = announce::Announce {
+        device_id: array(hex_field(a, "device_id")),
+        ts_ms: a["ts_ms"].as_u64().unwrap(),
+        name: a["name"].as_str().unwrap().to_owned(),
+        os: a["os"].as_str().unwrap().to_owned(),
+    };
+    let plaintext = announce::encode(&inner).expect("encodes");
+    assert_eq!(unhex(hex_field(a, "plaintext")), plaintext.as_slice());
+    assert_eq!(plaintext.len(), announce::PLAINTEXT_LEN);
+
+    let sealed = announce::seal_with_nonce(
+        &id.enc_key(epoch),
+        epoch,
+        &id.room_id_bytes(),
+        &msg_id,
+        &nonce,
+        &inner,
+    )
+    .expect("seals");
+    assert_eq!(unhex(hex_field(a, "ciphertext")), sealed);
+
+    let opened = announce::open(
+        &id.enc_key(epoch),
+        epoch,
+        &id.room_id_bytes(),
+        &msg_id,
+        &nonce,
+        &sealed,
+    )
+    .expect("opens");
+    assert_eq!(opened, inner);
 }

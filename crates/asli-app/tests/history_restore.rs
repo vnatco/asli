@@ -63,13 +63,24 @@ fn clicking_a_row_puts_that_exact_entry_back_on_the_clipboard() {
     let mut history =
         history_store::open(&scratch.paths(), &secret, &config(10)).expect("history opens");
 
-    history.record(HistoryContent::Text("first thing".to_owned()), false, 1_000);
+    history.record(
+        HistoryContent::Text("first thing".to_owned()),
+        false,
+        1_000,
+        [0; 16],
+    );
     history.record(
         HistoryContent::Text("second thing".to_owned()),
         false,
         2_000,
+        [0; 16],
     );
-    history.record(HistoryContent::Text("third thing".to_owned()), false, 3_000);
+    history.record(
+        HistoryContent::Text("third thing".to_owned()),
+        false,
+        3_000,
+        [0; 16],
+    );
 
     // The screen draws this list top down, so row 0 is the newest.
     let rows = history.entries();
@@ -100,7 +111,7 @@ fn an_image_entry_comes_back_as_an_image() {
         history_store::open(&scratch.paths(), &secret, &config(10)).expect("history opens");
 
     let png = b"\x89PNG\r\n\x1a\nnot a real image but distinct bytes".to_vec();
-    history.record(HistoryContent::ImagePng(png.clone()), false, 1_000);
+    history.record(HistoryContent::ImagePng(png.clone()), false, 1_000, [0; 16]);
 
     let rows = history.entries();
     assert!(rows[0].is_image, "an image must be listed as an image");
@@ -131,8 +142,18 @@ fn a_password_is_never_recorded_and_so_can_never_be_restored() {
     let mut history =
         history_store::open(&scratch.paths(), &secret, &config(10)).expect("history opens");
 
-    history.record(HistoryContent::Text("hunter2".to_owned()), true, 1_000);
-    history.record(HistoryContent::Text("ordinary".to_owned()), false, 2_000);
+    history.record(
+        HistoryContent::Text("hunter2".to_owned()),
+        true,
+        1_000,
+        [0; 16],
+    );
+    history.record(
+        HistoryContent::Text("ordinary".to_owned()),
+        false,
+        2_000,
+        [0; 16],
+    );
 
     let rows = history.entries();
     assert_eq!(rows.len(), 1, "only the ordinary clip should be kept");
@@ -154,7 +175,12 @@ fn history_survives_a_restart_and_still_decrypts() {
     {
         let mut history =
             history_store::open(&scratch.paths(), &secret, &config(10)).expect("history opens");
-        history.record(HistoryContent::Text("written before".to_owned()), false, 1);
+        history.record(
+            HistoryContent::Text("written before".to_owned()),
+            false,
+            1,
+            [0; 16],
+        );
     }
 
     let reopened =
@@ -189,6 +215,7 @@ fn a_file_from_another_account_is_discarded_rather_than_refused() {
             HistoryContent::Text("belongs to the old account".to_owned()),
             false,
             1,
+            [0; 16],
         );
     }
 
@@ -208,9 +235,24 @@ fn forgetting_a_row_removes_that_row_and_no_other() {
     let mut history =
         history_store::open(&scratch.paths(), &secret, &config(10)).expect("history opens");
 
-    history.record(HistoryContent::Text("keep me".to_owned()), false, 1_000);
-    history.record(HistoryContent::Text("remove me".to_owned()), false, 2_000);
-    history.record(HistoryContent::Text("keep me too".to_owned()), false, 3_000);
+    history.record(
+        HistoryContent::Text("keep me".to_owned()),
+        false,
+        1_000,
+        [0; 16],
+    );
+    history.record(
+        HistoryContent::Text("remove me".to_owned()),
+        false,
+        2_000,
+        [0; 16],
+    );
+    history.record(
+        HistoryContent::Text("keep me too".to_owned()),
+        false,
+        3_000,
+        [0; 16],
+    );
 
     // Row 1 is "remove me": newest first puts "keep me too" at 0.
     assert!(history.forget(1), "forgetting an existing row reports true");
@@ -245,6 +287,7 @@ fn turning_history_off_forgets_what_was_already_there() {
         HistoryContent::Text("recorded earlier".to_owned()),
         false,
         1,
+        [0; 16],
     );
     assert_eq!(history.entries().len(), 1);
 
@@ -254,7 +297,7 @@ fn turning_history_off_forgets_what_was_already_there() {
         "turning it off must clear what was kept"
     );
 
-    history.record(HistoryContent::Text("after".to_owned()), false, 2);
+    history.record(HistoryContent::Text("after".to_owned()), false, 2, [0; 16]);
     assert!(
         history.entries().is_empty(),
         "and nothing further may be recorded while it is off"

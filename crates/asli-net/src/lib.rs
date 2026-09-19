@@ -40,4 +40,5 @@ pub use client::{ClientEvent, Disconnect, LocalEvent, ReceivedClip};
 pub use envelope::{AuthFailCode, ErrorCode, Limits, Message};
 pub use error::{Error, Result};
 pub use session::{pump, Action, FakeTransport, Session, Transport};
+pub use session::{DeviceInfo, PeerInfo};
 pub use state::{Fatal, Input, State};

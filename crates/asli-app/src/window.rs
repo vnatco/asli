@@ -36,7 +36,7 @@ use asli_crypto::{token, Identity};
 
 use crate::clipboard_io::{log_line, ClipboardIo};
 use crate::config::{Config, Paths};
-use crate::daemon::Controls;
+use crate::daemon::{Controls, Status};
 use crate::error::{Error, Result};
 use crate::{notify, qr, secrets, tray};
 
@@ -46,7 +46,7 @@ use crate::{notify, qr, secrets, tray};
 // `allow(unsafe_code)`, and this crate's `#![forbid(unsafe_code)]` would overrule it and fail the
 // build. Keeping the generated code at arm's length is what lets every hand written crate in this
 // project keep the stronger annotation.
-pub use asli_ui::{AppWindow, HistoryRow, Screen, TokenCheck};
+pub use asli_ui::{AppWindow, DeviceRow, HistoryRow, Screen, SyncState, TokenCheck};
 
 /// How long the join string stays on the clipboard before it clears itself.
 ///
@@ -99,8 +99,8 @@ pub trait HistorySource: Send {
     ///
     /// Called by the daemon for both directions: what this device copied and what arrived from
     /// another one. `sensitive` means the platform marked the clip as a password, and such a clip
-    /// must never be kept.
-    fn record(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64);
+    /// must never be kept. `from` is the device it came from, this one included.
+    fn record(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64, from: [u8; 16]);
 
     /// Forgets one entry. Returns whether there was one there.
     fn forget(&mut self, index: usize) -> bool;
@@ -135,6 +135,11 @@ pub struct HistoryEntry {
     pub ts_ms: u64,
     /// Size of the full content in bytes.
     pub bytes: usize,
+    /// The device it came from, or all zeros where that is not known.
+    pub from: [u8; 16],
+    /// Stable for the life of the entry, so an image's thumbnail is decoded once, not on every
+    /// redraw of the list.
+    pub key: [u8; 16],
 }
 
 /// The full content of one entry. Mirrors `asli_history::Content`.
@@ -156,6 +161,8 @@ pub struct MemoryHistory {
     enabled: bool,
     limit: usize,
     revision: u64,
+    /// Hands out entry keys.
+    next_key: u64,
 }
 
 impl MemoryHistory {
@@ -167,6 +174,7 @@ impl MemoryHistory {
             enabled,
             limit,
             revision: 0,
+            next_key: 0,
         }
     }
 
@@ -175,7 +183,7 @@ impl MemoryHistory {
     /// Secrets are never recorded. A clip the platform marked as concealed is a password manager
     /// handing over a password, and writing that into a list on disk would undo the entire point
     /// of the marker.
-    pub fn push(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64) {
+    pub fn push(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64, from: [u8; 16]) {
         if !self.enabled || sensitive {
             return;
         }
@@ -189,6 +197,9 @@ impl MemoryHistory {
             HistoryContent::ImagePng(png) => (String::new(), true, png.len()),
         };
 
+        self.next_key = self.next_key.wrapping_add(1);
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&self.next_key.to_be_bytes());
         self.entries.insert(
             0,
             (
@@ -197,6 +208,8 @@ impl MemoryHistory {
                     is_image,
                     ts_ms,
                     bytes,
+                    from,
+                    key,
                 },
                 content,
             ),
@@ -222,8 +235,8 @@ impl HistorySource for MemoryHistory {
         self.entries.get(index).map(|(_, content)| content.clone())
     }
 
-    fn record(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64) {
-        self.push(content, sensitive, ts_ms);
+    fn record(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64, from: [u8; 16]) {
+        self.push(content, sensitive, ts_ms, from);
     }
 
     fn forget(&mut self, index: usize) -> bool {
@@ -419,8 +432,9 @@ fn show(screen: Screen) {
 
     refresh(&window);
     // With no account there is nowhere to navigate to, so first run takes the whole window
-    // regardless of which menu item was clicked.
-    window.set_screen(if window.get_has_account() {
+    // regardless of which menu item was clicked. Join is the exception: it is how first run is
+    // left.
+    window.set_screen(if window.get_has_account() || screen == Screen::Join {
         screen
     } else {
         Screen::FirstRun
@@ -460,6 +474,27 @@ fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
+/// The interface face for this platform, when the platform's own default is not the one the
+/// design names.
+fn ui_font() -> &'static str {
+    if cfg!(target_os = "windows") {
+        // Windows 11 ships the variable Segoe that the design is drawn in. Windows 10 has only
+        // the older face, which is close enough and always present.
+        let windir = std::env::var_os("WINDIR").map_or_else(
+            || std::path::PathBuf::from(r"C:\Windows"),
+            std::path::PathBuf::from,
+        );
+        if windir.join("Fonts").join("SegUIVar.ttf").exists() {
+            "Segoe UI Variable Text"
+        } else {
+            "Segoe UI"
+        }
+    } else {
+        // The system face: Noto Sans on most Linux desktops, San Francisco on macOS.
+        ""
+    }
+}
+
 /// Hides the window and stops everything that was running for it.
 ///
 /// The window is hidden rather than dropped. Dropping it here would mean destroying it from
@@ -491,10 +526,20 @@ fn start_timer() {
                 if let Some(window) = window.as_ref() {
                     refresh_status(window);
                     refresh_history_if_stale(window);
+                    track_maximized(window);
                 }
             });
         });
         *slot = Some(timer);
+    });
+}
+
+/// Shows a short confirmation at the bottom of the open window.
+fn toast(text: &str, good: bool) {
+    WINDOW.with_borrow(|window| {
+        if let Some(window) = window.as_ref() {
+            window.invoke_show_toast(text.into(), good);
+        }
     });
 }
 
@@ -508,24 +553,31 @@ fn wire_account(window: &AppWindow) {
         let Some(window) = handle.upgrade() else {
             return;
         };
-        match create_account() {
-            Ok(()) => {
-                refresh(&window);
-                window.set_screen(Screen::Token);
+        window.set_create_error(String::new().into());
+        window.set_creating(true);
+        // Deferred a moment, so the busy state is on screen before the work that it describes.
+        let handle = window.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(60), move || {
+            let Some(window) = handle.upgrade() else {
+                return;
+            };
+            match create_account() {
                 // The daemon was started without an identity, so it has to be restarted onto the
-                // one that now exists. The window goes with it and comes back on the next click.
-                restart_self();
+                // one that now exists. The new process opens this window on Status.
+                Ok(()) => restart_self(Welcome::Created),
+                Err(err) => {
+                    eprintln!("{}", log_line("create_failed", &err.to_string()));
+                    window.set_creating(false);
+                    window.set_create_error(err.to_string().into());
+                }
             }
-            Err(err) => {
-                eprintln!("{}", log_line("create_failed", &err.to_string()));
-                notify::action_failed("Could not create an account", &err.to_string());
-            }
-        }
+        });
     });
 
     let handle = window.as_weak();
     window.on_check_token(move |raw| {
         if let Some(window) = handle.upgrade() {
+            window.set_join_error(String::new().into());
             window.set_join_check(check_token(raw.as_str()));
         }
     });
@@ -535,25 +587,81 @@ fn wire_account(window: &AppWindow) {
         let Some(window) = handle.upgrade() else {
             return;
         };
+        window.set_join_error(String::new().into());
         window.set_join_busy(true);
-        match join_account(raw.as_str()) {
-            Ok(room_id) => {
-                eprintln!("{}", log_line("joined", &format!("room {room_id}")));
-                notify::joined(&room_id);
-                restart_self();
+        let handle = window.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(60), move || {
+            let Some(window) = handle.upgrade() else {
+                return;
+            };
+            match join_account(raw.as_str()) {
+                Ok(room_id) => {
+                    eprintln!("{}", log_line("joined", &format!("room {room_id}")));
+                    restart_self(Welcome::Joined);
+                }
+                Err(err) => {
+                    window.set_join_busy(false);
+                    let reason = err.to_string();
+                    eprintln!("{}", log_line("join_failed", &reason));
+                    window.set_join_error(format!("Couldn't join: {reason}").into());
+                }
             }
-            Err(err) => {
-                window.set_join_busy(false);
-                let reason = err.to_string();
-                eprintln!("{}", log_line("join_failed", &reason));
-                window.set_join_check(TokenCheck {
-                    valid: false,
-                    invalid: true,
-                    message: reason.into(),
-                });
-            }
+        });
+    });
+}
+
+/// Attaches the title bar's controls. The window has no frame from the desktop, so moving,
+/// minimising and maximising it are ours to do.
+fn wire_frame(window: &AppWindow) {
+    use slint::winit_030::WinitWindowAccessor as _;
+
+    let handle = window.as_weak();
+    window.on_start_drag(move || {
+        if let Some(window) = handle.upgrade() {
+            window.window().with_winit_window(|winit| {
+                // Refused only when the pointer is not actually pressed, which is harmless.
+                let _ = winit.drag_window();
+            });
         }
     });
+
+    let handle = window.as_weak();
+    window.on_minimize_window(move || {
+        if let Some(window) = handle.upgrade() {
+            window
+                .window()
+                .with_winit_window(|winit| winit.set_minimized(true));
+        }
+    });
+
+    let handle = window.as_weak();
+    window.on_toggle_maximize(move || {
+        if let Some(window) = handle.upgrade() {
+            let maximized = window
+                .window()
+                .with_winit_window(|winit| {
+                    let wanted = !winit.is_maximized();
+                    winit.set_maximized(wanted);
+                    wanted
+                })
+                .unwrap_or(false);
+            window.set_is_maximized(maximized);
+        }
+    });
+}
+
+/// Follows a maximise made by the desktop rather than by our button, such as a double click or
+/// a keyboard shortcut, so the corners and the edge match.
+fn track_maximized(window: &AppWindow) {
+    use slint::winit_030::WinitWindowAccessor as _;
+    if let Some(maximized) = window
+        .window()
+        .with_winit_window(slint::winit_030::winit::window::Window::is_maximized)
+    {
+        if window.get_is_maximized() != maximized {
+            window.set_is_maximized(maximized);
+        }
+    }
 }
 
 /// Builds the window and attaches every callback.
@@ -577,11 +685,18 @@ fn build() -> Result<AppWindow> {
     });
 
     let window = AppWindow::new().map_err(|err| Error::ConfigDir(err.to_string()))?;
+    window.set_ui_font(ui_font().into());
 
     let handle = window.as_weak();
     window.on_open_screen(move |screen| {
         if let Some(window) = handle.upgrade() {
             refresh(&window);
+            if screen == Screen::Join {
+                // A fresh form each time, not whatever was left in it last time.
+                window.set_join_input(String::new().into());
+                window.set_join_check(check_token(""));
+                window.set_join_error(String::new().into());
+            }
             window.set_screen(screen);
         }
     });
@@ -589,12 +704,15 @@ fn build() -> Result<AppWindow> {
     window.on_hide_window(hide);
 
     wire_account(&window);
+    wire_frame(&window);
 
     window.on_copy_token(copy_token);
     window.on_restore_entry(restore_entry);
+    window.on_copy_entry(copy_entry);
     window.on_forget_entry(forget_entry);
     window.on_clear_history(clear_history);
     window.on_set_paused(set_paused);
+    window.on_retry_now(retry_now);
     window.on_request_retained(request_retained);
     window.on_copy_diagnostics(copy_diagnostics);
 
@@ -703,12 +821,103 @@ fn refresh(window: &AppWindow) {
 
     if let Ok(config) = context.paths.load_config() {
         window.set_device_id(short(&config.device_id).into());
-        window.set_relay_host(host_of(&config.relay_url).into());
+        window.set_relay_url_live(config.relay_url.clone().into());
     }
     window.set_clipboard_backend(context.io.describe().into());
 
     refresh_history(window);
     refresh_status(window);
+}
+
+/// How the connection is shown: the state that colours everything, its label and one line of
+/// detail.
+#[derive(Debug, Clone, PartialEq)]
+struct Presented {
+    state: SyncState,
+    label: String,
+    detail: String,
+    connections: String,
+}
+
+/// Turns what the daemon believes into what the Status screen, the sidebar and the History
+/// banner say. Pure, so every state can be tested without a window.
+fn present(status: &Status, paused: bool, relay_host: &str, now_ms: u64) -> Presented {
+    let devices = |n: u32| {
+        if n == 1 {
+            "1 device".to_owned()
+        } else {
+            format!("{n} devices")
+        }
+    };
+    if paused {
+        return Presented {
+            state: SyncState::Offline,
+            label: "Paused".to_owned(),
+            detail: "Paused by you. Nothing is sent or received until you resume.".to_owned(),
+            connections: devices(status.peers),
+        };
+    }
+    let state = status.state.as_str();
+    if state == "Synced" {
+        let online = match status.peers {
+            0 | 1 => "Only this device is online".to_owned(),
+            n => format!("{} online", devices(n)),
+        };
+        let last = match status.last_sync_ms {
+            Some(_) => format!(
+                "last clip {}",
+                tray::relative_time(status.last_sync_ms, now_ms)
+            ),
+            None => "no clips yet".to_owned(),
+        };
+        return Presented {
+            state: SyncState::Connected,
+            label: "Synced".to_owned(),
+            detail: format!("{online} \u{b7} {last}"),
+            connections: devices(status.peers.max(1)),
+        };
+    }
+    if state == "Connecting" && status.attempt <= 1 {
+        return Presented {
+            state: SyncState::Connecting,
+            label: "Connecting\u{2026}".to_owned(),
+            detail: format!("Reaching {relay_host}"),
+            connections: "negotiating\u{2026}".to_owned(),
+        };
+    }
+    if state == "Connecting" {
+        return Presented {
+            state: SyncState::Connecting,
+            label: "Connecting\u{2026}".to_owned(),
+            detail: format!("Reaching {relay_host}, attempt {}", status.attempt),
+            connections: "negotiating\u{2026}".to_owned(),
+        };
+    }
+    if let Some(reason) = state
+        .strip_prefix("Rejected: ")
+        .or_else(|| state.strip_prefix("Stopped: "))
+    {
+        return Presented {
+            state: SyncState::Error,
+            label: "Stopped syncing".to_owned(),
+            detail: format!("{reason}. Restart Asli after fixing this."),
+            connections: devices(0),
+        };
+    }
+    let retry = status.retry_at_ms.map_or_else(String::new, |at| {
+        let seconds = at.saturating_sub(now_ms).div_ceil(1000);
+        if seconds == 0 {
+            " Retrying now.".to_owned()
+        } else {
+            format!(" Retrying in {seconds}s.")
+        }
+    });
+    Presented {
+        state: SyncState::Error,
+        label: "Connection failed".to_owned(),
+        detail: format!("Couldn't reach {relay_host}.{retry}"),
+        connections: devices(0),
+    }
 }
 
 /// Refreshes the parts the daemon changes underneath us.
@@ -717,28 +926,104 @@ fn refresh_status(window: &AppWindow) {
         return;
     };
     let status = context.controls.status.get();
+    let paused = context.controls.is_paused();
+    let now = asli_net::client::now_ms();
+    let config = context.paths.load_config().ok();
+    let relay_host = config
+        .as_ref()
+        .map_or_else(String::new, |config| host_of(&config.relay_url));
 
-    window.set_connection(
-        if status.state.is_empty() {
-            "Offline".to_owned()
-        } else {
-            status.state.clone()
+    let shown = present(&status, paused, &relay_host, now);
+    window.set_sync_state(shown.state);
+    window.set_state_label(shown.label.into());
+    window.set_state_detail(shown.detail.into());
+    window.set_paused(paused);
+    window.set_stat_connections(shown.connections.into());
+    window.set_stat_last_sync(tray::relative_time(status.last_sync_ms, now).into());
+    window.set_stat_skipped(
+        match status.skipped {
+            0 => "0".to_owned(),
+            1 => "1 clip".to_owned(),
+            n => format!("{n} clips"),
         }
         .into(),
     );
-    window.set_peers(i32::try_from(status.peers).unwrap_or(i32::MAX));
-    window
-        .set_last_sync(tray::relative_time(status.last_sync_ms, asli_net::client::now_ms()).into());
-    window.set_skipped(status.skipped.to_string().into());
-    window.set_has_retained(status.has_retained);
-    window.set_paused(context.controls.is_paused());
-    window.set_last_error(status.last_error.clone().unwrap_or_default().into());
+    window.set_has_retained(status.has_retained && !paused);
+
+    let Some(config) = config else {
+        return;
+    };
+    // Connected, whether or not sync is paused: a paused device still holds its connection.
+    let connected = status.state == "Synced";
+    let this = crate::devices::Listed {
+        id: config.device_id.clone(),
+        name: crate::devices::display_name(&config.device_name),
+        os: crate::devices::this_os(),
+        last_seen_ms: None,
+        online: connected,
+        this_device: true,
+    };
+    let rows: Vec<DeviceRow> = context
+        .controls
+        .devices
+        .list(&this)
+        .into_iter()
+        .map(|device| DeviceRow {
+            name: device.name.into(),
+            os: device.os.into(),
+            id: short(&device.id).into(),
+            seen: if device.online {
+                "now".to_owned()
+            } else if device.this_device {
+                "offline".to_owned()
+            } else {
+                tray::relative_time(device.last_seen_ms, now)
+            }
+            .into(),
+            online: device.online,
+            this_device: device.this_device,
+        })
+        .collect();
+    set_rows(&window.get_devices(), rows, |model| {
+        window.set_devices(model);
+    });
+}
+
+/// Replaces a list's rows in place when only their contents changed, so a redraw every second
+/// does not rebuild the list under the pointer.
+fn set_rows<T: Clone + PartialEq + 'static>(
+    current: &ModelRc<T>,
+    rows: Vec<T>,
+    replace: impl FnOnce(ModelRc<T>),
+) {
+    if current.row_count() == rows.len() {
+        for (index, row) in rows.into_iter().enumerate() {
+            if current.row_data(index).as_ref() != Some(&row) {
+                current.set_row_data(index, row);
+            }
+        }
+    } else {
+        replace(ModelRc::new(VecModel::from(rows)));
+    }
 }
 
 thread_local! {
     /// The history revision the list was last drawn from, and when. Main thread only.
     static HISTORY_DRAWN: std::cell::Cell<Option<(u64, std::time::Instant)>> =
         const { std::cell::Cell::new(None) };
+
+    /// Decoded thumbnails and image sizes, by entry, so an image is decoded once rather than on
+    /// every redraw. Main thread only, and dropped with the entries it describes.
+    static THUMBNAILS: RefCell<std::collections::HashMap<[u8; 16], Thumbnail>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// An image entry's thumbnail and its size in pixels.
+#[derive(Clone)]
+struct Thumbnail {
+    image: Option<Image>,
+    width: u32,
+    height: u32,
 }
 
 /// Redraws the list when the history changed since it was drawn, and every half minute anyway,
@@ -758,33 +1043,13 @@ fn refresh_history_if_stale(window: &AppWindow) {
     };
     match HISTORY_DRAWN.get() {
         Some((drawn, at)) if drawn == revision => {
-            // Nothing new, only older: the ages are rewritten in the rows already there, rather
-            // than rebuilding the list under somebody who has scrolled down it.
+            // Nothing new, only older: the rows are rewritten in place rather than the list
+            // rebuilt under somebody who has scrolled down it.
             if at.elapsed() >= AGES {
-                refresh_ages(window, context);
-                HISTORY_DRAWN.set(Some((revision, std::time::Instant::now())));
+                refresh_history(window);
             }
         }
         _ => refresh_history(window),
-    }
-}
-
-/// Rewrites how long ago each row was copied, in place.
-fn refresh_ages(window: &AppWindow, context: &Context) {
-    let Some(entries) = context.history.lock().ok().map(|history| history.entries()) else {
-        return;
-    };
-    let rows = window.get_history();
-    if rows.row_count() != entries.len() {
-        refresh_history(window);
-        return;
-    }
-    let now = asli_net::client::now_ms();
-    for (index, entry) in entries.iter().enumerate() {
-        if let Some(mut row) = rows.row_data(index) {
-            row.age = tray::relative_time(Some(entry.ts_ms), now).into();
-            rows.set_row_data(index, row);
-        }
     }
 }
 
@@ -793,38 +1058,239 @@ fn refresh_history(window: &AppWindow) {
     let Some(context) = CONTEXT.get() else {
         return;
     };
-    let Ok(history) = context.history.lock() else {
-        return;
+    let (enabled, revision, entries) = {
+        let Ok(history) = context.history.lock() else {
+            return;
+        };
+        (history.enabled(), history.revision(), history.entries())
     };
 
-    window.set_history_enabled(history.enabled());
-    HISTORY_DRAWN.set(Some((history.revision(), std::time::Instant::now())));
+    window.set_history_enabled(enabled);
+    HISTORY_DRAWN.set(Some((revision, std::time::Instant::now())));
 
+    let own = context
+        .paths
+        .load_config()
+        .ok()
+        .and_then(|config| config.device_id_bytes().ok());
     let now = asli_net::client::now_ms();
-    let rows: Vec<HistoryRow> = history
-        .entries()
-        .into_iter()
-        .map(|entry| HistoryRow {
-            preview: entry.preview.into(),
-            kind: if entry.is_image { "IMAGE" } else { "TEXT" }.into(),
-            age: tray::relative_time(Some(entry.ts_ms), now).into(),
-            size: human_bytes(entry.bytes).into(),
-            is_image: entry.is_image,
+
+    // Thumbnails for entries that are gone are dropped with them.
+    THUMBNAILS.with_borrow_mut(|cache| {
+        cache.retain(|key, _| entries.iter().any(|entry| entry.key == *key));
+    });
+
+    let rows: Vec<HistoryRow> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let source = if entry.from == [0u8; 16] {
+                None
+            } else if Some(entry.from) == own {
+                Some("from this device".to_owned())
+            } else {
+                Some(format!(
+                    "from {}",
+                    context
+                        .controls
+                        .devices
+                        .name_of(&entry.from)
+                        .unwrap_or_else(|| "another device".to_owned())
+                ))
+            };
+            let thumbnail = entry.is_image.then(|| thumbnail(context, index, entry.key));
+            let mut meta = vec![
+                tray::relative_time(Some(entry.ts_ms), now),
+                human_bytes(entry.bytes),
+            ];
+            if let Some(thumbnail) = &thumbnail {
+                if thumbnail.width > 0 {
+                    meta.push(format!("{} \u{d7} {}", thumbnail.width, thumbnail.height));
+                }
+            }
+            meta.extend(source);
+            let preview = if entry.is_image {
+                "Image".to_owned()
+            } else {
+                entry.preview.clone()
+            };
+            HistoryRow {
+                mono: !entry.is_image && looks_like_code(&preview),
+                preview: preview.into(),
+                meta: meta.join(" \u{b7} ").into(),
+                is_image: entry.is_image,
+                has_thumb: thumbnail.as_ref().is_some_and(|t| t.image.is_some()),
+                thumb: thumbnail.and_then(|t| t.image).unwrap_or_default(),
+            }
         })
         .collect();
 
     let empty = rows.is_empty();
-    window.set_history(ModelRc::new(VecModel::from(rows)));
+    set_rows(&window.get_history(), rows, |model| {
+        window.set_history(model);
+    });
     window.set_history_note(
-        if history.enabled() && !empty {
-            // Said plainly rather than hidden, because a list that silently empties on restart
-            // looks like data loss.
-            "Kept in memory only for now, so restarting Asli clears this."
+        if enabled && !empty {
+            "Stored on this device only, encrypted with your account key."
         } else {
             ""
         }
         .into(),
     );
+}
+
+/// An image entry's thumbnail, from the cache or decoded now.
+fn thumbnail(context: &Context, index: usize, key: [u8; 16]) -> Thumbnail {
+    if let Some(cached) = THUMBNAILS.with_borrow(|cache| cache.get(&key).cloned()) {
+        return cached;
+    }
+    let png = context
+        .history
+        .lock()
+        .ok()
+        .and_then(|history| history.restore(index));
+    let made = match png {
+        Some(HistoryContent::ImagePng(png)) => make_thumbnail(&png),
+        _ => Thumbnail {
+            image: None,
+            width: 0,
+            height: 0,
+        },
+    };
+    THUMBNAILS.with_borrow_mut(|cache| cache.insert(key, made.clone()));
+    made
+}
+
+/// Decodes a PNG and shrinks it to a square thumbnail, cropped to fill like the design's cover.
+fn make_thumbnail(png: &[u8]) -> Thumbnail {
+    // Twice the 50 px it is drawn at, for high density displays.
+    const SIDE: u32 = 100;
+    let failed = Thumbnail {
+        image: None,
+        width: 0,
+        height: 0,
+    };
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let Ok(mut reader) = decoder.read_info() else {
+        return failed;
+    };
+    let Some(size) = reader.output_buffer_size() else {
+        return failed;
+    };
+    let mut buffer = vec![0u8; size];
+    let Ok(frame) = reader.next_frame(&mut buffer) else {
+        return failed;
+    };
+    let (width, height) = (frame.width, frame.height);
+    let channels = match frame.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        png::ColorType::GrayscaleAlpha => 2,
+        _ => 1,
+    };
+    if width == 0 || height == 0 {
+        return failed;
+    }
+
+    // The largest centred square, sampled down by averaging each target pixel's block.
+    let crop = width.min(height);
+    let (left, top) = ((width - crop) / 2, (height - crop) / 2);
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(SIDE, SIDE);
+    let line = frame.line_size;
+    for (i, pixel) in out.make_mut_slice().iter_mut().enumerate() {
+        let (tx, ty) = (
+            u32::try_from(i).unwrap_or(0) % SIDE,
+            u32::try_from(i).unwrap_or(0) / SIDE,
+        );
+        let (x0, x1) = (
+            left + tx * crop / SIDE,
+            left + ((tx + 1) * crop / SIDE).max(tx * crop / SIDE + 1),
+        );
+        let (y0, y1) = (
+            top + ty * crop / SIDE,
+            top + ((ty + 1) * crop / SIDE).max(ty * crop / SIDE + 1),
+        );
+        // At most a few samples per axis: a thumbnail needs no more, and a huge screenshot
+        // must not stall the window.
+        let step_x = ((x1 - x0) / 4).max(1);
+        let step_y = ((y1 - y0) / 4).max(1);
+        let (mut sum, mut count) = ([0u32; 4], 0u32);
+        let mut y = y0;
+        while y < y1.min(height) {
+            let mut x = x0;
+            while x < x1.min(width) {
+                let at = y as usize * line + x as usize * channels;
+                let px = &buffer[at..at + channels];
+                let rgba = match channels {
+                    4 => [px[0], px[1], px[2], px[3]],
+                    3 => [px[0], px[1], px[2], 255],
+                    2 => [px[0], px[0], px[0], px[1]],
+                    _ => [px[0], px[0], px[0], 255],
+                };
+                for (total, value) in sum.iter_mut().zip(rgba) {
+                    *total += u32::from(value);
+                }
+                count += 1;
+                x += step_x;
+            }
+            y += step_y;
+        }
+        let count = count.max(1);
+        let avg = |c: usize| u8::try_from(sum[c] / count).unwrap_or(255);
+        *pixel = Rgba8Pixel {
+            r: avg(0),
+            g: avg(1),
+            b: avg(2),
+            a: avg(3),
+        };
+    }
+    round_corners(&mut out, 18.0);
+    Thumbnail {
+        image: Some(Image::from_rgba8(out)),
+        width,
+        height,
+    }
+}
+
+/// Makes a thumbnail's corners transparent, antialiased, to the design's 9 px at 50 px.
+///
+/// The window cannot do this itself: the software renderer clips to a rectangle and ignores the
+/// corner radius, so a thumbnail inside a rounded frame kept its square corners.
+fn round_corners(image: &mut SharedPixelBuffer<Rgba8Pixel>, radius: f32) {
+    let columns = image.width();
+    #[allow(clippy::cast_precision_loss)]
+    let (right, bottom) = (columns as f32, image.height() as f32);
+    for (index, pixel) in image.make_mut_slice().iter_mut().enumerate() {
+        let index = u32::try_from(index).unwrap_or(0);
+        #[allow(clippy::cast_precision_loss)]
+        let (px, py) = (
+            (index % columns) as f32 + 0.5,
+            (index / columns) as f32 + 0.5,
+        );
+        let dx = (radius - px).max(px - (right - radius)).max(0.0);
+        let dy = (radius - py).max(py - (bottom - radius)).max(0.0);
+        // Coverage across the last pixel of the curve, for a smooth edge.
+        let coverage = (radius + 0.5 - dx.hypot(dy)).clamp(0.0, 1.0);
+        if coverage < 1.0 {
+            // The buffer is not premultiplied, so only alpha is scaled.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let alpha = (f32::from(pixel.a) * coverage).round() as u8;
+            pixel.a = alpha;
+        }
+    }
+}
+
+/// Whether a clip reads better in the monospaced face: a URL, a path, or a line of code.
+fn looks_like_code(text: &str) -> bool {
+    let text = text.trim();
+    text.contains("://")
+        || text.starts_with('/')
+        || text.starts_with("~/")
+        || (text.len() > 2 && text.as_bytes()[1] == b':' && text.as_bytes()[2] == b'\\')
+        || text.ends_with(';')
+        || text.ends_with('{')
+        || text.starts_with("$ ")
 }
 
 /// Loads configuration into the Settings screen.
@@ -837,12 +1303,19 @@ fn load_settings(window: &AppWindow) {
     };
 
     window.set_relay_url(config.relay_url.clone().into());
+    window.set_saved_relay_url(config.relay_url.clone().into());
+    let name = crate::devices::display_name(&config.device_name);
+    window.set_device_name(name.clone().into());
+    window.set_saved_device_name(name.into());
     window.set_notifications(config.notifications);
     window.set_keep_history(config.keep_history);
 
     let (cap_index, exact) = nearest_cap(config.max_content_bytes);
     window.set_size_cap_index(cap_index);
-    window.set_retention_index(nearest_retention(config.history_entries));
+    window.set_saved_size_cap_index(cap_index);
+    let retention = nearest_retention(config.history_entries);
+    window.set_retention_index(retention);
+    window.set_saved_retention_index(retention);
 
     window.set_settings_note(
         if exact {
@@ -866,26 +1339,36 @@ fn load_settings(window: &AppWindow) {
             .unwrap_or_else(|err| err.to_string())
             .into(),
     );
-    window.set_settings_dirty(false);
 }
 
 /// Writes the Settings screen back to the configuration file.
 fn save_settings(window: &AppWindow) {
-    let relay = window.get_relay_url().to_string();
+    let relay = window.get_relay_url().trim().to_owned();
     let cap = SIZE_CAPS[usize::try_from(window.get_size_cap_index())
         .unwrap_or(1)
         .min(3)]
     .0;
-    let entries = RETENTIONS[usize::try_from(window.get_retention_index())
-        .unwrap_or(2)
-        .min(3)];
+    let retention_index = window.get_retention_index();
+    let entries = RETENTIONS[usize::try_from(retention_index).unwrap_or(2).min(3)];
+    // Stored empty when it is the computer's own name, so renaming the computer renames this.
+    let typed = window.get_device_name().trim().to_owned();
+    let name = if typed == crate::devices::default_name() {
+        String::new()
+    } else {
+        typed.chars().take(64).collect()
+    };
 
     let mut relay_changed = false;
+    let mut name_changed = false;
+    let mut limit_changed = false;
     apply(window, |config| {
         relay_changed = config.relay_url != relay;
+        name_changed = config.device_name != name;
+        limit_changed = config.history_entries != entries;
         relay.clone_into(&mut config.relay_url);
         config.max_content_bytes = cap;
         config.history_entries = entries;
+        config.device_name.clone_from(&name);
     });
 
     if let Some(context) = CONTEXT.get() {
@@ -896,21 +1379,37 @@ fn save_settings(window: &AppWindow) {
             live.reconnect
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        if name_changed {
+            live.announce
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     with_history(|history| history.set_limit(entries));
-    window.set_settings_dirty(false);
+
+    let shown_name = crate::devices::display_name(&name);
+    window.set_relay_url(relay.clone().into());
+    window.set_saved_relay_url(relay.into());
+    window.set_device_name(shown_name.clone().into());
+    window.set_saved_device_name(shown_name.into());
+    window.set_saved_size_cap_index(window.get_size_cap_index());
+    window.set_saved_retention_index(retention_index);
+    window.invoke_settings_saved();
 
     // Stated because it is true and not obvious. A setting that claims to have applied when it
     // has not is how a person concludes the application ignores them.
     window.set_settings_note(
-        if relay_changed {
-            "Saved. Reconnecting to the new relay now. The history length applies when Asli next \
-             starts."
-        } else {
-            "Saved. The history length applies when Asli next starts."
+        match (relay_changed, limit_changed) {
+            (true, true) => {
+                "Reconnecting to the new relay now. The history length applies when Asli next \
+                 starts."
+            }
+            (true, false) => "Reconnecting to the new relay now.",
+            (false, true) => "The history length applies when Asli next starts.",
+            (false, false) => "",
         }
         .into(),
     );
+    refresh_status(window);
 }
 
 /// Reads, changes and writes the configuration, reporting a failure rather than losing it.
@@ -958,6 +1457,8 @@ fn join_account(raw: &str) -> Result<String> {
     let secret = token::parse(raw.trim())?;
     let identity = Identity::from_secret(&secret);
     secrets::store(&context.paths, identity.secret())?;
+    // The devices of the account this one is leaving mean nothing in the new one.
+    context.controls.devices.clear();
     Ok(identity.room_id())
 }
 
@@ -1021,7 +1522,7 @@ fn copy_token() {
         return;
     };
     let Ok(Some((secret, _))) = secrets::load(&context.paths) else {
-        notify::action_failed("No account on this device", "Create or join one first");
+        toast("No account on this device yet", false);
         return;
     };
 
@@ -1035,11 +1536,19 @@ fn copy_token() {
                 "{}",
                 log_line("token_copied", "marked as concealed, clears in 90 seconds")
             );
-            notify::token_copied(TOKEN_CLEAR_AFTER.as_secs());
+            WINDOW.with_borrow(|window| {
+                if let Some(window) = window.as_ref() {
+                    window.invoke_token_was_copied();
+                }
+            });
+            toast(
+                "Copied. It clears itself from the clipboard in 90 seconds.",
+                true,
+            );
         }
         Err(err) => {
             eprintln!("{}", log_line("token_copy_failed", &err.to_string()));
-            notify::token_copy_failed(&err.to_string());
+            toast(&format!("Couldn't copy: {err}"), false);
         }
     }
 }
@@ -1050,6 +1559,16 @@ fn copy_token() {
 /// back on every device is the entire point of this screen, and the watcher cannot be relied on
 /// to report it: every platform recognises our own writes and ignores them.
 fn restore_entry(index: i32) {
+    put_back(index, true);
+}
+
+/// Puts a history entry on this device's clipboard only, without sending it anywhere.
+fn copy_entry(index: i32) {
+    put_back(index, false);
+}
+
+/// The two ways back onto the clipboard: to every device, or to this one alone.
+fn put_back(index: i32, everywhere: bool) {
     let Some(context) = CONTEXT.get() else {
         return;
     };
@@ -1064,31 +1583,50 @@ fn restore_entry(index: i32) {
         .and_then(|history| history.restore(index));
 
     let Some(clip) = clip else {
-        notify::action_failed("Could not restore that", "the entry is no longer there");
+        toast("That entry is no longer there", false);
         return;
     };
 
-    let result = match &clip {
-        HistoryContent::Text(text) => context.io.write_text_as_copy(text),
-        HistoryContent::ImagePng(png) => context.io.write_image_as_copy(png),
+    let result = match (&clip, everywhere) {
+        (HistoryContent::Text(text), true) => context.io.write_text_as_copy(text),
+        (HistoryContent::ImagePng(png), true) => context.io.write_image_as_copy(png),
+        (HistoryContent::Text(text), false) => context.io.write_text(text),
+        (HistoryContent::ImagePng(png), false) => context.io.write_image(png),
     };
 
     match result {
         // Never the content, only its size. A log line holding a clip would put every copied
         // password into the journal.
-        Ok(()) => eprintln!(
-            "{}",
-            log_line(
-                "restored",
-                &match &clip {
-                    HistoryContent::Text(text) => format!("text, {}", human_bytes(text.len())),
-                    HistoryContent::ImagePng(png) => format!("image, {}", human_bytes(png.len())),
-                }
-            )
-        ),
+        Ok(()) => {
+            eprintln!(
+                "{}",
+                log_line(
+                    if everywhere {
+                        "restored"
+                    } else {
+                        "copied_locally"
+                    },
+                    &match &clip {
+                        HistoryContent::Text(text) => format!("text, {}", human_bytes(text.len())),
+                        HistoryContent::ImagePng(png) => {
+                            format!("image, {}", human_bytes(png.len()))
+                        }
+                    }
+                )
+            );
+            let paused = context.controls.is_paused();
+            toast(
+                match (everywhere, paused) {
+                    (true, false) => "Sent to your devices",
+                    (true, true) => "Copied here. Sync is paused, so it went nowhere else.",
+                    (false, _) => "Copied on this device",
+                },
+                true,
+            );
+        }
         Err(err) => {
             eprintln!("{}", log_line("restore_failed", &err.to_string()));
-            notify::action_failed("Could not restore that", &err.to_string());
+            toast(&format!("Couldn't copy that: {err}"), false);
         }
     }
 }
@@ -1116,6 +1654,7 @@ fn clear_history() {
             refresh_history(window);
         }
     });
+    toast("History cleared", true);
 }
 
 /// Pauses or resumes syncing.
@@ -1131,7 +1670,33 @@ fn set_paused(paused: bool) {
         "{}",
         log_line(if paused { "paused" } else { "resumed" }, "from the window")
     );
-    notify::sync_paused(paused);
+    // The window shows it, so no notification on top.
+    WINDOW.with_borrow(|window| {
+        if let Some(window) = window.as_ref() {
+            refresh_status(window);
+        }
+    });
+}
+
+/// Cuts the wait before the next connection attempt short.
+fn retry_now() {
+    let Some(context) = CONTEXT.get() else {
+        return;
+    };
+    let state = context.controls.status.get().state;
+    if state.starts_with("Stopped") || state.starts_with("Rejected") {
+        toast(
+            "Syncing stopped for good. Restart Asli to try again.",
+            false,
+        );
+        return;
+    }
+    context
+        .controls
+        .settings
+        .reconnect
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    toast("Retrying now", true);
 }
 
 /// Asks the daemon for the clip the relay is holding.
@@ -1142,9 +1707,9 @@ fn request_retained() {
     if context.controls.status.get().has_retained {
         context.controls.request_retained();
         eprintln!("{}", log_line("paste_retained", "requested from the relay"));
-        notify::retained_requested();
+        toast("Fetching the stored clip", true);
     } else {
-        notify::retained_unavailable();
+        toast("The relay has nothing new for this device", false);
     }
 }
 
@@ -1160,19 +1725,48 @@ fn copy_diagnostics() {
     let text = tray::diagnostics(&config, &context.controls.status.get(), &context.paths);
     if let Err(err) = context.io.write_text(&text) {
         eprintln!("{}", log_line("diagnostics_failed", &err.to_string()));
-        notify::diagnostics_failed(&err.to_string());
+        toast(&format!("Couldn't copy diagnostics: {err}"), false);
     } else {
-        notify::diagnostics_copied();
+        toast("Diagnostics copied", true);
     }
+}
+
+/// Why the process restarted itself, so the new one can open the window and say so.
+#[derive(Debug, Clone, Copy)]
+enum Welcome {
+    Created,
+    Joined,
+}
+
+/// Set on the restarted process, naming what just happened. Read once at startup.
+pub const WELCOME_ENV: &str = "ASLI_WELCOME";
+
+/// Opens the window on Status after a restart onto a new account, with a line saying what
+/// happened. Does nothing on an ordinary start.
+pub fn welcome_after_restart() {
+    let Some(reason) = std::env::var_os(WELCOME_ENV) else {
+        return;
+    };
+    // Not passed on to anything this process starts later.
+    std::env::remove_var(WELCOME_ENV);
+    let text = match reason.to_str() {
+        Some("created") => "Account created. Add your other devices with the join string.",
+        Some("joined") => "Joined. Syncing starts as soon as the relay answers.",
+        _ => return,
+    };
+    let _ = slint::invoke_from_event_loop(move || {
+        show(Screen::Status);
+        toast(text, true);
+    });
 }
 
 /// Restarts this process so the daemon picks up the account that was just stored.
 ///
 /// The daemon takes its identity by value and the connection holds a session built from it, so
 /// there is no way to swap accounts on a live connection. Rather than leave somebody wondering
-/// why nothing happened, the process replaces itself.
+/// why nothing happened, the process replaces itself, and the new one opens this window again.
 #[cfg(unix)]
-fn restart_self() {
+fn restart_self(welcome: Welcome) {
     use std::os::unix::process::CommandExt as _;
 
     let Ok(exe) = std::env::current_exe() else {
@@ -1189,6 +1783,7 @@ fn restart_self() {
     let err = std::process::Command::new(exe)
         .args(args)
         .env(crate::instance::RESTART_ENV, "1")
+        .env(WELCOME_ENV, welcome.as_str())
         .exec();
     eprintln!("{}", log_line("restart_failed", &err.to_string()));
 }
@@ -1198,7 +1793,7 @@ fn restart_self() {
 /// The replacement waits for the single instance lock, which this process holds until it is gone,
 /// because [`crate::instance::RESTART_ENV`] tells it a handover is under way.
 #[cfg(not(unix))]
-fn restart_self() {
+fn restart_self(welcome: Welcome) {
     let Ok(exe) = std::env::current_exe() else {
         eprintln!(
             "{}",
@@ -1212,12 +1807,22 @@ fn restart_self() {
     match std::process::Command::new(exe)
         .args(args)
         .env(crate::instance::RESTART_ENV, "1")
+        .env(WELCOME_ENV, welcome.as_str())
         .spawn()
     {
         Ok(_) => crate::cli::exit_removing_tray(0),
         Err(err) => {
             eprintln!("{}", log_line("restart_failed", &err.to_string()));
             notify::action_failed("Restart Asli to use the new account", &err.to_string());
+        }
+    }
+}
+
+impl Welcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Joined => "joined",
         }
     }
 }
@@ -1237,10 +1842,12 @@ fn with_history(action: impl FnOnce(&mut (dyn HistorySource + Send))) {
     action(&mut *guard);
 }
 
-/// The QR, as an image the window can draw.
+/// The QR, as an image the window can draw: rounded modules, at four times the 175 px it is
+/// shown at, so it stays sharp at any display scale.
 fn qr_image(token: &str) -> Result<Image> {
-    let (span, pixels) = qr::render_rgba(token)?;
-    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(span, span);
+    const SIDE: u32 = 700;
+    let pixels = qr::render_modules(token, SIDE)?;
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(SIDE, SIDE);
     buffer.make_mut_bytes().copy_from_slice(&pixels);
     Ok(Image::from_rgba8(buffer))
 }
@@ -1358,9 +1965,9 @@ mod tests {
     #[test]
     fn history_keeps_newest_first_and_honours_its_limit() {
         let mut history = MemoryHistory::new(true, 2);
-        history.record(HistoryContent::Text("first".to_owned()), false, 1);
-        history.record(HistoryContent::Text("second".to_owned()), false, 2);
-        history.record(HistoryContent::Text("third".to_owned()), false, 3);
+        history.record(HistoryContent::Text("first".to_owned()), false, 1, [0; 16]);
+        history.record(HistoryContent::Text("second".to_owned()), false, 2, [0; 16]);
+        history.record(HistoryContent::Text("third".to_owned()), false, 3, [0; 16]);
 
         let entries = history.entries();
         assert_eq!(entries.len(), 2, "the limit must be enforced");
@@ -1376,7 +1983,7 @@ mod tests {
         // The marker exists because a password manager asked for this clip to be left alone.
         // Recording it into a list would undo exactly that.
         let mut history = MemoryHistory::new(true, 10);
-        history.record(HistoryContent::Text("hunter2".to_owned()), true, 1);
+        history.record(HistoryContent::Text("hunter2".to_owned()), true, 1, [0; 16]);
         assert!(history.entries().is_empty(), "a secret must not be kept");
     }
 
@@ -1393,9 +2000,9 @@ mod tests {
             seen.push(now);
         };
 
-        history.record(HistoryContent::Text("one".to_owned()), false, 1);
+        history.record(HistoryContent::Text("one".to_owned()), false, 1, [0; 16]);
         changed(&history);
-        history.record(HistoryContent::Text("two".to_owned()), false, 2);
+        history.record(HistoryContent::Text("two".to_owned()), false, 2, [0; 16]);
         changed(&history);
         assert!(history.forget(0));
         changed(&history);
@@ -1408,13 +2015,18 @@ mod tests {
     #[test]
     fn turning_history_off_forgets_what_was_there() {
         let mut history = MemoryHistory::new(true, 10);
-        history.record(HistoryContent::Text("something".to_owned()), false, 1);
+        history.record(
+            HistoryContent::Text("something".to_owned()),
+            false,
+            1,
+            [0; 16],
+        );
         history.set_enabled(false);
         assert!(
             history.entries().is_empty(),
             "turning it off means the list goes, not that it freezes"
         );
-        history.record(HistoryContent::Text("more".to_owned()), false, 2);
+        history.record(HistoryContent::Text("more".to_owned()), false, 2, [0; 16]);
         assert!(history.entries().is_empty(), "and nothing more is kept");
     }
 
@@ -1429,6 +2041,97 @@ mod tests {
             !exact,
             "a hand edited value must be flagged, not rounded quietly"
         );
+    }
+
+    fn status(state: &str) -> Status {
+        Status {
+            state: state.to_owned(),
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn each_connection_state_reads_as_the_design_names_it() {
+        let now = 1_000_000;
+        let mut synced = status("Synced");
+        synced.peers = 2;
+        let shown = present(&synced, false, "asli.vnat.dev", now);
+        assert_eq!(shown.state, SyncState::Connected);
+        assert_eq!(shown.label, "Synced");
+        assert!(
+            shown.detail.starts_with("2 devices online"),
+            "{}",
+            shown.detail
+        );
+        assert_eq!(shown.connections, "2 devices");
+
+        let paused = present(&synced, true, "asli.vnat.dev", now);
+        assert_eq!(paused.state, SyncState::Offline);
+        assert_eq!(paused.label, "Paused");
+
+        let mut connecting = status("Connecting");
+        connecting.attempt = 3;
+        let shown = present(&connecting, false, "asli.vnat.dev", now);
+        assert_eq!(shown.state, SyncState::Connecting);
+        assert!(shown.detail.contains("attempt 3"), "{}", shown.detail);
+
+        let mut offline = status("Offline, retrying");
+        offline.retry_at_ms = Some(now + 23_500);
+        let shown = present(&offline, false, "asli.vnat.dev", now);
+        assert_eq!(shown.state, SyncState::Error);
+        assert_eq!(shown.label, "Connection failed");
+        assert!(shown.detail.contains("Retrying in 24s"), "{}", shown.detail);
+
+        let stopped = present(
+            &status("Rejected: BAD_SIGNATURE"),
+            false,
+            "asli.vnat.dev",
+            now,
+        );
+        assert_eq!(stopped.state, SyncState::Error);
+        assert!(stopped.detail.contains("BAD_SIGNATURE"));
+    }
+
+    #[test]
+    fn one_device_alone_is_not_called_devices() {
+        let mut alone = status("Synced");
+        alone.peers = 1;
+        let shown = present(&alone, false, "asli.vnat.dev", 0);
+        assert_eq!(shown.connections, "1 device");
+        assert!(
+            shown.detail.starts_with("Only this device"),
+            "{}",
+            shown.detail
+        );
+    }
+
+    #[test]
+    fn urls_and_paths_are_shown_in_the_monospaced_face() {
+        assert!(looks_like_code("wss://asli.vnat.dev/v1"));
+        assert!(looks_like_code("~/Projects/Asli"));
+        assert!(looks_like_code(r"C:\Users\me"));
+        assert!(!looks_like_code("Replay protection now survives restarts."));
+    }
+
+    #[test]
+    fn a_thumbnail_keeps_the_image_size_and_rounds_its_corners() {
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 300, 200);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("header");
+            writer
+                .write_image_data(&vec![200u8; 300 * 200 * 4])
+                .expect("data");
+        }
+        let thumbnail = make_thumbnail(&png_bytes);
+        assert_eq!((thumbnail.width, thumbnail.height), (300, 200));
+        let image = thumbnail.image.expect("decoded");
+        let buffer = image.to_rgba8().expect("pixels");
+        let pixels = buffer.as_slice();
+        assert_eq!(pixels[0].a, 0, "the corner is cut away");
+        assert!(pixels[50 * 100 + 50].a > 150, "the middle is kept");
     }
 
     #[test]

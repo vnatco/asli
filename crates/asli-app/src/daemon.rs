@@ -24,11 +24,12 @@ use std::sync::Arc;
 use asli_crypto::Identity;
 use asli_net::client::{self, ClientEvent, Disconnect};
 use asli_net::session::Action;
-use asli_net::{Backoff, LocalEvent, Session};
+use asli_net::{Backoff, DeviceInfo, LocalEvent, Session};
 use tokio::sync::mpsc;
 
 use crate::clipboard_io::{log_line, ClipboardIo, Observed};
 use crate::config::{Config, Paths, State};
+use crate::devices::DevicesHandle;
 use crate::error::Result;
 use crate::notify;
 use crate::tray::StatusHandle;
@@ -59,6 +60,8 @@ pub struct Controls {
     pub retained_pending: Arc<AtomicBool>,
     /// Settings the window can change while the daemon runs. See [`LiveSettings`].
     pub settings: LiveSettings,
+    /// The other devices on this account, as their announcements describe them.
+    pub devices: DevicesHandle,
 }
 
 /// The settings that take effect at once, shared between the window and the daemon.
@@ -73,8 +76,11 @@ pub struct LiveSettings {
     /// Largest copy this device sends, in bytes.
     pub max_content_bytes: Arc<AtomicUsize>,
     /// Set when the relay address changed, so the daemon drops its connection and reconnects to
-    /// the new one straight away.
+    /// the new one straight away. Also set by Retry now, which cuts a wait between attempts
+    /// short.
     pub reconnect: Arc<AtomicBool>,
+    /// Set when this device's name changed, so it announces the new one to the others.
+    pub announce: Arc<AtomicBool>,
 }
 
 impl LiveSettings {
@@ -134,6 +140,10 @@ pub struct Status {
     pub has_retained: bool,
     /// Last error worth showing, never containing clipboard content.
     pub last_error: Option<String>,
+    /// Connection attempts since the last one that succeeded, counting the one under way.
+    pub attempt: u32,
+    /// When the next attempt starts, while waiting between attempts.
+    pub retry_at_ms: Option<u64>,
 }
 
 impl Status {
@@ -167,8 +177,9 @@ pub fn on_action(action: &Action, io: &dyn ClipboardIo, status: &mut Status, now
             text,
             retained,
             ts_ms,
+            ..
         } => apply_clip(text, *retained, *ts_ms, io, status, now_ms),
-        Action::Image { png, ts_ms } => apply_image(png, *ts_ms, io, status, now_ms),
+        Action::Image { png, ts_ms, .. } => apply_image(png, *ts_ms, io, status, now_ms),
         Action::Presence { peers } => {
             status.peers = *peers;
             false
@@ -213,7 +224,7 @@ pub fn on_client_event(
             }
             apply_clip(&clip.text, clip.retained, clip.ts_ms, io, status, now_ms)
         }
-        ClientEvent::Image { png, ts_ms } => apply_image(png, *ts_ms, io, status, now_ms),
+        ClientEvent::Image { png, ts_ms, .. } => apply_image(png, *ts_ms, io, status, now_ms),
         ClientEvent::Presence { peers } => {
             status.peers = *peers;
             false
@@ -329,14 +340,37 @@ const fn is_image(event: &ClientEvent) -> bool {
 /// offered, and a history holding something the person never received would offer to restore a
 /// clip they have never seen.
 fn record(history: &SharedHistory, event: &ClientEvent, now_ms: u64) {
-    let content = match event {
-        ClientEvent::Clip(clip) if !clip.retained => HistoryContent::Text(clip.text.clone()),
-        ClientEvent::Image { png, .. } => HistoryContent::ImagePng(png.clone()),
+    let (content, from) = match event {
+        ClientEvent::Clip(clip) if !clip.retained => {
+            (HistoryContent::Text(clip.text.clone()), clip.device_id)
+        }
+        ClientEvent::Image { png, device_id, .. } => {
+            (HistoryContent::ImagePng(png.clone()), *device_id)
+        }
         _ => return,
     };
 
     if let Ok(mut history) = history.lock() {
-        history.record(content, false, now_ms);
+        history.record(content, false, now_ms, from);
+    }
+}
+
+/// Keeps the device list in step with the connection: who announced, and how many are here.
+fn track_devices(event: &ClientEvent, devices: &DevicesHandle, now_ms: u64) {
+    match event {
+        ClientEvent::Authenticated { peers, .. } => devices.set_connected(true, *peers, now_ms),
+        ClientEvent::Presence { peers } => devices.presence(*peers, now_ms),
+        ClientEvent::Peer(peer) => {
+            eprintln!(
+                "{}",
+                log_line(
+                    "device_announced",
+                    &crate::config::hex(&peer.device_id)[..12]
+                )
+            );
+            devices.heard(&peer.device_id, &peer.name, &peer.os, now_ms);
+        }
+        _ => {}
     }
 }
 
@@ -363,6 +397,7 @@ fn on_live_event(
     }
 
     log_event(event);
+    track_devices(event, &controls.devices, now);
     if answer_retained_request(event, io, controls, status, history, now) {
         controls.status.set(status.clone());
         return;
@@ -403,7 +438,12 @@ fn answer_retained_request(
             // Written as a live clip would be: this is exactly what the person asked for.
             if apply_clip(&clip.text, false, clip.ts_ms, io, status, now) {
                 if let Ok(mut history) = history.lock() {
-                    history.record(HistoryContent::Text(clip.text.clone()), false, now);
+                    history.record(
+                        HistoryContent::Text(clip.text.clone()),
+                        false,
+                        now,
+                        clip.device_id,
+                    );
                 }
                 eprintln!("{}", log_line("paste_retained", "written to the clipboard"));
                 notify::retained_pasted(clip.text.len());
@@ -527,6 +567,12 @@ pub async fn run(
     let seq = reserve_sequence(paths)?;
     let room = identity.room_id();
     let mut session = Session::new(identity, device_id, seq);
+    // Who this device is, as the others will list it. Sent sealed after every handshake.
+    session.set_device_info(DeviceInfo {
+        name: crate::devices::display_name(&config.device_name),
+        os: crate::devices::this_os(),
+    });
+    controls.devices.load(paths, &room);
     // The clipboard layer already recognises our own writes. See the method for why this matters.
     session.leave_echoes_to_caller();
 
@@ -555,6 +601,7 @@ pub async fn run(
             history: Arc::clone(&history),
             paths: paths.clone(),
             seq_base: seq,
+            own_id: device_id,
         },
     )?;
 
@@ -611,6 +658,8 @@ struct Bridge {
     paths: Paths,
     /// The first sequence number this process was given.
     seq_base: u64,
+    /// This device's id, recorded as the source of its own copies.
+    own_id: [u8; 16],
 }
 
 /// Counts sequence numbers this process may have used, and says when to reserve more.
@@ -664,6 +713,7 @@ fn spawn_clipboard_bridge(
         history,
         paths,
         seq_base,
+        own_id,
     } = bridge;
 
     std::thread::Builder::new()
@@ -714,6 +764,7 @@ fn spawn_clipboard_bridge(
                                 HistoryContent::Text(text.clone()),
                                 false,
                                 client::now_ms(),
+                                own_id,
                             );
                         }
                         if local_tx.blocking_send(LocalEvent::Text(text)).is_err() {
@@ -746,6 +797,7 @@ fn spawn_clipboard_bridge(
                                 HistoryContent::ImagePng(png.clone()),
                                 false,
                                 client::now_ms(),
+                                own_id,
                             );
                         }
                         if local_tx.blocking_send(LocalEvent::Image(png)).is_err() {
@@ -805,6 +857,8 @@ struct Sinks {
 fn spawn_retained_pump(
     tx: mpsc::Sender<LocalEvent>,
     wanted: Arc<AtomicBool>,
+    announce: Arc<AtomicBool>,
+    paths: Paths,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -813,6 +867,21 @@ fn spawn_retained_pump(
                 && tx.send(LocalEvent::FetchRetained).await.is_err()
             {
                 return;
+            }
+            // A new name from Settings, told to the other devices straight away rather than at
+            // the next reconnect.
+            if announce.swap(false, Ordering::Relaxed) {
+                let name = paths
+                    .load_config()
+                    .map(|config| config.device_name)
+                    .unwrap_or_default();
+                let info = DeviceInfo {
+                    name: crate::devices::display_name(&name),
+                    os: crate::devices::this_os(),
+                };
+                if tx.send(LocalEvent::DeviceInfo(info)).await.is_err() {
+                    return;
+                }
             }
         }
     })
@@ -908,6 +977,8 @@ async fn run_connection_loop(
             .load_config()
             .map_or_else(|_| config.relay_url.clone(), |live| live.relay_url);
         "Connecting".clone_into(&mut status.state);
+        status.attempt = status.attempt.saturating_add(1);
+        status.retry_at_ms = None;
         eprintln!(
             "{}",
             log_line(
@@ -940,6 +1011,8 @@ async fn run_connection_loop(
         let retained_pump = spawn_retained_pump(
             local_tx_for_retained.clone(),
             Arc::clone(&controls.retained_wanted),
+            Arc::clone(&controls.settings.announce),
+            paths.clone(),
         );
 
         let reconnect = Arc::clone(&controls.settings.reconnect);
@@ -949,6 +1022,7 @@ async fn run_connection_loop(
         let mut on_event = |event: ClientEvent| {
             if matches!(event, ClientEvent::Authenticated { .. }) {
                 authenticated_at.set(Some(client::now_ms()));
+                status.attempt = 0;
             }
             on_live_event(
                 &event,
@@ -974,6 +1048,7 @@ async fn run_connection_loop(
         };
 
         retained_pump.abort();
+        controls.devices.set_connected(false, 0, client::now_ms());
 
         // A connection that authenticated and then stayed up resets the pacing, including a floor
         // a rate limit or quota close imposed. Nothing did before, so after a handful of drops
@@ -996,23 +1071,47 @@ async fn run_connection_loop(
             return Ok(());
         }
 
-        controls.status.set(status.clone());
-
-        let delay = backoff.next_delay()?;
-        // The reason and the delay together, because "it worked for a week then stopped" is the
-        // defining complaint in this category and a log that omits why is no help at all.
-        eprintln!(
-            "{}",
-            log_line(
-                "disconnected",
-                &format!("{}, retrying in {delay} ms", status.state)
-            )
-        );
-        // Asked for, so at once. The backoff is for failures, and this is not one.
-        if !reconnect.swap(false, Ordering::Relaxed) {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-        }
+        wait_to_retry(&mut backoff, &controls, &mut status, &reconnect).await?;
     }
+}
+
+/// Waits out the pause before the next attempt, publishing when it ends.
+///
+/// # Errors
+///
+/// Returns the backoff's error if it has given up, which it only does for a pacing it cannot
+/// represent.
+async fn wait_to_retry(
+    backoff: &mut Backoff,
+    controls: &Controls,
+    status: &mut Status,
+    reconnect: &AtomicBool,
+) -> Result<()> {
+    let delay = backoff.next_delay()?;
+    status.retry_at_ms = Some(client::now_ms().saturating_add(delay));
+    controls.status.set(status.clone());
+
+    // The reason and the delay together, because "it worked for a week then stopped" is the
+    // defining complaint in this category and a log that omits why is no help at all.
+    eprintln!(
+        "{}",
+        log_line(
+            "disconnected",
+            &format!("{}, retrying in {delay} ms", status.state)
+        )
+    );
+    // Asked for, so at once. The backoff is for failures, and this is not one. Retry now in the
+    // window sets the same flag, and cuts a wait already under way short.
+    if !reconnect.swap(false, Ordering::Relaxed) {
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(delay)) => {}
+            () = wait_for(reconnect) => {
+                eprintln!("{}", log_line("retrying", "asked to retry now"));
+            }
+        }
+        reconnect.store(false, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// Resolves once `flag` is set. A quarter second of polling is invisible for a settings change.
@@ -1029,6 +1128,7 @@ mod tests {
 
     fn retained_clip(text: &str) -> ClientEvent {
         ClientEvent::Clip(client::ReceivedClip {
+            device_id: [9; 16],
             text: text.to_owned(),
             ts_ms: 1_000,
             retained: true,
@@ -1145,6 +1245,7 @@ mod tests {
         let stub = StubClipboard::default();
         let mut status = Status::default();
         let action = Action::Clip {
+            device_id: [9; 16],
             text: "from the laptop".to_owned(),
             ts_ms: 1_000,
             retained: false,
@@ -1159,6 +1260,7 @@ mod tests {
         let stub = StubClipboard::default();
         let mut status = Status::default();
         let action = Action::Clip {
+            device_id: [9; 16],
             text: "yesterday's copy".to_owned(),
             ts_ms: 1,
             retained: true,
@@ -1177,6 +1279,7 @@ mod tests {
         let mut status = Status::default();
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
         let action = Action::Image {
+            device_id: [9; 16],
             png: png.clone(),
             ts_ms: 1_000,
         };
@@ -1206,6 +1309,7 @@ mod tests {
 
         let mut status = Status::default();
         let action = Action::Image {
+            device_id: [9; 16],
             png: vec![1, 2, 3],
             ts_ms: 0,
         };
@@ -1267,6 +1371,7 @@ mod tests {
 
         let mut status = Status::default();
         let action = Action::Clip {
+            device_id: [9; 16],
             text: "x".to_owned(),
             ts_ms: 0,
             retained: false,

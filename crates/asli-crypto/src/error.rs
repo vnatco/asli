@@ -65,6 +65,8 @@ pub enum Error {
     ChunkIncomplete,
     /// The chunks accumulated past the size cap, detected mid stream rather than at the end.
     ChunkTooLarge,
+    /// A device name or operating system in an announcement was longer than the field allows.
+    AnnounceField,
 }
 
 impl fmt::Display for Error {
@@ -96,6 +98,9 @@ impl fmt::Display for Error {
             Self::ChunkMismatch => f.write_str("a chunk did not belong to this message"),
             Self::ChunkIncomplete => f.write_str("a chunk is missing, so nothing was reassembled"),
             Self::ChunkTooLarge => f.write_str("the chunked payload exceeded the size cap"),
+            Self::AnnounceField => f.write_str(
+                "a device name or operating system is longer than an announcement allows",
+            ),
         }
     }
 }

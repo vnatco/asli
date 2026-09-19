@@ -1,22 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The Asli mark: two offset sheets, which is what a copy looks like.
+  The Asli application icon: two offset sheets, which is what a copy looks like, on a dark tile.
 
-  This is the same shape the tray draws and the same shape the window's rail draws, but it is a
-  third drawing of it, on purpose. The tray icon is per pixel Rust in crates/asli-app/src/tray.rs,
-  hand tuned to stay legible at 16 pixels where a scaled down vector turns to mush, and it carries
-  a state dot this one must not have. This file is the application icon: it is what the desktop
-  shows in a title bar, a task switcher and a launcher, at 48 pixels and up.
+  This is what the desktop shows in a title bar, a task switcher and a launcher, at 48 pixels and
+  up. The same mark appears in three other drawings, on purpose: inside the window, from
+  crates/asli-ui/ui/icons/app-icon.svg and mark.svg, and in the tray, drawn per pixel in
+  crates/asli-app/src/tray.rs, where it carries a state badge this one must not have and has to
+  stay legible at 16 pixels. If the mark changes, it changes in all of them.
 
-  If the mark ever changes, it has to change in both places. There is no shared source, because the
-  two jobs genuinely want different drawings.
+  packaging/icons/asli-256.png and packaging/windows/asli.ico are rendered from this file.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
   <title>Asli</title>
-
-  <!-- The back sheet, dimmer, which is what makes it read as behind rather than beside. -->
-  <rect x="29.8" y="24" width="138.7" height="161.8" rx="34.7" fill="#3b69bf"/>
-
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#1B2436"/><stop offset="1" stop-color="#0B0E14"/></linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7FAEFF"/><stop offset="1" stop-color="#2F73F0"/></linearGradient>
+    <linearGradient id="back" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#AFCEFF"/><stop offset="1" stop-color="#6FA5FF"/></linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.25" r="0.75"><stop offset="0" stop-color="#4C8DFF" stop-opacity="0.35"/><stop offset="1" stop-color="#4C8DFF" stop-opacity="0"/></radialGradient>
+  </defs>
+  <!-- The tile, lit from above. -->
+  <rect width="256" height="256" rx="60" fill="url(#bg)"/>
+  <rect width="256" height="256" rx="60" fill="url(#glow)"/>
+  <rect x="0.75" y="0.75" width="254.5" height="254.5" rx="59.25" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="1.5"/>
+  <!-- The back sheet, faint, which is what makes it read as behind rather than beside. -->
+  <rect x="52" y="52" width="120" height="120" rx="32" fill="url(#back)" opacity="0.40"/>
   <!-- The front sheet, offset down and right, in the accent the rest of the application uses. -->
-  <rect x="87.6" y="70.2" width="138.7" height="161.8" rx="34.7" fill="#4f8cff"/>
+  <rect x="84" y="84" width="120" height="120" rx="32" fill="url(#front)"/>
+  <rect x="86.5" y="86.5" width="115" height="115" rx="29.5" stroke="#CFE1FF" stroke-opacity="0.35" stroke-width="5"/>
 </svg>

@@ -44,6 +44,19 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Changed
 
+- The window is redesigned throughout: its own title bar, a sidebar with icons and the sync state
+  at its foot, a welcome screen with two ways in, a join screen with a way back, a status card
+  whose colour, label and action follow the connection, and new icons for the application and the
+  tray. The tray icon carries the state as a badge: green when synced, grey when paused, red when
+  the relay cannot be reached, blinking while connecting.
+- Devices now tell each other their name and operating system, sealed like a clip, and Status
+  lists every device on the account with whether it is online or when it was last seen. The name
+  defaults to the computer's own and can be changed in Settings. The relay forwards these
+  announcements without storing them and cannot read them. See section 7.12 of the protocol.
+- History says which device each clip came from, shows images as thumbnails with their size, and
+  can copy an entry to this device alone without sending it anywhere.
+- The join string's QR code uses the lowest error correction level, which is enough for a screen
+  and makes its modules larger and easier for a camera to read.
 - Sync no longer depends on clocks being right. The message ids and sequence numbers that refuse
   a replayed clip are now saved across restarts, so the freshness window, which used to be two
   minutes and carried that job alone, is now a 24 hour sanity bound. A device in the wrong time
@@ -51,6 +64,8 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- On Linux, a notification service that never answered froze the tray: every menu click after the
+  first notification did nothing. Notifications are now sent from a thread of their own.
 - A connection left dead by sleep or a network change was never noticed: the tray said Synced
   and nothing arrived. The client now pings, and reconnects after 70 seconds of silence.
 - A copy made just as the network dropped was lost with the connection. It is now sent again on

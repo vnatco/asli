@@ -7,17 +7,19 @@
 //!
 //! The caller supplies the current time, so tests are deterministic.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use asli_core::{EchoGuard, Incoming, ReplayGuard, ReplayMemory, Verdict};
+use asli_crypto::announce;
 use asli_crypto::chunk::{self, Assembly, ChunkPos};
 use asli_crypto::clip::{self, ContentType, Inner, DEVICE_ID_LEN, MSG_ID_LEN, NONCE_LEN, TAG_LEN};
 use asli_crypto::identity::ROOM_ID_LEN;
 use asli_crypto::Identity;
 
 use crate::envelope::{
-    self, Auth, AuthFailCode, Clip, ClipChunk, ErrorCode, FetchLast, Hello, Limits, Message, Pong,
-    PROTOCOL_VERSION,
+    self, Announce, Auth, AuthFailCode, Clip, ClipChunk, ErrorCode, FetchLast, Hello, Limits,
+    Message, Pong, PROTOCOL_VERSION,
 };
 use crate::error::{Error, Result};
 
@@ -26,6 +28,31 @@ pub const DEFAULT_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Client identifier sent in `hello`. Deliberately carries no hostname or username.
 pub const CLIENT_ID: &str = concat!("asli/", env!("CARGO_PKG_VERSION"));
+
+/// What this device says about itself to the others in the room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// What the person calls this device.
+    pub name: String,
+    /// The operating system, as a short human readable label.
+    pub os: String,
+}
+
+/// What another device in the room said about itself, decrypted and validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerInfo {
+    /// The device, the same identifier its clips carry.
+    pub device_id: [u8; DEVICE_ID_LEN],
+    /// What the person calls it. At most 64 bytes.
+    pub name: String,
+    /// Its operating system. At most 64 bytes.
+    pub os: String,
+    /// When it announced itself, by its own clock.
+    pub ts_ms: u64,
+}
+
+/// How many announcement message ids are remembered for dedup.
+const ANNOUNCE_SEEN_CAPACITY: usize = 64;
 
 /// How far the driver has progressed through the handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +89,8 @@ pub enum Action {
         ts_ms: u64,
         /// Whether the relay delivered this as a stored clip rather than a live one.
         retained: bool,
+        /// The device that copied it.
+        device_id: [u8; DEVICE_ID_LEN],
     },
     /// A chunked image arrived, reassembled and validated.
     ///
@@ -73,7 +102,11 @@ pub enum Action {
         png: Vec<u8>,
         /// Capture time from inside the ciphertext.
         ts_ms: u64,
+        /// The device that copied it.
+        device_id: [u8; DEVICE_ID_LEN],
     },
+    /// Another device announced its name and operating system.
+    Peer(PeerInfo),
     /// The room connection count changed.
     Presence {
         /// Connections in the room. Never a device count.
@@ -147,6 +180,19 @@ pub struct Session {
     /// outside the protocol, and allowing it would mean unbounded concurrent assemblies, which is
     /// the memory exhaustion this cap exists to prevent.
     assembly: Option<Assembly>,
+    /// What this device announces. Nothing is announced until it is set.
+    device_info: Option<DeviceInfo>,
+    /// Whether the relay on this connection is known not to forward announcements.
+    ///
+    /// A relay from before announcements answers one with `UNKNOWN_TYPE` and keeps the connection,
+    /// so the first such answer settles it, and nothing more is announced until the next
+    /// connection, which may be to a relay that has since been updated.
+    announce_refused: bool,
+    /// Whether an announcement went out on this connection, which is what makes an
+    /// `UNKNOWN_TYPE` answer mean the relay does not know announcements.
+    announced: bool,
+    /// Message ids of recent announcements, so a replayed one is not reported twice.
+    announce_seen: VecDeque<[u8; MSG_ID_LEN]>,
 }
 
 impl Session {
@@ -172,7 +218,75 @@ impl Session {
             replay_sink: None,
             echo_guard: true,
             resend: None,
+            device_info: None,
+            announce_refused: false,
+            announced: false,
+            announce_seen: VecDeque::new(),
         }
+    }
+
+    /// Sets what this device announces, shortening an over long name or system to fit.
+    ///
+    /// Takes effect at the next announcement. To announce a change at once on a live connection,
+    /// send [`crate::client::LocalEvent::DeviceInfo`] instead, which calls this and then announces.
+    pub fn set_device_info(&mut self, mut info: DeviceInfo) {
+        let name_len = announce::truncate_utf8(&info.name, announce::MAX_FIELD_BYTES).len();
+        info.name.truncate(name_len);
+        let os_len = announce::truncate_utf8(&info.os, announce::MAX_FIELD_BYTES).len();
+        info.os.truncate(os_len);
+        self.device_info = Some(info);
+    }
+
+    /// Builds an announcement of this device, or nothing when there is nothing to announce.
+    ///
+    /// Nothing before the handshake completes, nothing while no device information is set, and
+    /// nothing to a relay that already answered one with `UNKNOWN_TYPE` on this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if randomness or sealing fails.
+    pub fn announce_frame(&mut self, now_ms: u64) -> Result<Option<String>> {
+        if self.phase != Phase::Ready || self.announce_refused {
+            return Ok(None);
+        }
+        let Some(info) = &self.device_info else {
+            return Ok(None);
+        };
+
+        let msg_id: [u8; MSG_ID_LEN] = asli_crypto::random::bytes()?;
+        let sealed = announce::seal(
+            &self.identity.enc_key(self.epoch),
+            self.epoch,
+            &self.identity.room_id_bytes(),
+            &msg_id,
+            &announce::Announce {
+                device_id: self.device_id,
+                ts_ms: now_ms,
+                name: info.name.clone(),
+                os: info.os.clone(),
+            },
+        )?;
+        self.announced = true;
+
+        Ok(Some(
+            Message::Announce(Announce {
+                v: PROTOCOL_VERSION,
+                room: self.identity.room_id(),
+                epoch: self.epoch,
+                msg_id: msg_id.to_vec(),
+                n: sealed.nonce.to_vec(),
+                ct: sealed.ciphertext,
+            })
+            .to_frame()?,
+        ))
+    }
+
+    /// Appends an announcement to `actions`, when there is one to make.
+    fn push_announce(&mut self, actions: &mut Vec<Action>, now_ms: u64) -> Result<()> {
+        if let Some(frame) = self.announce_frame(now_ms)? {
+            actions.push(Action::Send(frame));
+        }
+        Ok(())
     }
 
     /// Keeps a copy the relay never confirmed, for the next connection to send.
@@ -257,6 +371,9 @@ impl Session {
         self.phase = Phase::HelloSent;
         // A new connection. Half an image from the one before can never be finished now.
         self.assembly = None;
+        // And possibly a different relay, so whether it forwards announcements is found out again.
+        self.announce_refused = false;
+        self.announced = false;
         Message::Hello(Hello {
             v: PROTOCOL_VERSION,
             suites: vec![asli_crypto::SUITE.to_owned()],
@@ -301,11 +418,15 @@ impl Session {
             Message::AuthOk(ok) => {
                 self.phase = Phase::Ready;
                 self.peers = ok.peers;
-                Ok(vec![Action::Authenticated {
+                let mut actions = vec![Action::Authenticated {
                     peers: ok.peers,
                     has_retained: ok.has_retained,
                     stored_at: ok.stored_at,
-                }])
+                }];
+                // Introduce ourselves to whoever is already in the room. They answer when the
+                // presence count they see changes, which is how this device learns about them.
+                self.push_announce(&mut actions, now_ms)?;
+                Ok(actions)
             }
             Message::AuthFail(fail) => Ok(vec![Action::AuthFailed(fail.code)]),
             Message::Clip(clip) => self.on_clip(&clip, now_ms),
@@ -313,11 +434,20 @@ impl Session {
                 self.on_chunk(&c, now_ms)
             }
             Message::Presence(presence) => {
+                let changed = presence.peers != self.peers;
                 self.peers = presence.peers;
-                Ok(vec![Action::Presence {
+                let mut actions = vec![Action::Presence {
                     peers: presence.peers,
-                }])
+                }];
+                // Any change, up or down. Up, so a device that just joined learns about this one.
+                // Down, so every device still here says so, and the one that left is the one that
+                // stays silent.
+                if changed {
+                    self.push_announce(&mut actions, now_ms)?;
+                }
+                Ok(actions)
             }
+            Message::Announce(announce) => self.on_announce(&announce, now_ms),
             Message::Ping(ping) => Ok(vec![Action::Send(
                 Message::Pong(Pong {
                     v: PROTOCOL_VERSION,
@@ -326,6 +456,14 @@ impl Session {
                 .to_frame()?,
             )]),
             Message::Pong(_) => Ok(Vec::new()),
+            // A relay from before announcements answers one this way and keeps the connection. The
+            // only type this client ever sends that a conforming relay could fail to know is
+            // `announce`, so this is that answer, and it is ours to absorb rather than a problem
+            // to show anyone.
+            Message::Error(err) if err.code == ErrorCode::UnknownType && self.announced => {
+                self.announce_refused = true;
+                Ok(Vec::new())
+            }
             Message::Error(err) => Ok(vec![Action::RelayError {
                 code: err.code,
                 retry_after_ms: err.retry_after_ms,
@@ -458,7 +596,69 @@ impl Session {
             text,
             ts_ms: inner.ts_ms,
             retained,
+            device_id: inner.device_id,
         }])
+    }
+
+    fn on_announce(&mut self, message: &Announce, now_ms: u64) -> Result<Vec<Action>> {
+        if self.phase != Phase::Ready {
+            return Err(Error::OutOfOrder("announce before auth_ok"));
+        }
+
+        // Structural checks are protocol errors, as for a clip.
+        let msg_id: [u8; MSG_ID_LEN] = envelope::fixed("msg_id", &message.msg_id)?;
+        let nonce: [u8; NONCE_LEN] = envelope::fixed("n", &message.n)?;
+        if message.ct.len() <= TAG_LEN {
+            return Err(Error::FieldLength {
+                field: "ct",
+                expected: TAG_LEN + 1,
+                got: message.ct.len(),
+            });
+        }
+
+        // Everything from here is a silent discard. An announcement only labels a device, so a
+        // discarded one costs a name on a screen, and none of these is worth a log line.
+        if message.room != self.identity.room_id() || !self.epoch_is_acceptable(message.epoch) {
+            return Ok(Vec::new());
+        }
+        if self.announce_seen.contains(&msg_id) {
+            return Ok(Vec::new());
+        }
+
+        let Ok(opened) = announce::open(
+            &self.identity.enc_key(message.epoch),
+            message.epoch,
+            &self.identity.room_id_bytes(),
+            &msg_id,
+            &nonce,
+            &message.ct,
+        ) else {
+            return Ok(Vec::new());
+        };
+
+        // Our own, sent back by a relay that should not have. Nothing to learn from it.
+        if opened.device_id == self.device_id {
+            return Ok(Vec::new());
+        }
+        // The same freshness window clips are held to, which is what bounds a replay.
+        let too_old = now_ms.saturating_sub(opened.ts_ms) > asli_core::replay::DEFAULT_MAX_AGE_MS;
+        let too_new =
+            opened.ts_ms.saturating_sub(now_ms) > asli_core::replay::DEFAULT_FUTURE_SKEW_MS;
+        if too_old || too_new {
+            return Ok(Vec::new());
+        }
+
+        if self.announce_seen.len() >= ANNOUNCE_SEEN_CAPACITY {
+            self.announce_seen.pop_front();
+        }
+        self.announce_seen.push_back(msg_id);
+
+        Ok(vec![Action::Peer(PeerInfo {
+            device_id: opened.device_id,
+            name: opened.name,
+            os: opened.os,
+            ts_ms: opened.ts_ms,
+        })])
     }
 
     fn on_chunk(&mut self, chunk: &ClipChunk, now_ms: u64) -> Result<Vec<Action>> {
@@ -565,6 +765,7 @@ impl Session {
             ContentType::ImagePng => Ok(vec![Action::Image {
                 png: inner.content,
                 ts_ms: inner.ts_ms,
+                device_id: inner.device_id,
             }]),
             // Text is never chunked in v1: accepting it here would mean two code paths for the
             // same content, and two paths to get loop prevention wrong on. ContentType is non
@@ -945,6 +1146,7 @@ mod tests {
                 text: "copied on device a".to_owned(),
                 ts_ms: NOW,
                 retained: false,
+                device_id: DEVICE_A,
             }]
         );
     }
@@ -1036,6 +1238,7 @@ mod tests {
                 text: "from this morning".to_owned(),
                 ts_ms: NOW,
                 retained: true,
+                device_id: DEVICE_A,
             }]
         );
     }
@@ -1137,6 +1340,7 @@ mod tests {
                 text: "line one\nline two\n".to_owned(),
                 ts_ms: NOW,
                 retained: false,
+                device_id: DEVICE_A,
             }]
         );
     }
@@ -1538,5 +1742,211 @@ mod tests {
         assert_eq!(types[0], "begin");
         assert_eq!(types[types.len() - 1], "end");
         assert!(types[1..types.len() - 1].iter().all(|t| *t == "chunk"));
+    }
+
+    fn presence_frame(peers: u32) -> String {
+        format!(r#"{{"v":1,"type":"presence","peers":{peers}}}"#)
+    }
+
+    fn info(name: &str) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_owned(),
+            os: "Linux".to_owned(),
+        }
+    }
+
+    /// The frames an action list asks to send, parsed.
+    fn sends(actions: &[Action]) -> Vec<Message> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send(frame) => Some(Message::parse(frame).expect("parses")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A session with device information set, taken through the handshake by hand so the
+    /// announcement that follows `auth_ok` is visible.
+    fn announcing_session(device_id: [u8; 16], name: &str) -> (Session, Vec<Action>) {
+        let mut session = Session::new(Identity::from_secret(&SECRET), device_id, 0);
+        session.set_device_info(info(name));
+        session.hello_frame().expect("hello");
+        session
+            .handle_frame(&challenge_frame(&[9u8; 32]), NOW)
+            .expect("challenge");
+        let actions = session
+            .handle_frame(&auth_ok_frame(), NOW)
+            .expect("auth_ok");
+        (session, actions)
+    }
+
+    #[test]
+    fn an_announcement_goes_out_after_auth_ok_and_reaches_the_other_device() {
+        let (_, actions) = announcing_session(DEVICE_A, "ThinkPad X1");
+        assert!(matches!(actions[0], Action::Authenticated { .. }));
+        let Some(Action::Send(frame)) = actions.get(1) else {
+            panic!("expected an announcement after auth_ok, got {actions:?}")
+        };
+
+        let (mut b, _) = ready_session(DEVICE_B);
+        assert_eq!(
+            b.handle_frame(frame, NOW).expect("opens"),
+            vec![Action::Peer(PeerInfo {
+                device_id: DEVICE_A,
+                name: "ThinkPad X1".to_owned(),
+                os: "Linux".to_owned(),
+                ts_ms: NOW,
+            })]
+        );
+    }
+
+    #[test]
+    fn nothing_is_announced_without_device_information() {
+        let (mut session, transport) = ready_session(DEVICE_A);
+        assert_eq!(transport.sent.len(), 2, "hello and auth, no announcement");
+        assert_eq!(session.announce_frame(NOW).expect("no error"), None);
+        let actions = session
+            .handle_frame(&presence_frame(3), NOW)
+            .expect("presence");
+        assert!(sends(&actions).is_empty());
+    }
+
+    #[test]
+    fn a_change_in_presence_either_way_announces_again_and_no_change_does_not() {
+        let (mut session, _) = announcing_session(DEVICE_A, "desk");
+        // auth_ok said two. The relay's presence broadcast for our own arrival repeats that.
+        let same = session
+            .handle_frame(&presence_frame(2), NOW)
+            .expect("presence");
+        assert!(sends(&same).is_empty(), "no change, no announcement");
+
+        for peers in [3, 2] {
+            let actions = session
+                .handle_frame(&presence_frame(peers), NOW)
+                .expect("presence");
+            assert_eq!(actions[0], Action::Presence { peers });
+            assert!(
+                matches!(sends(&actions).as_slice(), [Message::Announce(_)]),
+                "a change to {peers} must announce, got {actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn our_own_announcement_is_never_reported() {
+        let (mut a, actions) = announcing_session(DEVICE_A, "mine");
+        let Some(Action::Send(frame)) = actions.get(1) else {
+            panic!("expected an announcement")
+        };
+        assert!(a.handle_frame(frame, NOW).expect("handled").is_empty());
+    }
+
+    #[test]
+    fn a_replayed_or_stale_announcement_is_ignored() {
+        let (_, actions) = announcing_session(DEVICE_A, "laptop");
+        let Some(Action::Send(frame)) = actions.get(1) else {
+            panic!("expected an announcement")
+        };
+        let (mut b, _) = ready_session(DEVICE_B);
+        assert_eq!(b.handle_frame(frame, NOW).expect("first").len(), 1);
+        assert!(
+            b.handle_frame(frame, NOW).expect("again").is_empty(),
+            "dedup"
+        );
+
+        let (mut c, _) = ready_session(DEVICE_B);
+        let late = NOW + asli_core::replay::DEFAULT_MAX_AGE_MS + 1;
+        assert!(
+            c.handle_frame(frame, late).expect("late").is_empty(),
+            "too old"
+        );
+    }
+
+    #[test]
+    fn a_tampered_announcement_is_discarded_silently() {
+        let (_, actions) = announcing_session(DEVICE_A, "laptop");
+        let Some(Action::Send(frame)) = actions.get(1) else {
+            panic!("expected an announcement")
+        };
+        let Message::Announce(mut message) = Message::parse(frame).expect("parses") else {
+            panic!("expected an announce frame")
+        };
+        message.ct[0] ^= 1;
+        let tampered = Message::Announce(message).to_frame().expect("serializes");
+        let (mut b, _) = ready_session(DEVICE_B);
+        assert!(b.handle_frame(&tampered, NOW).expect("handled").is_empty());
+    }
+
+    #[test]
+    fn an_over_long_name_is_shortened_rather_than_refused() {
+        let (_, actions) = announcing_session(DEVICE_A, &"n".repeat(200));
+        let Some(Action::Send(frame)) = actions.get(1) else {
+            panic!("expected an announcement")
+        };
+        let (mut b, _) = ready_session(DEVICE_B);
+        let got = b.handle_frame(frame, NOW).expect("opens");
+        let [Action::Peer(peer)] = got.as_slice() else {
+            panic!("expected a peer, got {got:?}")
+        };
+        assert_eq!(peer.name.len(), announce::MAX_FIELD_BYTES);
+    }
+
+    #[test]
+    fn a_relay_that_does_not_know_announcements_is_left_alone_until_the_next_connection() {
+        let (mut session, _) = announcing_session(DEVICE_A, "desk");
+        // What a relay from before announcements answers, keeping the connection open.
+        let refusal =
+            r#"{"v":1,"type":"error","code":"UNKNOWN_TYPE","message":"unknown message type"}"#;
+        assert!(
+            session
+                .handle_frame(refusal, NOW)
+                .expect("absorbed")
+                .is_empty(),
+            "the refusal is ours to absorb, not a relay error to show"
+        );
+        let actions = session
+            .handle_frame(&presence_frame(5), NOW)
+            .expect("presence");
+        assert!(
+            sends(&actions).is_empty(),
+            "no more announcements on this connection"
+        );
+        assert_eq!(session.announce_frame(NOW).expect("no error"), None);
+
+        // A new connection may be to a relay that has since been updated.
+        session.hello_frame().expect("hello");
+        session
+            .handle_frame(&challenge_frame(&[9u8; 32]), NOW)
+            .expect("challenge");
+        let actions = session
+            .handle_frame(&auth_ok_frame(), NOW)
+            .expect("auth_ok");
+        assert!(matches!(sends(&actions).as_slice(), [Message::Announce(_)]));
+    }
+
+    #[test]
+    fn unknown_type_before_any_announcement_is_still_reported() {
+        let (mut session, _) = ready_session(DEVICE_A);
+        let refusal = r#"{"v":1,"type":"error","code":"UNKNOWN_TYPE"}"#;
+        assert_eq!(
+            session.handle_frame(refusal, NOW).expect("handled"),
+            vec![Action::RelayError {
+                code: ErrorCode::UnknownType,
+                retry_after_ms: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_received_clip_names_the_device_that_sent_it() {
+        let (mut a, _) = ready_session(DEVICE_A);
+        let (mut b, _) = ready_session(DEVICE_B);
+        let frame = a.observe_local("from a", NOW).unwrap().unwrap();
+        let actions = b.handle_frame(&frame, NOW).unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Clip { device_id, .. }] if *device_id == DEVICE_A
+        ));
     }
 }
