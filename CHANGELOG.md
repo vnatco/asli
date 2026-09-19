@@ -51,6 +51,18 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- A connection left dead by sleep or a network change was never noticed: the tray said Synced
+  and nothing arrived. The client now pings, and reconnects after 70 seconds of silence.
+- A copy made just as the network dropped was lost with the connection. It is now sent again on
+  the next one unless the relay confirmed it. Copies made while offline are no longer thrown away
+  on reconnect, and a backlog goes out as its newest copy only.
+- After a few disconnects every reconnect waited the full 30 seconds, and after one quota close
+  an hour, for the rest of the run. A stable connection now resets the pacing.
+- The history list did not update while open.
+- The notifications switch, size cap and relay address took effect only after a restart.
+- The relay: anyone could fill its room table for a day; a slow receiver was never disconnected;
+  a clip parked behind a slow link could arrive after a newer one; images to slow receivers
+  arrived broken; and per room quota state was never reclaimed.
 - Paste It Here did nothing: a stored clip that was asked for was treated like one that was not,
   and a stored clip this device had sent itself was dropped without a word.
 - The Windows executables and window had the generic program icon.
