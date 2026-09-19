@@ -5,6 +5,7 @@ import {
   decodeAtLeast,
   decodeExact,
   parseFrame,
+  validateAnnounce,
   validateAuth,
   validateClip,
   validateHello,
@@ -151,4 +152,23 @@ test('clip validation enforces field sizes and the epoch range', () => {
   assert.equal(validateClip(envelope({ ...base, msg_id: Buffer.alloc(17, 9).toString('base64') }), MAX), null);
   // Ciphertext must carry at least one byte plus the sixteen byte tag.
   assert.equal(validateClip(envelope({ ...base, ct: Buffer.alloc(16, 7).toString('base64') }), MAX), null);
+});
+
+test('announce validation takes a clip header and caps the ciphertext', () => {
+  const base = {
+    v: 1,
+    type: 'announce',
+    room: 'E5V0APG0E0QQ5MEGA99JBPFDHM',
+    epoch: 0,
+    msg_id: Buffer.alloc(16, 9).toString('base64'),
+    n: Buffer.alloc(24, 8).toString('base64'),
+    ct: Buffer.alloc(272, 7).toString('base64'),
+  };
+  assert.notEqual(validateAnnounce(envelope(base)), null);
+  assert.equal(validateAnnounce(envelope({ ...base, ct: Buffer.alloc(1025, 7).toString('base64') })), null);
+  assert.equal(validateAnnounce(envelope({ ...base, ct: Buffer.alloc(16, 7).toString('base64') })), null);
+
+  // Never retained, so a stored marker from a client has no place on one.
+  const parsed = parseFrame(frame({ ...base, retained: true }), MAX);
+  assert.equal(parsed.ok, false);
 });

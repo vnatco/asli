@@ -174,6 +174,18 @@ function clipFrame(msgId: Buffer, ciphertextByte: number): Json {
   };
 }
 
+function announceFrame(msgId: Buffer): Json {
+  return {
+    v: 1,
+    type: 'announce',
+    room: ROOM,
+    epoch: 0,
+    msg_id: msgId.toString('base64'),
+    n: Buffer.alloc(24, 0x42).toString('base64'),
+    ct: Buffer.alloc(272, 0x55).toString('base64'),
+  };
+}
+
 async function withRelay(fn: (port: number) => Promise<void>): Promise<void> {
   // The relay is told to listen on an ephemeral port directly, so PORT is left alone: a port of
   // zero in a real deployment is almost always a typo, and config.ts is right to reject it.
@@ -337,4 +349,74 @@ test('backpressure parks a frame instead of queueing once the buffer is above th
   assert.equal(shouldPark(0, 1024), false);
   assert.equal(shouldPark(1024, 1024), false);
   assert.equal(shouldPark(1025, 1024), true);
+});
+
+test('an announcement reaches the peer, not the sender, once, and is never retained', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    const b = await TestClient.open(port);
+    await a.handshake();
+    await b.handshake();
+
+    const msgId = randomBytes(16);
+    a.send(announceFrame(msgId));
+    const got = await b.nextOfType('announce');
+    assert.equal(got['msg_id'], msgId.toString('base64'));
+    assert.equal(got['retained'], undefined);
+
+    // The same message id again is a duplicate and goes nowhere.
+    a.send(announceFrame(msgId));
+    a.send({ v: 1, type: 'ping', t: 1 });
+    await a.nextOfType('pong');
+    b.send({ v: 1, type: 'ping', t: 2 });
+    const next = await b.nextOfType('pong');
+    assert.equal(next['t'], 2);
+
+    // Nothing was retained: a late joiner finds no stored clip and cannot fetch an announcement.
+    const c = await TestClient.open(port);
+    const ok = await c.handshake();
+    assert.equal(ok['has_retained'], false);
+    a.close();
+    b.close();
+    c.close();
+  });
+});
+
+test('an announcement never displaces a clip waiting for a slow receiver', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    const b = await TestClient.open(port);
+    await a.handshake();
+    await b.handshake();
+
+    a.send(clipFrame(randomBytes(16), 0x61));
+    a.send(announceFrame(randomBytes(16)));
+    const first = await b.nextOfType('clip');
+    assert.equal(first['type'], 'clip');
+    a.close();
+    b.close();
+  });
+});
+
+test('an oversize announcement is refused and closes the connection', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    await a.handshake();
+    const closed = new Promise<number>((resolve) => {
+      a.ws.once('close', (code: number) => resolve(code));
+    });
+    a.send({ ...announceFrame(randomBytes(16)), ct: Buffer.alloc(4096, 1).toString('base64') });
+    assert.equal(await closed, 4005);
+  });
+});
+
+test('an announcement before the handshake is refused', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    const closed = new Promise<number>((resolve) => {
+      a.ws.once('close', (code: number) => resolve(code));
+    });
+    a.send(announceFrame(randomBytes(16)));
+    assert.equal(await closed, 4005);
+  });
 });

@@ -25,6 +25,7 @@ import { AUTH_FAIL_CLOSE, roomKey, verifyAuth } from './auth.ts';
 import type { AuthFailCode, NonceState } from './auth.ts';
 import {
   parseFrame,
+  validateAnnounce,
   validateAuth,
   validateChunk,
   validateClip,
@@ -471,6 +472,68 @@ export function createRelay(config: Config): Relay {
     });
   }
 
+  /**
+   * Forwards one device announcement to the rest of the room.
+   *
+   * An announcement tells the other devices a name and an operating system, sealed, so the relay
+   * treats it as an opaque frame like a clip, with three differences. It is never retained: a late
+   * joiner learns names from the devices themselves, which announce again whenever the room's
+   * connection count changes. It never takes a receiver's parked clip slot, because that slot is
+   * last write wins and a name must not displace a copy. And under backpressure it is simply not
+   * sent, because it is advisory and the next one replaces it.
+   */
+  function handleAnnounce(
+    session: Session,
+    raw: NodeBuffer,
+    message: ReturnType<typeof parseFrame>,
+  ): void {
+    if (!message.ok) return;
+    const fields = validateAnnounce(message.message);
+    if (fields === null) {
+      sendError(session, 'MALFORMED', 'announce failed validation');
+      session.ws.close(4005, 'MALFORMED');
+      return;
+    }
+    if (roomKeyOf(fields.roomText) !== session.conn.roomId) {
+      session.ws.close(4005, 'ROOM_MISMATCH');
+      return;
+    }
+
+    const now = Date.now();
+    let quota = roomQuotas.get(session.conn.roomId);
+    if (quota === undefined) {
+      quota = new RollingQuota(config.roomBytesPerDay, 24 * 60 * 60 * 1000, now);
+      roomQuotas.set(session.conn.roomId, quota);
+    }
+    if (!quota.charge(raw.length, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
+      sendError(session, 'QUOTA_EXCEEDED', 'room daily quota exhausted', quota.retryAfterMs(now));
+      session.ws.close(4008, 'QUOTA_EXCEEDED');
+      return;
+    }
+
+    if (registry.isDuplicate(session.conn.roomId, fields.msgIdText)) return;
+
+    const frame = raw.toString('utf8');
+    let delivered = 0;
+    for (const peer of sessions) {
+      if (peer === session) continue;
+      if (peer.state !== 'ready' || peer.conn.roomId !== session.conn.roomId) continue;
+      if (peer.ws.readyState !== peer.ws.OPEN) continue;
+      if (peer.pendingClip !== null || shouldPark(peer.ws.bufferedAmount, config.backpressureSoftBytes)) {
+        continue;
+      }
+      peer.ws.send(frame);
+      delivered += 1;
+    }
+
+    log.debug('announce_forward', {
+      conn: session.conn.id,
+      room: roomLogId(session.conn.roomId),
+      count: delivered,
+    });
+  }
+
   function handleFetchLast(session: Session): void {
     const retained = registry.retainedFor(session.conn.roomId, Date.now());
     if (retained === null) {
@@ -615,6 +678,9 @@ export function createRelay(config: Config): Relay {
         case 'clip_chunk':
         case 'clip_end':
           handleChunk(session, raw, parsed, type);
+          return;
+        case 'announce':
+          handleAnnounce(session, raw, parsed);
           return;
         case 'fetch_last':
           handleFetchLast(session);

@@ -38,6 +38,7 @@ const KNOWN_TYPES = new Set([
   'clip_begin',
   'clip_chunk',
   'clip_end',
+  'announce',
   'fetch_last',
   'ping',
   'pong',
@@ -63,6 +64,7 @@ const ALLOWED_FIELDS: Record<string, ReadonlySet<string>> = {
   clip_begin: CHUNK_FIELDS,
   clip_chunk: CHUNK_FIELDS,
   clip_end: CHUNK_FIELDS,
+  announce: new Set(['v', 'type', 'room', 'epoch', 'msg_id', 'n', 'ct']),
   fetch_last: new Set(['v', 'type']),
   ping: new Set(['v', 'type', 't']),
   pong: new Set(['v', 'type', 't']),
@@ -220,6 +222,28 @@ export function validateClip(message: Envelope, maxFrameChars: number): ClipFiel
   if (ciphertext === null) return null;
 
   return { roomText, epoch, msgIdText, msgId, nonce, ciphertextBytes: ciphertext.length };
+}
+
+/**
+ * Largest announcement ciphertext accepted, in bytes.
+ *
+ * Every announcement is a fixed 256 byte plaintext plus the 16 byte tag. The cap leaves room for a
+ * future layout without letting `announce`, which is never charged against retention, become a
+ * way to push large frames through the room.
+ */
+export const ANNOUNCE_MAX_CT_BYTES = 1024;
+
+/**
+ * Validates the shape of `announce`, which is a clip header with a small ciphertext.
+ *
+ * The relay never opens it. Name and operating system are inside the ciphertext, padded to a
+ * fixed size, so there is nothing here to learn about the device beyond what a clip reveals.
+ */
+export function validateAnnounce(message: Envelope): ClipFields | null {
+  const maxChars = Math.ceil(ANNOUNCE_MAX_CT_BYTES / 3) * 4;
+  const fields = validateClip(message, maxChars);
+  if (fields === null || fields.ciphertextBytes > ANNOUNCE_MAX_CT_BYTES) return null;
+  return fields;
 }
 
 /** Upper bound on chunks per message, matching the crypto layer's cap. */

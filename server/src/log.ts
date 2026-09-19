@@ -30,6 +30,7 @@ export type EventName =
   | 'auth_fail'
   | 'clip_forward'
   | 'chunk_complete'
+  | 'announce_forward'
   | 'chunk_assembly_timeout'
   | 'clip_dropped'
   | 'clip_retained'
