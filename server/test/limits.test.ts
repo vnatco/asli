@@ -116,3 +116,11 @@ test('a chain of only trusted hops falls back to the socket address', () => {
   const resolved = resolveClientAddress('10.0.0.1', '10.0.0.2, 10.0.0.3', ['10.0.0.0/8']);
   assert.equal(resolved, '10.0.0.1');
 });
+
+test('a rolling quota is idle once nothing has been charged in its window', () => {
+  const quota = new RollingQuota(1000, 60_000, 0);
+  assert.equal(quota.isIdle(0), true, 'fresh');
+  assert.equal(quota.charge(10, 1), true);
+  assert.equal(quota.isIdle(30_000), false, 'charged in this window');
+  assert.equal(quota.isIdle(60_001), true, 'the window has passed');
+});

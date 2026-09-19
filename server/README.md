@@ -72,7 +72,7 @@ nonsense value. The defaults are the public relay's.
 | `RETAIN_MAX_BYTES` | 64 KiB | Messages above this are forwarded live but never stored |
 | `RETAIN_GLOBAL_BUDGET_BYTES` | 256 MiB | Ceiling across all rooms, with least recently used eviction |
 | `RETAIN_TTL_MS` | 24 hours | How long a stored clip survives |
-| `MAX_ROOMS` | 100000 | Refuse new rooms past this |
+| `MAX_ROOMS` | 100000 | At this many rooms, the empty room idle longest is dropped for a new one; new rooms are refused only when every room has someone in it |
 | `MSG_BURST`, `MSGS_PER_SEC` | 10, 2 | Per connection message rate |
 | `BYTE_BURST`, `BYTES_PER_SEC` | 2 MiB, 256 KiB | Per connection byte rate |
 | `ROOM_BYTES_PER_DAY` | 50 MiB | Per room rolling quota |

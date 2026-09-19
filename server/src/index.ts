@@ -17,6 +17,9 @@ relay.httpServer.listen(config.port, config.host, () => {
   log.info('listening', { port: relay.port() });
 });
 
+// Loopback only, whatever the main host is: the numbers are for the operator, not the internet.
+relay.metricsServer?.listen(config.metricsPort, '127.0.0.1');
+
 let shuttingDown = false;
 
 async function shutdown(): Promise<void> {

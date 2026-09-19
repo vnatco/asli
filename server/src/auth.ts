@@ -166,5 +166,13 @@ export function verifyAuth(
   // Step 7: the handshake must have completed inside the auth timeout.
   if (timedOut) return failure('AUTH_TIMEOUT');
 
-  return { ok: true, roomId: fields.roomText.toUpperCase(), roomIdBytes };
+  // Keyed by the decoded bytes, not the text. Crockford decoding folds I and L to 1 and O to 0,
+  // so two spellings of one room id would otherwise be two rooms here, each with its own peers,
+  // quota and retained clip.
+  return { ok: true, roomId: roomKey(roomIdBytes), roomIdBytes };
+}
+
+/** The relay's internal key for a room: its decoded id, in hex. */
+export function roomKey(roomIdBytes: Uint8Array): string {
+  return Buffer.from(roomIdBytes).toString('hex');
 }

@@ -78,6 +78,15 @@ export class RollingQuota {
     return true;
   }
 
+  /**
+   * Whether nothing has been charged in the current window, so forgetting this quota loses
+   * nothing. Asking `retryAfterMs` instead never works for this, because it starts a new window
+   * before answering and so never reports zero.
+   */
+  isIdle(nowMs: number): boolean {
+    return nowMs < this.windowStartMs || nowMs - this.windowStartMs >= this.windowMs || this.used === 0;
+  }
+
   /** Milliseconds until the window resets. */
   retryAfterMs(nowMs: number): number {
     this.rollIfNeeded(nowMs);
