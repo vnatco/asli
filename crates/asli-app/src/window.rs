@@ -402,11 +402,38 @@ fn show(screen: Screen) {
         Screen::FirstRun
     });
 
+    let already_open = window.window().is_visible();
+    if already_open && wayland_session() {
+        // Wayland refuses a focus request that does not carry an activation token, and the tray's
+        // click reaches us without one. A window shown afresh, though, is given focus. So an open
+        // window is closed and shown again, which puts it in front where a focus request would be
+        // ignored.
+        let _ = window.hide();
+    }
+
     if let Err(err) = window.show() {
         eprintln!("{}", log_line("window_failed", &err.to_string()));
         return;
     }
+    if already_open && !wayland_session() {
+        bring_to_front(&window);
+    }
     start_timer();
+}
+
+/// Un-minimizes the window and asks for focus, for a click on the tray icon when it is already
+/// open somewhere behind other windows. Showing an open window again does neither by itself.
+fn bring_to_front(window: &AppWindow) {
+    use slint::winit_030::WinitWindowAccessor as _;
+    window.window().with_winit_window(|winit| {
+        winit.set_minimized(false);
+        winit.focus_window();
+    });
+}
+
+/// Whether this is a Wayland session, where only a freshly shown window gets focus.
+fn wayland_session() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// Hides the window and stops everything that was running for it.

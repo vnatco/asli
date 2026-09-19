@@ -86,6 +86,10 @@ component NavItem inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "Asli";
+    // The title bar and taskbar icon on Windows and X11. Wayland takes it from the desktop entry
+    // named by the app id instead. Rendered from packaging/linux/asli.svg, the one source of the
+    // mark, and embedded at build time.
+    icon: @image-url("../../../packaging/icons/asli-256.png");
     background: Palette.bg;
     min-width: 720px;
     min-height: 460px;
@@ -307,75 +311,81 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.screen == Screen.Join: VerticalLayout {
-                padding: 28px;
-                spacing: Metrics.gap;
+            if root.screen == Screen.Join: Flickable {
+                // Scrolls when the window is shorter than the screen. Without it the bottom
+                // of the screen was simply cut off, with no way to reach it.
+                content-height: join-screen.preferred-height;
 
-                Heading { text: "Join Another Account"; }
-                Body {
-                    text: "Paste the join string from your other device with Ctrl+V. It starts "
-                        + "with asli1_ and is shown there under Join string.";
-                }
+                join-screen := VerticalLayout {
+                    padding: 28px;
+                    spacing: Metrics.gap;
 
-                Card {
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 10px;
+                    Heading { text: "Join Another Account"; }
+                    Body {
+                        text: "Paste the join string from your other device with Ctrl+V. It starts "
+                            + "with asli1_ and is shown there under Join string.";
+                    }
 
-                        Row {
-                            label: "Join String";
-                            join-field := Field {
-                                placeholder: "asli1_...";
-                                monospace: true;
-                                text <=> root.join-input;
-                                valid: root.join-check.valid;
-                                invalid: root.join-check.invalid;
-                                edited(value) => { root.check-token(value); }
-                                accepted(value) => {
-                                    if (root.join-check.valid) { root.join-account(value); }
+                    Card {
+                        VerticalLayout {
+                            padding: Metrics.pad;
+                            spacing: 10px;
+
+                            Row {
+                                label: "Join String";
+                                join-field := Field {
+                                    placeholder: "asli1_...";
+                                    monospace: true;
+                                    text <=> root.join-input;
+                                    valid: root.join-check.valid;
+                                    invalid: root.join-check.invalid;
+                                    edited(value) => { root.check-token(value); }
+                                    accepted(value) => {
+                                        if (root.join-check.valid) { root.join-account(value); }
+                                    }
+                                }
+                            }
+
+                            // The verdict sits under the field and names the specific mistake: a
+                            // wrong prefix, a bad checksum and a truncated string are three different
+                            // problems and only one of them means "you were given the wrong string".
+                            if root.join-check.message != "": Text {
+                                text: root.join-check.message;
+                                color: root.join-check.invalid ? Palette.bad : Palette.good;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Button {
+                                    text: root.join-busy ? "Joining..." : "Join";
+                                    primary: true;
+                                    enabled: root.join-check.valid && !root.join-busy;
+                                    clicked => { root.join-account(root.join-input); }
                                 }
                             }
                         }
+                    }
 
-                        // The verdict sits under the field and names the specific mistake: a
-                        // wrong prefix, a bad checksum and a truncated string are three different
-                        // problems and only one of them means "you were given the wrong string".
-                        if root.join-check.message != "": Text {
-                            text: root.join-check.message;
-                            color: root.join-check.invalid ? Palette.bad : Palette.good;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            Button {
-                                text: root.join-busy ? "Joining..." : "Join";
-                                primary: true;
-                                enabled: root.join-check.valid && !root.join-busy;
-                                clicked => { root.join-account(root.join-input); }
+                    if root.has-account: Card {
+                        background: Palette.surface;
+                        border-color: Palette.warn;
+                        VerticalLayout {
+                            padding: Metrics.pad;
+                            spacing: 6px;
+                            Heading { text: "This replaces the account on this device"; }
+                            Body {
+                                text: "Any device still using the current join string stops syncing with "
+                                    + "this machine, and the current account cannot be recovered unless "
+                                    + "you saved its join string somewhere.";
                             }
                         }
                     }
-                }
 
-                if root.has-account: Card {
-                    background: Palette.surface;
-                    border-color: Palette.warn;
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 6px;
-                        Heading { text: "This replaces the account on this device"; }
-                        Body {
-                            text: "Any device still using the current join string stops syncing with "
-                                + "this machine, and the current account cannot be recovered unless "
-                                + "you saved its join string somewhere.";
-                        }
-                    }
+                    Rectangle { vertical-stretch: 1; }
                 }
-
-                Rectangle { vertical-stretch: 1; }
             }
 
             // Two columns, because the window is wider than it is tall. Stacked down the middle
@@ -705,155 +715,161 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.screen == Screen.Status: VerticalLayout {
-                padding: 28px;
-                spacing: Metrics.gap;
+            if root.screen == Screen.Status: Flickable {
+                // Scrolls when the window is shorter than the screen. Without it the bottom
+                // of the screen was simply cut off, with no way to reach it.
+                content-height: status-screen.preferred-height;
 
-                Heading { text: "Status"; }
+                status-screen := VerticalLayout {
+                    padding: 28px;
+                    spacing: Metrics.gap;
 
-                Card {
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 12px;
+                    Heading { text: "Status"; }
 
-                        HorizontalLayout {
-                            spacing: Metrics.gap;
-                            StatusDot {
-                                tint: root.paused
-                                    ? Palette.warn
-                                    : root.connection == "Synced" ? Palette.good : Palette.bad;
-                                text: root.paused ? "Paused" : root.connection;
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: root.paused ? "Resume" : "Pause";
-                                primary: root.paused;
-                                clicked => { root.set-paused(!root.paused); }
-                            }
-                        }
+                    Card {
+                        VerticalLayout {
+                            padding: Metrics.pad;
+                            spacing: 12px;
 
-                        Rectangle { height: 1px; background: Palette.line; }
-
-                        // Each column packs to the top. Left to fill the row's height instead, a
-                        // label and its own value drifted a hundred pixels apart and stopped
-                        // reading as a pair.
-                        HorizontalLayout {
-                            spacing: Metrics.gap;
-                            VerticalLayout {
-                                spacing: 3px;
-                                alignment: start;
-                                horizontal-stretch: 1;
-                                Body { text: "Connected"; }
-                                Text {
-                                    // Connections, not devices: the relay cannot see devices, and
-                                    // saying otherwise would be a number we cannot stand behind.
-                                    text: root.peers == 1 ? "1 connection" : root.peers + " connections";
-                                    color: Palette.text;
-                                    font-size: 13px;
-                                    font-weight: 500;
+                            HorizontalLayout {
+                                spacing: Metrics.gap;
+                                StatusDot {
+                                    tint: root.paused
+                                        ? Palette.warn
+                                        : root.connection == "Synced" ? Palette.good : Palette.bad;
+                                    text: root.paused ? "Paused" : root.connection;
+                                    horizontal-stretch: 1;
+                                }
+                                Button {
+                                    text: root.paused ? "Resume" : "Pause";
+                                    primary: root.paused;
+                                    clicked => { root.set-paused(!root.paused); }
                                 }
                             }
-                            VerticalLayout {
-                                spacing: 3px;
-                                alignment: start;
-                                horizontal-stretch: 1;
-                                Body { text: "Last Sync"; }
-                                Text {
-                                    text: root.last-sync;
-                                    color: Palette.text;
-                                    font-size: 13px;
-                                    font-weight: 500;
+
+                            Rectangle { height: 1px; background: Palette.line; }
+
+                            // Each column packs to the top. Left to fill the row's height instead, a
+                            // label and its own value drifted a hundred pixels apart and stopped
+                            // reading as a pair.
+                            HorizontalLayout {
+                                spacing: Metrics.gap;
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+                                    Body { text: "Connected"; }
+                                    Text {
+                                        // Connections, not devices: the relay cannot see devices, and
+                                        // saying otherwise would be a number we cannot stand behind.
+                                        text: root.peers == 1 ? "1 connection" : root.peers + " connections";
+                                        color: Palette.text;
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+                                    Body { text: "Last Sync"; }
+                                    Text {
+                                        text: root.last-sync;
+                                        color: Palette.text;
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    alignment: start;
+                                    horizontal-stretch: 1;
+                                    Body { text: "Skipped"; }
+                                    Text {
+                                        text: root.skipped;
+                                        color: Palette.text;
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                    }
                                 }
                             }
-                            VerticalLayout {
-                                spacing: 3px;
+                        }
+                    }
+
+                    if root.has-retained: Card {
+                        VerticalLayout {
+                            padding: Metrics.pad;
+                            spacing: 8px;
+                            Heading { text: "The relay is holding a clip"; }
+                            Body {
+                                text: "Something was copied while this device was away. It is not "
+                                    + "written automatically, because that would overwrite whatever you "
+                                    + "copied here since.";
+                            }
+                            HorizontalLayout {
                                 alignment: start;
-                                horizontal-stretch: 1;
-                                Body { text: "Skipped"; }
-                                Text {
-                                    text: root.skipped;
-                                    color: Palette.text;
-                                    font-size: 13px;
-                                    font-weight: 500;
+                                Button {
+                                    text: "Paste It Here";
+                                    primary: true;
+                                    clicked => { root.request-retained(); }
                                 }
                             }
                         }
                     }
-                }
 
-                if root.has-retained: Card {
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 8px;
-                        Heading { text: "The relay is holding a clip"; }
-                        Body {
-                            text: "Something was copied while this device was away. It is not "
-                                + "written automatically, because that would overwrite whatever you "
-                                + "copied here since.";
+                    if root.last-error != "": Card {
+                        border-color: Palette.bad;
+                        VerticalLayout {
+                            padding: Metrics.pad;
+                            spacing: 6px;
+                            Heading { text: "Last Problem"; secondary: true; }
+                            Body { text: root.last-error; strong: true; }
                         }
-                        HorizontalLayout {
-                            alignment: start;
-                            Button {
-                                text: "Paste It Here";
-                                primary: true;
-                                clicked => { root.request-retained(); }
+                    }
+
+                    Card {
+                        VerticalLayout {
+                            padding: Metrics.pad;
+                            spacing: 10px;
+                            Heading { text: "This Device"; secondary: true; }
+
+                            // The label column has a fixed width and the value starts immediately
+                            // after it. Pushing the value to the right edge instead put a whole
+                            // screen of empty between a label and the thing it names once the
+                            // window went landscape.
+                            HorizontalLayout {
+                                spacing: Metrics.gap;
+                                Body { text: "Relay"; width: 110px; }
+                                Body { text: root.relay-host; strong: true; horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: Metrics.gap;
+                                Body { text: "Room"; width: 110px; }
+                                Body { text: root.room-id; strong: true; horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: Metrics.gap;
+                                Body { text: "Device"; width: 110px; }
+                                Body { text: root.device-id; strong: true; horizontal-stretch: 1; }
+                            }
+                            HorizontalLayout {
+                                spacing: Metrics.gap;
+                                Body { text: "Clipboard"; width: 110px; }
+                                Body { text: root.clipboard-backend; strong: true; horizontal-stretch: 1; }
+                            }
+
+                            HorizontalLayout {
+                                alignment: start;
+                                Button {
+                                    text: "Copy Diagnostics";
+                                    clicked => { root.copy-diagnostics(); }
+                                }
                             }
                         }
                     }
+
+                    Rectangle { vertical-stretch: 1; }
                 }
-
-                if root.last-error != "": Card {
-                    border-color: Palette.bad;
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 6px;
-                        Heading { text: "Last Problem"; secondary: true; }
-                        Body { text: root.last-error; strong: true; }
-                    }
-                }
-
-                Card {
-                    VerticalLayout {
-                        padding: Metrics.pad;
-                        spacing: 10px;
-                        Heading { text: "This Device"; secondary: true; }
-
-                        // The label column has a fixed width and the value starts immediately
-                        // after it. Pushing the value to the right edge instead put a whole
-                        // screen of empty between a label and the thing it names once the
-                        // window went landscape.
-                        HorizontalLayout {
-                            spacing: Metrics.gap;
-                            Body { text: "Relay"; width: 110px; }
-                            Body { text: root.relay-host; strong: true; horizontal-stretch: 1; }
-                        }
-                        HorizontalLayout {
-                            spacing: Metrics.gap;
-                            Body { text: "Room"; width: 110px; }
-                            Body { text: root.room-id; strong: true; horizontal-stretch: 1; }
-                        }
-                        HorizontalLayout {
-                            spacing: Metrics.gap;
-                            Body { text: "Device"; width: 110px; }
-                            Body { text: root.device-id; strong: true; horizontal-stretch: 1; }
-                        }
-                        HorizontalLayout {
-                            spacing: Metrics.gap;
-                            Body { text: "Clipboard"; width: 110px; }
-                            Body { text: root.clipboard-backend; strong: true; horizontal-stretch: 1; }
-                        }
-
-                        HorizontalLayout {
-                            alignment: start;
-                            Button {
-                                text: "Copy Diagnostics";
-                                clicked => { root.copy-diagnostics(); }
-                            }
-                        }
-                    }
-                }
-
-                Rectangle { vertical-stretch: 1; }
             }
         }
     }
