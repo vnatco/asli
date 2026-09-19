@@ -111,6 +111,9 @@ impl Controls {
     }
 }
 
+/// Whether the person has been told this run that the clock is wrong.
+static CLOCK_SKEW_TOLD: AtomicBool = AtomicBool::new(false);
+
 /// How many sequence numbers to reserve at a time.
 ///
 /// Large enough that the file is written rarely, small enough that the numbers stay meaningful.
@@ -224,7 +227,11 @@ pub fn on_client_event(
                 "this computer's clock is about {} hours off; past a day, clips will be dropped",
                 skew_ms.unsigned_abs().div_ceil(60 * 60 * 1000)
             ));
-            notify::clock_skew(*skew_ms);
+            // Once per run. It is reported again on every reconnect, and a notification each time
+            // would be noise about something that has not changed.
+            if !CLOCK_SKEW_TOLD.swap(true, Ordering::Relaxed) {
+                notify::clock_skew(*skew_ms);
+            }
             false
         }
         ClientEvent::ClipSkipped { got, limit } => {
@@ -520,6 +527,8 @@ pub async fn run(
     let seq = reserve_sequence(paths)?;
     let room = identity.room_id();
     let mut session = Session::new(identity, device_id, seq);
+    // The clipboard layer already recognises our own writes. See the method for why this matters.
+    session.leave_echoes_to_caller();
 
     // What earlier runs accepted, so a relay cannot replay an old clip into the gap a restart
     // would otherwise open.
@@ -935,7 +944,12 @@ async fn run_connection_loop(
 
         let reconnect = Arc::clone(&controls.settings.reconnect);
         reconnect.store(false, Ordering::Relaxed);
-        let mut on_event = |event| {
+        // When this connection authenticated, so its stability can reset the pacing afterwards.
+        let authenticated_at = std::cell::Cell::new(None);
+        let mut on_event = |event: ClientEvent| {
+            if matches!(event, ClientEvent::Authenticated { .. }) {
+                authenticated_at.set(Some(client::now_ms()));
+            }
             on_live_event(
                 &event,
                 io.as_ref(),
@@ -960,6 +974,20 @@ async fn run_connection_loop(
         };
 
         retained_pump.abort();
+
+        // A connection that authenticated and then stayed up resets the pacing, including a floor
+        // a rate limit or quota close imposed. Nothing did before, so after a handful of drops
+        // every reconnect for the rest of the process waited the full thirty seconds, and after
+        // a single quota close, an hour, sleep and wake included.
+        if let Some(at) = authenticated_at.get() {
+            backoff.on_authenticated(at);
+            if backoff.note_stable(client::now_ms()) {
+                eprintln!(
+                    "{}",
+                    log_line("backoff_reset", "the last connection was stable")
+                );
+            }
+        }
 
         // Whatever happened, the counter this connection reached must survive it.
         let _ = raise_reservation(paths, session.seq().saturating_add(SEQ_RESERVATION));

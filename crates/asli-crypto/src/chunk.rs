@@ -226,7 +226,7 @@ pub fn seal_plaintext_chunks(
         let pos = ChunkPos {
             idx,
             chunk_count,
-            final_chunk: idx + 1 == chunk_count,
+            final_chunk: idx.checked_add(1) == Some(chunk_count),
         };
         let nonce: [u8; NONCE_LEN] = crate::random::bytes()?;
         let ciphertext =

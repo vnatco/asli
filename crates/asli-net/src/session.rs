@@ -133,6 +133,12 @@ pub struct Session {
     replay: ReplayGuard,
     /// See [`Session::share_replay_memory`].
     replay_sink: Option<Arc<Mutex<ReplayMemory>>>,
+    /// Whether arriving clips are remembered so the clipboard change they cause is not sent back.
+    /// See [`Session::leave_echoes_to_caller`].
+    echo_guard: bool,
+    /// A local copy sent on a connection that died before the relay confirmed receiving it.
+    /// Sent again first thing on the next connection.
+    resend: Option<crate::client::LocalEvent>,
     peers: u32,
     pinned_auth: Option<([u8; 16], u64)>,
     /// The chunked message currently being reassembled, if any.
@@ -164,7 +170,28 @@ impl Session {
             pinned_auth: None,
             assembly: None,
             replay_sink: None,
+            echo_guard: true,
+            resend: None,
         }
+    }
+
+    /// Keeps a copy the relay never confirmed, for the next connection to send.
+    pub(crate) fn stash_resend(&mut self, event: crate::client::LocalEvent) {
+        self.resend = Some(event);
+    }
+
+    /// The copy to send again, if the last connection lost one.
+    pub(crate) fn take_resend(&mut self) -> Option<crate::client::LocalEvent> {
+        self.resend.take()
+    }
+
+    /// For a caller that recognises its own clipboard writes before they reach this session.
+    ///
+    /// The application does, at the clipboard. The guard here then never sees the echo it is
+    /// waiting for, so its entry lingers, and a person copying the same text again on purpose
+    /// within its lifetime had that copy swallowed.
+    pub const fn leave_echoes_to_caller(&mut self) {
+        self.echo_guard = false;
     }
 
     /// Takes back what the replay guard learned in an earlier run, so a replay is refused from the
@@ -228,6 +255,8 @@ impl Session {
     /// Returns an error only if serialization fails.
     pub fn hello_frame(&mut self) -> Result<String> {
         self.phase = Phase::HelloSent;
+        // A new connection. Half an image from the one before can never be finished now.
+        self.assembly = None;
         Message::Hello(Hello {
             v: PROTOCOL_VERSION,
             suites: vec![asli_crypto::SUITE.to_owned()],
@@ -421,7 +450,9 @@ impl Session {
 
         // Record before the caller writes, never after. The clipboard change notification can
         // arrive before the write call returns, and a hash recorded afterwards loses that race.
-        self.echo.remember(asli_core::hash(text.as_bytes()), now_ms);
+        if self.echo_guard {
+            self.echo.remember(asli_core::hash(text.as_bytes()), now_ms);
+        }
 
         Ok(vec![Action::Clip {
             text,
@@ -452,7 +483,7 @@ impl Session {
             return Ok(Vec::new());
         }
 
-        let final_chunk = chunk.idx + 1 == chunk.chunk_count;
+        let final_chunk = chunk.idx.checked_add(1) == Some(chunk.chunk_count);
         let pos = ChunkPos {
             idx: chunk.idx,
             chunk_count: chunk.chunk_count,
