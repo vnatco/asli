@@ -332,6 +332,7 @@ Registry. Direction C is client, S is server.
 | `clip_begin` | C to S, S to C | First chunk of a chunked clip | 7.11 |
 | `clip_chunk` | C to S, S to C | An interior chunk | 7.11 |
 | `clip_end` | C to S, S to C | Final chunk, completing the message | 7.11 |
+| `announce` | C to S, S to C | Sealed device name and operating system, never retained | 7.12 |
 
 Sealed message types additionally have a numeric **type code**, bound into AAD (section 9.1):
 
@@ -341,7 +342,8 @@ Sealed message types additionally have a numeric **type code**, bound into AAD (
 | 2 | `clip_begin` | v1 |
 | 3 | `clip_chunk` | v1 |
 | 4 | `clip_end` | v1 |
-| 5 to 255 | unassigned | Reserved |
+| 5 | `announce` | v1, added after the first release. See section 7.12 for compatibility |
+| 6 to 255 | unassigned | Reserved |
 
 Type codes are reserved now so that a v1.1 chunked message cannot collide with a v1 `clip` in AAD.
 
@@ -640,6 +642,97 @@ A sender MUST emit chunks in ascending index order on one connection, and MUST N
 chunked messages. A receiver MUST NOT rely on either: ordering is enforced cryptographically by
 section 9.5, not by arrival order.
 
+### 7.12 `announce`
+
+Client to server, then server to every other connection in the room. How one device tells the
+others what to call it: a name the person chose and the operating system it runs. Both are exactly
+what the relay must not learn, so an announcement is sealed like a clip, under the same epoch key,
+and carries the same public header.
+
+| Field | Type | Encoding | Required | Meaning |
+|---|---|---|---|---|
+| `v` | integer | | yes | `1` |
+| `type` | string | | yes | `"announce"` |
+| `room` | string | Crockford base32, 26 chars | yes | MUST equal the connection's authenticated room |
+| `epoch` | integer | u32 range | yes | Key epoch used to seal this message |
+| `msg_id` | string | base64, 16 bytes | yes | Client generated, unique per message. Used for relay and receiver dedup |
+| `n` | string | base64, 24 bytes | yes | AEAD nonce |
+| `ct` | string | base64, at most 1024 bytes | yes | Ciphertext with the 16 byte tag appended. 272 bytes in this version |
+
+There are no relay added fields: an announcement is never retained, so `retained` and `stored_at`
+MUST NOT appear on one, in either direction.
+
+**Sealing.** The AAD is exactly the section 9.1 construction with type code **5**. That byte is
+what keeps the two message kinds apart: a clip ciphertext presented as an announcement, or the other
+way round, fails the tag check. The plaintext is always 256 bytes, whatever the name, so the
+ciphertext length says nothing about it:
+
+```
+plaintext = u8(announce_version)      = 1                              (1)
+         || u8(16) || device_id                                        (1 + 16)
+         || u64be(ts_ms)                                               (8)
+         || u8(name_len) || name       UTF-8, name_len at most 64      (1 + name_len)
+         || u8(os_len)   || os         UTF-8, os_len at most 64        (1 + os_len)
+         || zero bytes to a total of 256
+```
+
+`device_id` is the same identifier the sender's clips carry, so a receiver can put a name to the
+sender of each clip. There is deliberately no `seq`: an announcement changes nothing but a label on
+a screen, so a replayed one is low harm, and sharing the clip counter would disturb its persisted
+reservations.
+
+**Receiver rules.** A receiver MUST discard silently, with no reply:
+
+1. a wrong `room`, or an `epoch` outside the section 14 window,
+2. a `msg_id` it has already accepted an announcement for (clients keep the last 64),
+3. a ciphertext that does not open under type code 5,
+4. a plaintext that is not exactly 256 bytes, has an unknown version, a field over 64 bytes, a field
+   that is not UTF-8, or non zero padding,
+5. its own `device_id`,
+6. a `ts_ms` outside the clip freshness window, section 10: more than 24 hours old or ahead.
+
+**When to announce.** A client with a name to announce sends one right after `auth_ok`, and again on
+every `presence` whose count differs from the last it saw, whether up or down. Up, so a device that
+has just joined learns about everyone already there, since there is nothing retained to fetch. Down,
+so every device still in the room says so, and the one that stays silent is the one that left. A
+client that learns its own name or operating system changed announces at once. A sender MUST
+shorten an over long field at a character boundary rather than refuse to announce.
+
+**Relay obligations.** As for `clip` (section 7.6, steps 1 to 5), with a 1024 byte ciphertext cap,
+the room quota charged, and three differences:
+
+- It is **never retained** and never served by `fetch_last`.
+- It MUST NOT take a receiver's pending clip slot (section 11.5). The slot is last write wins, and a
+  name must never displace a copy.
+- Under backpressure it MAY be dropped for that receiver rather than parked. It is advisory, and the
+  next one replaces it.
+
+**Compatibility.** `announce` was added after the first release, and both directions degrade
+without a disconnect:
+
+- A client that does not know `announce` receives one as an unknown type, which section 14 already
+  requires it to ignore.
+- A relay that does not know `announce` answers it with `error` `UNKNOWN_TYPE` and keeps the
+  connection open. `announce` is the only type a conforming client sends that a conforming relay can
+  fail to know, so a client that has announced on the current connection MUST treat that error as
+  "this relay does not forward announcements": it absorbs the error rather than surfacing it, and
+  sends no further announcement until its next connection, which may be to an updated relay. The
+  cost against an old relay is one message per connection.
+- No field is added to any existing message. Every v1 message rejects unknown fields, so advertising
+  support in `auth_ok` or `challenge` would have broken every client already deployed.
+
+```json
+{
+  "v": 1,
+  "type": "announce",
+  "room": "C8V4B1KQ7M3ZRXPT9WNJ0GHA2E",
+  "epoch": 0,
+  "msg_id": "wMHCw8TFxsfIycrLzM3Ozw==",
+  "n": "4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3",
+  "ct": "wk+d44koHkc3xJGOmyVmus71wruJFq4XOMzRlXfTT+Utx..."
+}
+```
+
 ## 8. Authentication handshake
 
 ### 8.1 Signature input
@@ -700,7 +793,7 @@ AAD is a fixed 51 byte, length prefixed byte string. It MUST NOT be serialized J
 ```
 AAD = "asli/v1/aad"                 (11 bytes)
    || u8(v)                          protocol version                  (1)
-   || u8(type_code)                  1 for clip                        (1)
+   || u8(type_code)                  1 for clip, 5 for announce       (1)
    || u32be(epoch)                                                     (4)
    || u8(16) || room_id_bytes                                          (1 + 16)
    || u8(16) || msg_id                                                 (1 + 16)
@@ -917,7 +1010,8 @@ event its own write produces can be suppressed.
 
 ### 11.1 Forwarding
 
-- The relay forwards `clip` to every connection in the room except the sender.
+- The relay forwards `clip`, the three chunk types and `announce` to every connection in the room
+  except the sender.
 - The relay MUST NOT forward any other message type between clients.
 - The relay MUST NOT decrypt, inspect, transform, re-encode or persist plaintext, because it holds no
   key capable of any of that. It MUST NOT log `ct`, `n`, `sig`, `pub_key` or any decoded form.
@@ -969,7 +1063,7 @@ A self hosted relay MAY set any of these higher and MUST announce the values it 
 Because the clipboard is last write wins, a relay MUST NOT queue multiple clips for a slow consumer.
 It SHOULD keep a single pending slot per connection, overwriting it with the newest clip, and flush
 when the socket drains. A connection whose send buffer stays above a hard threshold past a timeout
-MUST be closed with 1009 or 4007.
+MUST be closed with 1009 or 4007. An `announce` never occupies that slot, section 7.12.
 
 ---
 
@@ -1051,6 +1145,7 @@ Requirements:
 | `epoch` in the public header, bound in AAD | Key rotation without re-onboarding |
 | `inner_version` inside the ciphertext | The sealed layout can change independently of the envelope |
 | Type code registry, section 7 | A future chunked message cannot collide with a v1 `clip` in AAD |
+| `error` `UNKNOWN_TYPE` on a type the client added later | How a client learns that the relay predates `announce`, section 7.12 |
 
 Compatibility policy:
 
@@ -1160,6 +1255,7 @@ noted:
 | `sig_input` | The exact 121 byte signature input for a fixed `nonce_s` and `nonce_c` |
 | `sig` | The 64 byte signature |
 | `chunked` | A four chunk message: the fixed `msg_id`, `content`, `chunk_bytes`, `chunk_count`, `padded_plaintext_len`, and per chunk the `idx`, `final`, `type_code`, `nonce`, the exact 61 AAD bytes and the exact ciphertext |
+| `announce` | One announcement: the fixed `msg_id`, `device_id`, `ts_ms`, `name`, `os`, `nonce`, the exact 51 AAD bytes with type code 5, the exact 256 byte `plaintext` and the exact ciphertext |
 
 ### 16.2 Negative tests
 
@@ -1177,6 +1273,8 @@ Each of these MUST fail closed:
 - A chunk stream missing an interior index, or truncated before its final chunk.
 - A chunk repeating an index already accepted.
 - A chunk claiming a `chunk_count` that differs from the assembly in progress.
+- A clip ciphertext opened as an announcement, or an announcement opened as a clip.
+- An announcement with a field over 64 bytes, a plaintext not exactly 256 bytes, or non zero padding.
 - A `room_id` that does not match `pub_key`.
 - A signature over a stale or already used `nonce_s`.
 - Malformed join tokens: bad prefix, bad checksum, wrong length, wrong version byte, invalid
