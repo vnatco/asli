@@ -257,18 +257,17 @@ pub fn join_failed(reason: &str) {
     action("Could not join", reason);
 }
 
-/// This device's clock is far enough from the relay's that clips are being dropped.
+/// This device's clock is far enough from the relay's that clips are close to being dropped.
 ///
-/// Always shown. Every clip in both directions is discarded as too old or from the future, and
-/// nothing else fails, so without this the only symptom is that copying has stopped working.
+/// Always shown. Past a day off, every clip in both directions is discarded as too old or from the
+/// future and nothing else fails, so a warning well before that is the only useful signal.
 pub fn clock_skew(skew_ms: i64) {
-    let minutes = skew_ms.unsigned_abs().div_ceil(60_000);
+    let hours = skew_ms.unsigned_abs().div_ceil(60 * 60 * 1000);
     send(
         "This computer's clock is wrong",
         &format!(
-            "It is about {minutes} minute{} {} the internet's time, so clips to and from it are \
-             being dropped. Turn on setting the time automatically.",
-            if minutes == 1 { "" } else { "s" },
+            "It is about {hours} hours {} the internet's time. Past a day, clips to and from it \
+             will be dropped. Turn on setting the time and time zone automatically.",
             if skew_ms > 0 { "behind" } else { "ahead of" }
         ),
     );

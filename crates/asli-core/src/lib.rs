@@ -35,4 +35,4 @@ pub mod replay;
 
 pub use echo::{hash, ContentHash, EchoGuard};
 pub use normalize::{is_syncable, normalize, to_platform, LineEnding};
-pub use replay::{Incoming, ReplayGuard, Verdict};
+pub use replay::{Incoming, Memory as ReplayMemory, ReplayGuard, Verdict};

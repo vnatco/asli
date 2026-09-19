@@ -229,7 +229,7 @@ impl Paths {
 
 /// Writes a file through a temporary file and a rename, so a crash cannot leave a half written
 /// config behind.
-fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut file = fs::File::create(&tmp)?;

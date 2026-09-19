@@ -46,6 +46,7 @@ pub mod instance;
 pub mod macos;
 pub mod notify;
 pub mod qr;
+pub mod replay_store;
 pub mod secrets;
 pub mod tray;
 pub mod window;

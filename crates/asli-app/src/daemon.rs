@@ -189,8 +189,8 @@ pub fn on_client_event(
         }
         ClientEvent::ClockSkew { skew_ms } => {
             status.last_error = Some(format!(
-                "this computer's clock is {} s off, so clips are being dropped",
-                skew_ms.unsigned_abs() / 1000
+                "this computer's clock is about {} hours off; past a day, clips will be dropped",
+                skew_ms.unsigned_abs().div_ceil(60 * 60 * 1000)
             ));
             notify::clock_skew(*skew_ms);
             false
@@ -486,7 +486,20 @@ pub async fn run(
 ) -> Result<()> {
     let device_id = config.device_id_bytes()?;
     let seq = reserve_sequence(paths)?;
-    let session = Session::new(identity, device_id, seq);
+    let room = identity.room_id();
+    let mut session = Session::new(identity, device_id, seq);
+
+    // What earlier runs accepted, so a relay cannot replay an old clip into the gap a restart
+    // would otherwise open.
+    let memory = crate::replay_store::load(paths, &room);
+    session.restore_replay(&memory);
+    let replay = ReplaySaver {
+        paths: paths.clone(),
+        room,
+        sink: Arc::new(std::sync::Mutex::new(memory.clone())),
+        saved: memory,
+    };
+    session.share_replay_memory(Arc::clone(&replay.sink));
 
     // The watcher thread is blocking, so it gets its own bridge into the async side.
     let (local_tx, mut local_rx) = mpsc::channel::<LocalEvent>(16);
@@ -518,9 +531,35 @@ pub async fn run(
         Sinks {
             notifications,
             history,
+            replay,
         },
     )
     .await
+}
+
+/// Saves the replay memory whenever the session has learned something new.
+struct ReplaySaver {
+    paths: Paths,
+    room: String,
+    /// Where the session publishes what it has accepted.
+    sink: Arc<std::sync::Mutex<asli_core::ReplayMemory>>,
+    /// What is on disk, so an unchanged memory is not written again.
+    saved: asli_core::ReplayMemory,
+}
+
+impl ReplaySaver {
+    fn save_if_changed(&mut self) {
+        let Ok(current) = self.sink.lock().map(|memory| memory.clone()) else {
+            return;
+        };
+        if current == self.saved {
+            return;
+        }
+        match crate::replay_store::save(&self.paths, &self.room, &current) {
+            Ok(()) => self.saved = current,
+            Err(err) => eprintln!("{}", log_line("replay_save_failed", &err.to_string())),
+        }
+    }
 }
 
 /// What the clipboard bridge needs besides its two channels.
@@ -717,6 +756,8 @@ struct Sinks {
     notifications: bool,
     /// Where arriving clips are recorded so they can be put back later.
     history: SharedHistory,
+    /// Where what has been accepted is saved, so replay protection survives a restart.
+    replay: ReplaySaver,
 }
 
 /// Watches for a retained fetch raised by the tray and puts it on the local queue.
@@ -814,6 +855,7 @@ async fn run_connection_loop(
     let Sinks {
         notifications,
         history,
+        mut replay,
     } = sinks;
     let mut backoff = Backoff::new();
     let mut status = Status {
@@ -871,6 +913,9 @@ async fn run_connection_loop(
                 notifications,
                 &history,
             );
+            // Saved as soon as a clip is accepted, not at disconnect: a crash must not open the
+            // window this exists to close.
+            replay.save_if_changed();
         })
         .await;
 

@@ -20,9 +20,17 @@ pub const MSG_ID_LEN: usize = 16;
 /// How many recent message ids are remembered.
 pub const DEFAULT_MSG_ID_CAPACITY: usize = 256;
 /// How old a live message may be before it is rejected, in milliseconds.
-pub const DEFAULT_MAX_AGE_MS: u64 = 120_000;
+///
+/// A day, as a sanity bound rather than the defence. The defence against replay is the message id
+/// and the per device sequence number, and those survive restarts through [`Memory`]. A window of
+/// two minutes used to carry that weight instead, which made sync depend on every device's clock
+/// being right: a machine showing the correct local time in the wrong time zone is hours off, and
+/// every clip to and from it was dropped with nothing failing anywhere.
+pub const DEFAULT_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// How far into the future a sender's clock may run before we reject it, in milliseconds.
-pub const DEFAULT_FUTURE_SKEW_MS: u64 = 60_000;
+///
+/// A day, for the same reason as [`DEFAULT_MAX_AGE_MS`]: wide enough for any time zone mistake.
+pub const DEFAULT_FUTURE_SKEW_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The decision for one incoming clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +83,20 @@ pub struct Incoming {
     pub ts_ms: u64,
     /// Whether the relay delivered this as a stored clip rather than a live one.
     pub retained: bool,
+}
+
+/// What a guard has learned that must survive a restart.
+///
+/// The sequence numbers and message ids are what actually stop a relay replaying old clips. Kept
+/// only in memory, they were forgotten on every restart, and a device that had just started
+/// could be sent a clip from last week and would apply it. Saved and restored, they protect a
+/// device from its first second, with no dependence on anyone's clock.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Memory {
+    /// The highest sequence number accepted from each device.
+    pub highest_seq: Vec<([u8; DEVICE_ID_LEN], u64)>,
+    /// The most recent message ids accepted, oldest first.
+    pub recent: Vec<[u8; MSG_ID_LEN]>,
 }
 
 /// Tracks what this device has already seen.
@@ -158,6 +180,33 @@ impl ReplayGuard {
     #[must_use]
     pub fn known_devices(&self) -> usize {
         self.highest_seq.len()
+    }
+
+    /// Everything this guard has learned, for saving.
+    #[must_use]
+    pub fn memory(&self) -> Memory {
+        let mut highest_seq: Vec<_> = self.highest_seq.iter().map(|(d, s)| (*d, *s)).collect();
+        highest_seq.sort_unstable();
+        Memory {
+            highest_seq,
+            recent: self.seen.iter().copied().collect(),
+        }
+    }
+
+    /// Takes back what an earlier run learned. Never lowers anything already known.
+    pub fn restore(&mut self, memory: &Memory) {
+        for (device, seq) in &memory.highest_seq {
+            let highest = self.highest_seq.entry(*device).or_insert(0);
+            *highest = (*highest).max(*seq);
+        }
+        for msg_id in &memory.recent {
+            if !self.seen.contains(msg_id) {
+                if self.seen.len() == self.capacity {
+                    self.seen.pop_front();
+                }
+                self.seen.push_back(*msg_id);
+            }
+        }
     }
 
     /// Forgets everything except this device's identity. Used on account reset.
@@ -264,6 +313,52 @@ mod tests {
         let mut g = guard();
         let way_ahead = clip(1, THEIRS, 1, NOW + DEFAULT_FUTURE_SKEW_MS + 1);
         assert_eq!(g.check(&way_ahead, NOW), Verdict::FromTheFuture);
+    }
+
+    #[test]
+    fn a_clock_in_the_wrong_time_zone_still_syncs() {
+        // The right local time on the clock face, the wrong zone underneath: hours off in UTC.
+        let mut g = guard();
+        let four_hours = 4 * 60 * 60 * 1000;
+        assert_eq!(
+            g.check(&clip(1, THEIRS, 1, NOW + four_hours), NOW),
+            Verdict::Accept
+        );
+        assert_eq!(
+            g.check(&clip(2, OTHER, 1, NOW - four_hours), NOW),
+            Verdict::Accept
+        );
+    }
+
+    #[test]
+    fn a_restart_does_not_open_a_replay_window() {
+        let mut before = guard();
+        assert_eq!(before.check(&clip(1, THEIRS, 5, NOW), NOW), Verdict::Accept);
+        let saved = before.memory();
+
+        // A new process: without the memory, the same clip would be accepted a second time.
+        let mut after = guard();
+        after.restore(&saved);
+        assert_eq!(
+            after.check(&clip(1, THEIRS, 5, NOW), NOW),
+            Verdict::Duplicate
+        );
+        assert_eq!(
+            after.check(&clip(9, THEIRS, 4, NOW), NOW),
+            Verdict::Rollback
+        );
+        assert_eq!(after.check(&clip(10, THEIRS, 6, NOW), NOW), Verdict::Accept);
+    }
+
+    #[test]
+    fn restoring_never_lowers_what_is_known() {
+        let mut g = guard();
+        assert_eq!(g.check(&clip(1, THEIRS, 50, NOW), NOW), Verdict::Accept);
+        g.restore(&Memory {
+            highest_seq: vec![(THEIRS, 10)],
+            recent: Vec::new(),
+        });
+        assert_eq!(g.check(&clip(2, THEIRS, 20, NOW), NOW), Verdict::Rollback);
     }
 
     #[test]

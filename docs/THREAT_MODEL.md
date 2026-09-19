@@ -90,9 +90,12 @@ relay by default.
 - **Squat or lock out a room.** `room_id = SHA-256("asli/v1/room" || pub_key)[0..16]`, checked
   arithmetically on every connect. There is no trust on first use and no stored identity state, so
   there is no first sight to win and no pinned key to corrupt.
-- **Replay undetected.** Receivers keep an LRU of the last 256 `msg_id` values, reject anything
-  older than 120 seconds for live messages, and reject any `seq` at or below the highest already
-  seen from that `device_id`. Replay and per device rollback are detected and dropped.
+- **Replay undetected.** Receivers keep the last 256 `msg_id` values and the highest `seq` seen from
+  each `device_id`, saved across restarts, and reject a repeat of either. Replay and per device
+  rollback are detected and dropped. Live clips more than 24 hours old or ahead are rejected too,
+  as a sanity bound rather than the defence, so a wrong clock or time zone does not break sync.
+  The one gap: a device with no saved state for a sender, new or just reset, can be shown one old
+  clip from within those 24 hours on first contact. It cannot be read or altered.
 
 **Residual risks the operator keeps.** Metadata and availability, both listed above. Neither is
 fixable by a single relay design. The answer for anyone who will not accept them is self-hosting,

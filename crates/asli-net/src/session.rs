@@ -7,7 +7,9 @@
 //!
 //! The caller supplies the current time, so tests are deterministic.
 
-use asli_core::{EchoGuard, Incoming, ReplayGuard, Verdict};
+use std::sync::{Arc, Mutex};
+
+use asli_core::{EchoGuard, Incoming, ReplayGuard, ReplayMemory, Verdict};
 use asli_crypto::chunk::{self, Assembly, ChunkPos};
 use asli_crypto::clip::{self, ContentType, Inner, DEVICE_ID_LEN, MSG_ID_LEN, NONCE_LEN, TAG_LEN};
 use asli_crypto::identity::ROOM_ID_LEN;
@@ -109,9 +111,10 @@ pub enum Action {
 
 /// How far this device's clock may drift from the relay's before it is reported.
 ///
-/// Well inside the replay window, which accepts clips up to a minute in the future and two minutes
-/// old, so the warning comes before clips start being dropped rather than after.
-pub const CLOCK_SKEW_WARN_MS: i64 = 30_000;
+/// Half the freshness window, which accepts clips up to a day old or a day ahead. Anything short of
+/// this syncs normally, a time zone mistake included, so warning earlier would only be noise. At
+/// this point it is worth fixing before it reaches the limit and clips start being dropped.
+pub const CLOCK_SKEW_WARN_MS: i64 = 12 * 60 * 60 * 1000;
 
 /// A discard, reported to this device only.
 fn dropped(reason: &'static str, retained: bool) -> Vec<Action> {
@@ -128,6 +131,8 @@ pub struct Session {
     limits: Option<Limits>,
     echo: EchoGuard,
     replay: ReplayGuard,
+    /// See [`Session::share_replay_memory`].
+    replay_sink: Option<Arc<Mutex<ReplayMemory>>>,
     peers: u32,
     pinned_auth: Option<([u8; 16], u64)>,
     /// The chunked message currently being reassembled, if any.
@@ -158,6 +163,29 @@ impl Session {
             peers: 0,
             pinned_auth: None,
             assembly: None,
+            replay_sink: None,
+        }
+    }
+
+    /// Takes back what the replay guard learned in an earlier run, so a replay is refused from the
+    /// first message rather than only after this session has seen the original.
+    pub fn restore_replay(&mut self, memory: &ReplayMemory) {
+        self.replay.restore(memory);
+    }
+
+    /// Where to publish what the replay guard learns, after every accepted clip, for saving.
+    ///
+    /// Shared rather than returned, because the session is borrowed by the transport for the whole
+    /// life of a connection, and the caller has to be able to save while it runs.
+    pub fn share_replay_memory(&mut self, sink: Arc<Mutex<ReplayMemory>>) {
+        self.replay_sink = Some(sink);
+    }
+
+    fn publish_replay(&self) {
+        if let Some(sink) = &self.replay_sink {
+            if let Ok(mut memory) = sink.lock() {
+                *memory = self.replay.memory();
+            }
         }
     }
 
@@ -381,6 +409,7 @@ impl Session {
         if verdict != Verdict::Accept {
             return Ok(dropped(verdict.reason(), retained));
         }
+        self.publish_replay();
 
         if inner.content_type != ContentType::Text {
             // Images are specified but not produced by any v1 client.
@@ -499,6 +528,7 @@ impl Session {
         if verdict != Verdict::Accept {
             return Ok(dropped(verdict.reason(), false));
         }
+        self.publish_replay();
 
         match inner.content_type {
             ContentType::ImagePng => Ok(vec![Action::Image {
@@ -793,11 +823,12 @@ mod tests {
 
     #[test]
     fn a_clock_far_from_the_relays_is_reported_and_a_close_one_is_not() {
+        let hour = 60 * 60 * 1000;
         for (offset_ms, reported) in [
             (0i64, false),
-            (20_000, false),
-            (-600_000, true),
-            (180_000, true),
+            (4 * hour, false),
+            (-13 * hour, true),
+            (13 * hour, true),
         ] {
             let mut session = Session::new(Identity::from_secret(&SECRET), DEVICE_A, 0);
             session.hello_frame().expect("hello");
@@ -942,9 +973,10 @@ mod tests {
         let (mut a, _) = ready_session(DEVICE_A);
         let (mut b, _) = ready_session(DEVICE_B);
         let frame = a.observe_local("old news", NOW).unwrap().unwrap();
-        // Two minutes and one second later.
+        // A day and a millisecond later.
         assert_eq!(
-            b.handle_frame(&frame, NOW + 120_001).unwrap(),
+            b.handle_frame(&frame, NOW + asli_core::replay::DEFAULT_MAX_AGE_MS + 1)
+                .unwrap(),
             vec![Action::Dropped {
                 reason: "too_old",
                 retained: false
