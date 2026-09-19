@@ -616,12 +616,21 @@ fn wire_frame(window: &AppWindow) {
     use slint::winit_030::WinitWindowAccessor as _;
 
     let handle = window.as_weak();
-    window.on_start_drag(move || {
+    window.on_start_drag(move |x, y| {
         if let Some(window) = handle.upgrade() {
             window.window().with_winit_window(|winit| {
                 // Refused only when the pointer is not actually pressed, which is harmless.
                 let _ = winit.drag_window();
             });
+            // The desktop takes the pointer for the move and never reports the release to us.
+            // Without one, the title bar kept the pointer grabbed after the move ended, and
+            // every later click anywhere in the window landed on it and started another drag.
+            window
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                    position: slint::LogicalPosition::new(x, y),
+                    button: slint::platform::PointerEventButton::Left,
+                });
         }
     });
 
