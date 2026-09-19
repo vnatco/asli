@@ -39,6 +39,7 @@ pub mod cli;
 pub mod clipboard_io;
 pub mod config;
 pub mod daemon;
+pub mod devices;
 pub mod error;
 pub mod history_store;
 pub mod instance;

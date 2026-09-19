@@ -104,6 +104,10 @@ which desktop and which compositor you are on, because that is nearly always the
 
 MIT. See [LICENSE](LICENSE).
 
+Join strings and device ids are set in [JetBrains Mono](https://www.jetbrains.com/lp/mono/), which
+is built into the binary under the SIL Open Font License 1.1. Its licence is in
+`crates/asli-ui/ui/fonts/JetBrainsMono-OFL.txt`.
+
 The window is drawn with [Slint](https://slint.dev), used under its royalty free licence, which
 asks for this attribution where the application is distributed:
 

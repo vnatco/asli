@@ -99,6 +99,8 @@ impl HistorySource for StoreHistory {
                 is_image: matches!(summary.kind, Kind::ImagePng),
                 ts_ms: summary.ts_ms,
                 bytes: summary.bytes,
+                from: summary.device_id,
+                key: summary.id,
             })
             .collect()
     }
@@ -128,7 +130,7 @@ impl HistorySource for StoreHistory {
         }
     }
 
-    fn record(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64) {
+    fn record(&mut self, content: HistoryContent, sensitive: bool, ts_ms: u64, from: [u8; 16]) {
         if !self.enabled {
             return;
         }
@@ -139,7 +141,7 @@ impl HistorySource for StoreHistory {
         };
 
         self.revision = self.revision.wrapping_add(1);
-        if let Err(err) = self.store.append(content, sensitive, ts_ms) {
+        if let Err(err) = self.store.append_from(content, sensitive, ts_ms, from) {
             // Never fatal. Failing to remember a clip must not stop it being synced, which is the
             // thing the person actually asked for.
             eprintln!("{}", log_line("history_write_failed", &err.to_string()));

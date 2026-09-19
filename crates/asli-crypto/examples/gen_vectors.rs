@@ -11,7 +11,7 @@
 //! output changes, the wire format changed, and that is a protocol version bump.
 
 use asli_crypto::chunk::{self, ChunkPos};
-use asli_crypto::{auth, clip, identity, kdf, token};
+use asli_crypto::{announce, auth, clip, identity, kdf, token};
 
 const SECRET: [u8; 32] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
@@ -160,6 +160,7 @@ fn main() {
     println!("  }},");
 
     emit_chunked(&id);
+    emit_announce(&id);
 
     println!("  \"auth\": {{");
     println!("    \"nonce_s\": \"{}\",", hex(&NONCE_S));
@@ -244,5 +245,55 @@ fn emit_chunked(id: &identity::Identity) {
         println!("      }}{comma}");
     }
     println!("    ]");
+    println!("  }},");
+}
+
+/// Fixed message id for the announcement vector, distinct from the clip and chunked ones.
+const ANNOUNCE_MSG_ID: [u8; 16] = [
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+];
+/// Fixed nonce for the announcement vector.
+const ANNOUNCE_NONCE: [u8; 24] = [
+    0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+];
+
+/// Emits the device announcement vector.
+fn emit_announce(id: &identity::Identity) {
+    let inner = announce::Announce {
+        device_id: DEVICE_ID,
+        ts_ms: TS_MS,
+        name: "ThinkPad X1".to_owned(),
+        os: "Windows 11".to_owned(),
+    };
+    let plaintext = announce::encode(&inner).expect("the fixed fields fit");
+    let aad = clip::build_aad(
+        clip::PROTOCOL_VERSION,
+        announce::TYPE_ANNOUNCE,
+        0,
+        &id.room_id_bytes(),
+        &ANNOUNCE_MSG_ID,
+    );
+    let ciphertext = announce::seal_with_nonce(
+        &id.enc_key(0),
+        0,
+        &id.room_id_bytes(),
+        &ANNOUNCE_MSG_ID,
+        &ANNOUNCE_NONCE,
+        &inner,
+    )
+    .expect("sealing the fixed announcement cannot fail");
+
+    println!("  \"announce\": {{");
+    println!("    \"epoch\": 0,");
+    println!("    \"msg_id\": \"{}\",", hex(&ANNOUNCE_MSG_ID));
+    println!("    \"device_id\": \"{}\",", hex(&DEVICE_ID));
+    println!("    \"ts_ms\": {TS_MS},");
+    println!("    \"name\": \"{}\",", inner.name);
+    println!("    \"os\": \"{}\",", inner.os);
+    println!("    \"nonce\": \"{}\",", hex(&ANNOUNCE_NONCE));
+    println!("    \"aad\": \"{}\",", hex(&aad));
+    println!("    \"plaintext\": \"{}\",", hex(&plaintext));
+    println!("    \"ciphertext\": \"{}\"", hex(&ciphertext));
     println!("  }},");
 }

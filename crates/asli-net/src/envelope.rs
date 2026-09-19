@@ -83,6 +83,8 @@ pub enum Message {
     ClipChunk(ClipChunk),
     /// Final chunk, completing the message.
     ClipEnd(ClipChunk),
+    /// A sealed device announcement, in either direction. Forwarded, never retained.
+    Announce(Announce),
 }
 
 /// Every message type this version understands, as spelled on the wire.
@@ -101,6 +103,7 @@ const KNOWN_TYPES: &[&str] = &[
     "clip_begin",
     "clip_chunk",
     "clip_end",
+    "announce",
 ];
 
 impl Message {
@@ -151,6 +154,7 @@ impl Message {
             Self::Pong(m) => m.v,
             Self::Error(m) => m.v,
             Self::ClipBegin(m) | Self::ClipChunk(m) | Self::ClipEnd(m) => m.v,
+            Self::Announce(m) => m.v,
         }
     }
 }
@@ -373,6 +377,30 @@ impl Clip {
     }
 }
 
+/// A sealed device announcement: the sender's name and operating system.
+///
+/// The same public header as [`Clip`], so the relay learns nothing from it that a clip would not
+/// already tell it. There are no relay added fields, because an announcement is never retained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Announce {
+    /// Protocol version.
+    pub v: u8,
+    /// Room id, which must match the authenticated room.
+    pub room: String,
+    /// Key epoch used to seal this message.
+    pub epoch: u32,
+    /// Client generated message id, 16 bytes.
+    #[serde(with = "b64")]
+    pub msg_id: Vec<u8>,
+    /// AEAD nonce, 24 bytes.
+    #[serde(with = "b64")]
+    pub n: Vec<u8>,
+    /// Ciphertext with the 16 byte tag appended.
+    #[serde(with = "b64")]
+    pub ct: Vec<u8>,
+}
+
 /// Client to server. Asks for the retained clip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -581,6 +609,26 @@ mod tests {
         };
         assert!(clip.is_retained());
         assert_eq!(clip.stored_at, Some(1_789_455_600_000));
+    }
+
+    #[test]
+    fn announce_round_trips_and_refuses_relay_fields() {
+        let msg_id = encode_b64(&[1u8; 16]);
+        let nonce = encode_b64(&[2u8; 24]);
+        let ct = encode_b64(&[3u8; 40]);
+        let frame = format!(
+            r#"{{"v":1,"type":"announce","room":"E5V0APG0E0QQ5MEGA99JBPFDHM","epoch":0,"msg_id":"{msg_id}","n":"{nonce}","ct":"{ct}"}}"#
+        );
+        assert!(matches!(round_trip(&frame), Message::Announce(_)));
+
+        // An announcement is never retained, so a relay marking one as stored is off protocol.
+        let retained = format!(
+            r#"{{"v":1,"type":"announce","room":"E5V0APG0E0QQ5MEGA99JBPFDHM","epoch":0,"msg_id":"{msg_id}","n":"{nonce}","ct":"{ct}","retained":true}}"#
+        );
+        assert!(matches!(
+            Message::parse(&retained),
+            Err(Error::Malformed(_))
+        ));
     }
 
     #[test]

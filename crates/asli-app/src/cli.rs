@@ -377,6 +377,9 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         match identity {
             Some(identity) => {
                 start_daemon(paths, &config, identity, &io, observed, &controls, &history)?;
+                // Straight after creating or joining an account, the window this process
+                // replaced comes back on Status and says what happened.
+                window::welcome_after_restart();
             }
             // Nothing to connect to yet, so the window opens on first run instead. The daemon
             // starts on the next launch, which happens by itself once an account exists.

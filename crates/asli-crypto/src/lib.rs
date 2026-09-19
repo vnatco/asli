@@ -59,6 +59,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod announce;
 pub mod auth;
 pub mod base32;
 pub mod chunk;

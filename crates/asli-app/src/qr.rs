@@ -100,6 +100,79 @@ pub fn render_rgba(payload: &str) -> Result<(u32, Vec<u8>)> {
     Ok((span, pixels))
 }
 
+/// Renders the QR for the window: each module a small rounded square, as the design draws it,
+/// on white, at `side` pixels square.
+///
+/// Drawn large and scaled down by the window, so it stays sharp on a high density display. There
+/// is no quiet zone in the image itself: the white plate it sits on in the window is the quiet
+/// zone, and adding another would shrink the symbol for nothing.
+///
+/// # Errors
+///
+/// Returns [`Error::Qr`] if the payload cannot be encoded.
+pub fn render_modules(payload: &str, side: u32) -> Result<Vec<u8>> {
+    // Module colour, the design's darkest ground rather than pure black.
+    const INK: [u8; 3] = [0x0B, 0x0E, 0x14];
+    // Corner radius as a share of a module, 1.2 in 5.
+    const ROUND: f32 = 0.24;
+    // Samples per pixel along each axis, for smooth corners.
+    const SAMPLES: u32 = 3;
+
+    // The lowest error correction. It is there to survive a damaged print, and a screen held up
+    // to a camera is not damaged; the higher levels only buy smaller modules, which are harder
+    // to read at this size. A 64 character join string fits in 33 modules rather than 41.
+    let code = QRBuilder::new(payload)
+        .ecl(fast_qr::ECL::L)
+        .build()
+        .map_err(|e| Error::Qr(format!("{e:?}")))?;
+    let modules = code.size;
+    let side_usize = side as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let module = side as f32 / modules as f32;
+    let radius = module * ROUND;
+
+    // How much of a sample point inside one module is inked, given that module's corners.
+    let inside = |fx: f32, fy: f32| -> bool {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (mx, my) = ((fx / module) as usize, (fy / module) as usize);
+        if mx >= modules || my >= modules || !code.data[my * modules + mx].value() {
+            return false;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let (lx, ly) = (fx - mx as f32 * module, fy - my as f32 * module);
+        let dx = (radius - lx).max(lx - (module - radius)).max(0.0);
+        let dy = (radius - ly).max(ly - (module - radius)).max(0.0);
+        dx * dx + dy * dy <= radius * radius
+    };
+
+    let mut pixels = vec![0xffu8; side_usize * side_usize * 4];
+    for y in 0..side {
+        for x in 0..side {
+            let mut hits = 0u32;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    #[allow(clippy::cast_precision_loss)]
+                    let (fx, fy) = (
+                        x as f32 + (sx as f32 + 0.5) / SAMPLES as f32,
+                        y as f32 + (sy as f32 + 0.5) / SAMPLES as f32,
+                    );
+                    hits += u32::from(inside(fx, fy));
+                }
+            }
+            if hits == 0 {
+                continue;
+            }
+            let offset = (y as usize * side_usize + x as usize) * 4;
+            for (channel, ink) in INK.iter().enumerate() {
+                let blend = (u32::from(*ink) * hits + 255 * (SAMPLES * SAMPLES - hits))
+                    / (SAMPLES * SAMPLES);
+                pixels[offset + channel] = u8::try_from(blend).unwrap_or(255);
+            }
+        }
+    }
+    Ok(pixels)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +203,21 @@ mod tests {
             pixels.as_chunks::<4>().0.iter().any(|px| px[0] == 0),
             "a symbol with no dark modules is not a symbol"
         );
+    }
+
+    #[test]
+    fn modules_fill_the_whole_image_with_ink_and_white() {
+        let side = 200;
+        let pixels = render_modules("asli1_TESTTOKENVALUE", side).expect("renders");
+        assert_eq!(pixels.len(), (side * side * 4) as usize);
+        // The top left corner of any QR is a finder pattern, so its centre is inked, and the
+        // very corner pixel is rounded away.
+        let at = |x: u32, y: u32| (y * side + x) as usize * 4;
+        assert!(
+            pixels[at(side / 30, side / 30)] < 0x40,
+            "finder pattern is dark"
+        );
+        assert!(pixels[at(0, 0)] > 0x80, "module corners are rounded");
     }
 
     #[test]

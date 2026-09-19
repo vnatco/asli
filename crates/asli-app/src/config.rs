@@ -55,6 +55,10 @@ pub struct Config {
     /// How many history entries to keep, oldest dropped first.
     #[serde(default = "default_history_entries")]
     pub history_entries: usize,
+    /// What this device calls itself to the others on the account. Empty means the computer's
+    /// own name.
+    #[serde(default)]
+    pub device_name: String,
 }
 
 /// History is on by default, which is what every comparable tool does and what makes the feature
@@ -84,6 +88,7 @@ impl Config {
             device_id: hex(&device_id),
             keep_history: default_keep_history(),
             history_entries: default_history_entries(),
+            device_name: String::new(),
         })
     }
 

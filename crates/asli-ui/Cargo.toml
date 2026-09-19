@@ -28,3 +28,7 @@ slint = { version = "1.18.0", default-features = false, features = [
 # Compiles ui/*.slint into Rust at build time, so a mistake in the markup fails the build rather
 # than producing a blank window on somebody else's machine.
 slint-build = "1.18.0"
+
+[dev-dependencies]
+# Only for the snapshot example, which renders each screen to a PNG for review.
+png = "0.18"

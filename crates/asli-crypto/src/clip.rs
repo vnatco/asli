@@ -309,7 +309,31 @@ pub fn seal_with_nonce(
     nonce: &[u8; NONCE_LEN],
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
-    let aad = build_aad(PROTOCOL_VERSION, TYPE_CLIP, epoch, room_id_bytes, msg_id);
+    seal_typed(
+        TYPE_CLIP,
+        enc_key,
+        epoch,
+        room_id_bytes,
+        msg_id,
+        nonce,
+        plaintext,
+    )
+}
+
+/// Seals any single frame message under the epoch key, with its own type code in the AAD.
+///
+/// Shared by clips and announcements. The type code is what keeps them apart: a clip ciphertext
+/// presented as an announcement, or the other way round, fails the tag check.
+pub(crate) fn seal_typed(
+    type_code: u8,
+    enc_key: &[u8; KEY_LEN],
+    epoch: u32,
+    room_id_bytes: &[u8; ROOM_ID_LEN],
+    msg_id: &[u8; MSG_ID_LEN],
+    nonce: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let aad = build_aad(PROTOCOL_VERSION, type_code, epoch, room_id_bytes, msg_id);
     let cipher = XChaCha20Poly1305::new(&Key::from(*enc_key));
     cipher
         .encrypt(
@@ -336,9 +360,31 @@ pub fn open(
     nonce: &[u8; NONCE_LEN],
     ciphertext: &[u8],
 ) -> Result<Inner> {
-    let aad = build_aad(PROTOCOL_VERSION, TYPE_CLIP, epoch, room_id_bytes, msg_id);
+    let plaintext = open_typed(
+        TYPE_CLIP,
+        enc_key,
+        epoch,
+        room_id_bytes,
+        msg_id,
+        nonce,
+        ciphertext,
+    )?;
+    decode_inner(&plaintext)
+}
+
+/// Opens any single frame message sealed by [`seal_typed`] under the same type code.
+pub(crate) fn open_typed(
+    type_code: u8,
+    enc_key: &[u8; KEY_LEN],
+    epoch: u32,
+    room_id_bytes: &[u8; ROOM_ID_LEN],
+    msg_id: &[u8; MSG_ID_LEN],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    let aad = build_aad(PROTOCOL_VERSION, type_code, epoch, room_id_bytes, msg_id);
     let cipher = XChaCha20Poly1305::new(&Key::from(*enc_key));
-    let plaintext = Zeroizing::new(
+    Ok(Zeroizing::new(
         cipher
             .decrypt(
                 &XNonce::from(*nonce),
@@ -348,8 +394,7 @@ pub fn open(
                 },
             )
             .map_err(|_| Error::Open)?,
-    );
-    decode_inner(&plaintext)
+    ))
 }
 
 #[cfg(test)]
