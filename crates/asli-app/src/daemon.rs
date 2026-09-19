@@ -51,6 +51,12 @@ pub struct Controls {
     /// A flag rather than a channel because the request has no payload and only the most recent
     /// one matters: asking twice before the daemon looks should fetch once, not twice.
     pub retained_wanted: Arc<AtomicBool>,
+    /// Set from the moment the person asks for the stored clip until it arrives or is refused.
+    ///
+    /// A stored clip that turns up unasked is only offered, never written, so it cannot overwrite
+    /// something copied here seconds earlier. One that was asked for must be written, and without
+    /// this the two could not be told apart, so the button never did anything.
+    pub retained_pending: Arc<AtomicBool>,
 }
 
 impl Controls {
@@ -62,6 +68,7 @@ impl Controls {
 
     /// Asks the daemon to fetch the relay's stored clip on its next pass.
     pub fn request_retained(&self) {
+        self.retained_pending.store(true, Ordering::Relaxed);
         self.retained_wanted.store(true, Ordering::Relaxed);
     }
 
@@ -164,6 +171,11 @@ pub fn on_client_event(
             false
         }
         ClientEvent::Clip(clip) => {
+            // The relay stores the last clip, so once a live one has arrived, what it holds is
+            // the clip just received, and offering it again would offer nothing new.
+            if !clip.retained {
+                status.has_retained = false;
+            }
             apply_clip(&clip.text, clip.retained, clip.ts_ms, io, status, now_ms)
         }
         ClientEvent::Image { png, ts_ms } => apply_image(png, *ts_ms, io, status, now_ms),
@@ -236,8 +248,14 @@ fn log_event(event: &ClientEvent) {
         ClientEvent::Presence { peers } => {
             eprintln!("{}", log_line("presence", &format!("{peers} connected")));
         }
-        ClientEvent::Dropped { reason } => {
-            eprintln!("{}", log_line("clip_dropped", reason));
+        ClientEvent::Dropped { reason, retained } => {
+            eprintln!(
+                "{}",
+                log_line(
+                    "clip_dropped",
+                    &format!("{reason}{}", if *retained { ", stored clip" } else { "" })
+                )
+            );
         }
         ClientEvent::ClockSkew { skew_ms } => {
             eprintln!(
@@ -306,6 +324,10 @@ fn on_live_event(
     }
 
     log_event(event);
+    if answer_retained_request(event, io, controls, status, history, now) {
+        controls.status.set(status.clone());
+        return;
+    }
     if matches!(event, ClientEvent::Authenticated { .. }) {
         // Recorded at the moment the handshake succeeds, so the next attempt after a drop is
         // logged as a reconnection rather than a first connection.
@@ -324,6 +346,41 @@ fn on_live_event(
         }
     }
     controls.status.set(status.clone());
+}
+
+/// Handles the stored clip the person asked for, or its refusal. Returns true when it did.
+fn answer_retained_request(
+    event: &ClientEvent,
+    io: &dyn ClipboardIo,
+    controls: &Controls,
+    status: &mut Status,
+    history: &SharedHistory,
+    now: u64,
+) -> bool {
+    let asked = || controls.retained_pending.swap(false, Ordering::Relaxed);
+    match event {
+        ClientEvent::Clip(clip) if clip.retained && asked() => {
+            status.has_retained = false;
+            // Written as a live clip would be: this is exactly what the person asked for.
+            if apply_clip(&clip.text, false, clip.ts_ms, io, status, now) {
+                if let Ok(mut history) = history.lock() {
+                    history.record(HistoryContent::Text(clip.text.clone()), false, now);
+                }
+                eprintln!("{}", log_line("paste_retained", "written to the clipboard"));
+                notify::retained_pasted(clip.text.len());
+            }
+            true
+        }
+        ClientEvent::Dropped {
+            reason,
+            retained: true,
+        } if asked() => {
+            status.has_retained = false;
+            notify::retained_nothing_new(reason);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The one place a received image reaches the clipboard.
@@ -787,6 +844,7 @@ async fn run_connection_loop(
         // A request raised by the tray while the previous connection was down cannot be carried
         // over: the relay tells us on each handshake whether it still holds anything, so a stale
         // request would ask for something that may no longer exist.
+        controls.retained_pending.store(false, Ordering::Relaxed);
         if controls.take_retained_request() {
             eprintln!(
                 "{}",
@@ -845,6 +903,90 @@ async fn run_connection_loop(
 mod tests {
     use super::*;
     use crate::clipboard_io::StubClipboard;
+
+    fn retained_clip(text: &str) -> ClientEvent {
+        ClientEvent::Clip(client::ReceivedClip {
+            text: text.to_owned(),
+            ts_ms: 1_000,
+            retained: true,
+        })
+    }
+
+    fn memory_history() -> SharedHistory {
+        Arc::new(std::sync::Mutex::new(crate::window::MemoryHistory::new(
+            true, 10,
+        )))
+    }
+
+    #[test]
+    fn a_stored_clip_that_was_asked_for_is_written() {
+        let stub = StubClipboard::default();
+        let controls = Controls::default();
+        let mut status = Status {
+            has_retained: true,
+            ..Status::default()
+        };
+        controls.request_retained();
+
+        let handled = answer_retained_request(
+            &retained_clip("from the relay"),
+            &stub,
+            &controls,
+            &mut status,
+            &memory_history(),
+            2_000,
+        );
+        assert!(handled);
+        assert_eq!(stub.writes(), vec!["from the relay".to_owned()]);
+        assert!(
+            !status.has_retained,
+            "the button goes once the clip is here"
+        );
+    }
+
+    #[test]
+    fn a_stored_clip_that_was_not_asked_for_is_left_to_the_offer() {
+        let stub = StubClipboard::default();
+        let controls = Controls::default();
+        let mut status = Status::default();
+
+        let handled = answer_retained_request(
+            &retained_clip("from the relay"),
+            &stub,
+            &controls,
+            &mut status,
+            &memory_history(),
+            2_000,
+        );
+        assert!(!handled);
+        assert!(stub.writes().is_empty());
+    }
+
+    #[test]
+    fn asking_for_our_own_stored_clip_ends_the_request_instead_of_leaving_it_open() {
+        let stub = StubClipboard::default();
+        let controls = Controls::default();
+        let mut status = Status {
+            has_retained: true,
+            ..Status::default()
+        };
+        controls.request_retained();
+
+        let handled = answer_retained_request(
+            &ClientEvent::Dropped {
+                reason: "own_device",
+                retained: true,
+            },
+            &stub,
+            &controls,
+            &mut status,
+            &memory_history(),
+            2_000,
+        );
+        assert!(handled);
+        assert!(!status.has_retained);
+        assert!(!controls.retained_pending.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn the_reservation_is_raised_before_a_long_connection_runs_past_it() {

@@ -208,6 +208,28 @@ pub fn retained_requested() {
     );
 }
 
+/// The stored clip that was asked for is now on the clipboard.
+pub fn retained_pasted(bytes: usize) {
+    action(
+        "Pasted the last synced clip",
+        &format!("{bytes} bytes are on your clipboard now"),
+    );
+}
+
+/// The stored clip was fetched, but there was nothing new in it for this device.
+///
+/// The relay keeps the last clip anyone in the account copied, and that is very often one this
+/// device sent itself or has already received, which is not a failure but used to look like one.
+pub fn retained_nothing_new(reason: &str) {
+    let why = match reason {
+        "own_device" => "The last synced clip was copied on this device, so it is already here.",
+        "duplicate" | "rollback" => "This device already received the last synced clip.",
+        "too_old" => "The last synced clip is older than the relay keeps clips for.",
+        _ => "The last synced clip could not be used on this device.",
+    };
+    action("Nothing new to paste", why);
+}
+
 /// There was no stored clip to fetch.
 pub fn retained_unavailable() {
     action(
