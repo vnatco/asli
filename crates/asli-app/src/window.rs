@@ -614,6 +614,13 @@ fn build() -> Result<AppWindow> {
     window.on_set_notifications(move |on| {
         if let Some(window) = handle.upgrade() {
             apply(&window, |config| config.notifications = on);
+            if let Some(context) = CONTEXT.get() {
+                context
+                    .controls
+                    .settings
+                    .notifications
+                    .store(on, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     });
 
@@ -869,21 +876,36 @@ fn save_settings(window: &AppWindow) {
         .unwrap_or(2)
         .min(3)];
 
+    let mut relay_changed = false;
     apply(window, |config| {
+        relay_changed = config.relay_url != relay;
         relay.clone_into(&mut config.relay_url);
         config.max_content_bytes = cap;
         config.history_entries = entries;
     });
 
+    if let Some(context) = CONTEXT.get() {
+        let live = &context.controls.settings;
+        live.max_content_bytes
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
+        if relay_changed {
+            live.reconnect
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     with_history(|history| history.set_limit(entries));
     window.set_settings_dirty(false);
 
-    // Both halves are stated because both are true and neither is obvious. A setting that claims
-    // to have applied when it has not is how a person concludes the application ignores them.
+    // Stated because it is true and not obvious. A setting that claims to have applied when it
+    // has not is how a person concludes the application ignores them.
     window.set_settings_note(
-        "Saved. The relay address takes effect when Asli next connects, and the history length \
-         when it next starts."
-            .into(),
+        if relay_changed {
+            "Saved. Reconnecting to the new relay now. The history length applies when Asli next \
+             starts."
+        } else {
+            "Saved. The history length applies when Asli next starts."
+        }
+        .into(),
     );
 }
 
