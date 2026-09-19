@@ -86,6 +86,33 @@ pub enum Action {
     },
     /// Authentication was rejected.
     AuthFailed(AuthFailCode),
+    /// A clip or image arrived and was discarded. Nothing is sent back: the relay learns nothing
+    /// from our silence. This exists so the device itself can say why, because a discard that
+    /// leaves no trace is indistinguishable from a clip that was never sent.
+    Dropped {
+        /// Why, as a short fixed label. Never content.
+        reason: &'static str,
+    },
+    /// This device's clock disagrees with the relay's by more than [`CLOCK_SKEW_WARN_MS`].
+    ///
+    /// Clips are judged by their capture time, so a device whose clock is off by more than the
+    /// replay window has every clip it sends dropped by the others, and drops every clip they
+    /// send it, with nothing failing anywhere.
+    ClockSkew {
+        /// The relay's clock minus ours, in milliseconds.
+        skew_ms: i64,
+    },
+}
+
+/// How far this device's clock may drift from the relay's before it is reported.
+///
+/// Well inside the replay window, which accepts clips up to a minute in the future and two minutes
+/// old, so the warning comes before clips start being dropped rather than after.
+pub const CLOCK_SKEW_WARN_MS: i64 = 30_000;
+
+/// A discard, reported to this device only.
+fn dropped(reason: &'static str) -> Vec<Action> {
+    vec![Action::Dropped { reason }]
 }
 
 /// Drives one connection's worth of protocol.
@@ -273,10 +300,19 @@ impl Session {
             None => (asli_crypto::random::bytes::<16>()?, now_ms),
         };
 
+        let mut actions = Vec::new();
+        let skew_ms = i64::try_from(challenge.server_time_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(i64::try_from(now_ms).unwrap_or(i64::MAX));
+        // A pinned time is a test fixture, not this device's clock, so there is nothing to report.
+        if self.pinned_auth.is_none() && skew_ms.saturating_abs() > CLOCK_SKEW_WARN_MS {
+            actions.push(Action::ClockSkew { skew_ms });
+        }
+
         let sig = asli_crypto::auth::sign_auth(&self.identity, &nonce_s, &nonce_c, client_time_ms);
 
         self.phase = Phase::Authenticating;
-        Ok(vec![Action::Send(
+        actions.push(Action::Send(
             Message::Auth(Auth {
                 v: PROTOCOL_VERSION,
                 room: self.identity.room_id(),
@@ -286,7 +322,8 @@ impl Session {
                 sig: sig.to_vec(),
             })
             .to_frame()?,
-        )])
+        ));
+        Ok(actions)
     }
 
     fn on_clip(&mut self, clip: &Clip, now_ms: u64) -> Result<Vec<Action>> {
@@ -306,12 +343,13 @@ impl Session {
             });
         }
 
-        // Everything from here is a silent discard. The relay learns nothing from our silence.
+        // Everything from here is a discard the relay never hears about. The device is told,
+        // through Action::Dropped, so its log can say why.
         if clip.room != self.identity.room_id() {
-            return Ok(Vec::new());
+            return Ok(dropped("wrong_room"));
         }
         if !self.epoch_is_acceptable(clip.epoch) {
-            return Ok(Vec::new());
+            return Ok(dropped("unknown_epoch"));
         }
 
         let room_id_bytes: [u8; ROOM_ID_LEN] = self.identity.room_id_bytes();
@@ -323,7 +361,7 @@ impl Session {
             &nonce,
             &clip.ct,
         ) else {
-            return Ok(Vec::new());
+            return Ok(dropped("could_not_decrypt"));
         };
 
         let retained = clip.is_retained();
@@ -338,7 +376,7 @@ impl Session {
             now_ms,
         );
         if verdict != Verdict::Accept {
-            return Ok(Vec::new());
+            return Ok(dropped(verdict.reason()));
         }
 
         if inner.content_type != ContentType::Text {
@@ -442,7 +480,7 @@ impl Session {
             return Ok(Vec::new());
         };
         let Ok(inner) = assembly.finish() else {
-            return Ok(Vec::new());
+            return Ok(dropped("could_not_decrypt"));
         };
 
         let verdict = self.replay.check(
@@ -456,7 +494,7 @@ impl Session {
             now_ms,
         );
         if verdict != Verdict::Accept {
-            return Ok(Vec::new());
+            return Ok(dropped(verdict.reason()));
         }
 
         match inner.content_type {
@@ -750,6 +788,35 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_clock_far_from_the_relays_is_reported_and_a_close_one_is_not() {
+        for (offset_ms, reported) in [
+            (0i64, false),
+            (20_000, false),
+            (-600_000, true),
+            (180_000, true),
+        ] {
+            let mut session = Session::new(Identity::from_secret(&SECRET), DEVICE_A, 0);
+            session.hello_frame().expect("hello");
+            let now = NOW.checked_add_signed(offset_ms).expect("in range");
+            let actions = session
+                .handle_frame(&challenge_frame(&[9u8; 32]), now)
+                .expect("challenge");
+            let skew = actions.iter().find_map(|a| match a {
+                Action::ClockSkew { skew_ms } => Some(*skew_ms),
+                _ => None,
+            });
+            assert_eq!(skew.is_some(), reported, "offset {offset_ms}");
+            if let Some(skew) = skew {
+                assert_eq!(skew, -offset_ms, "relay minus ours");
+            }
+            assert!(
+                actions.iter().any(|a| matches!(a, Action::Send(_))),
+                "the handshake goes on regardless"
+            );
+        }
+    }
+
     fn auth_ok_frame() -> String {
         r#"{"v":1,"type":"auth_ok","conn_id":"c_1","peers":2,"has_retained":false}"#.to_owned()
     }
@@ -823,7 +890,12 @@ mod tests {
         // fetching the retained clip can legitimately receive its own message.
         let (mut a, _) = ready_session(DEVICE_A);
         let frame = a.observe_local("mine", NOW).unwrap().unwrap();
-        assert_eq!(a.handle_frame(&frame, NOW).unwrap(), Vec::new());
+        assert_eq!(
+            a.handle_frame(&frame, NOW).unwrap(),
+            vec![Action::Dropped {
+                reason: "own_device"
+            }]
+        );
     }
 
     #[test]
@@ -833,7 +905,13 @@ mod tests {
         let frame = a.observe_local("once", NOW).unwrap().unwrap();
 
         assert_eq!(b.handle_frame(&frame, NOW).unwrap().len(), 1);
-        assert_eq!(b.handle_frame(&frame, NOW).unwrap(), Vec::new(), "replay");
+        assert_eq!(
+            b.handle_frame(&frame, NOW).unwrap(),
+            vec![Action::Dropped {
+                reason: "duplicate"
+            }],
+            "replay"
+        );
     }
 
     #[test]
@@ -845,7 +923,10 @@ mod tests {
         let second = a.observe_local("two", NOW).unwrap().unwrap();
         assert_eq!(b.handle_frame(&second, NOW).unwrap().len(), 1);
         // The relay now replays the earlier message, which carries a lower seq.
-        assert_eq!(b.handle_frame(&first, NOW).unwrap(), Vec::new());
+        assert_eq!(
+            b.handle_frame(&first, NOW).unwrap(),
+            vec![Action::Dropped { reason: "rollback" }]
+        );
     }
 
     #[test]
@@ -854,7 +935,10 @@ mod tests {
         let (mut b, _) = ready_session(DEVICE_B);
         let frame = a.observe_local("old news", NOW).unwrap().unwrap();
         // Two minutes and one second later.
-        assert_eq!(b.handle_frame(&frame, NOW + 120_001).unwrap(), Vec::new());
+        assert_eq!(
+            b.handle_frame(&frame, NOW + 120_001).unwrap(),
+            vec![Action::Dropped { reason: "too_old" }]
+        );
     }
 
     #[test]
@@ -896,7 +980,12 @@ mod tests {
 
         // Not an error: a verification failure gets silence, never a reply that would tell the
         // relay anything.
-        assert_eq!(b.handle_frame(&value.to_string(), NOW).unwrap(), Vec::new());
+        assert_eq!(
+            b.handle_frame(&value.to_string(), NOW).unwrap(),
+            vec![Action::Dropped {
+                reason: "could_not_decrypt"
+            }]
+        );
     }
 
     #[test]
@@ -907,7 +996,12 @@ mod tests {
 
         let mut value: serde_json::Value = serde_json::from_str(&frame).unwrap();
         value["room"] = serde_json::json!("00000000000000000000000000");
-        assert_eq!(b.handle_frame(&value.to_string(), NOW).unwrap(), Vec::new());
+        assert_eq!(
+            b.handle_frame(&value.to_string(), NOW).unwrap(),
+            vec![Action::Dropped {
+                reason: "wrong_room"
+            }]
+        );
     }
 
     #[test]

@@ -96,6 +96,17 @@ pub enum ClientEvent {
         /// The relay's announced limit.
         limit: usize,
     },
+    /// A clip or image arrived and was discarded, for a reason that is only this device's to
+    /// know. See [`Action::Dropped`].
+    Dropped {
+        /// Why, as a short fixed label.
+        reason: &'static str,
+    },
+    /// This device's clock disagrees with the relay's. See [`Action::ClockSkew`].
+    ClockSkew {
+        /// The relay's clock minus ours, in milliseconds.
+        skew_ms: i64,
+    },
 }
 
 /// Why a connection ended.
@@ -202,6 +213,12 @@ pub async fn run_once(
                                 }
                                 Action::RelayError { code, retry_after_ms } => {
                                     on_event(ClientEvent::RelayError { code, retry_after_ms });
+                                }
+                                Action::Dropped { reason } => {
+                                    on_event(ClientEvent::Dropped { reason });
+                                }
+                                Action::ClockSkew { skew_ms } => {
+                                    on_event(ClientEvent::ClockSkew { skew_ms });
                                 }
                             }
                         }

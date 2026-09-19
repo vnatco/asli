@@ -175,6 +175,14 @@ pub fn on_client_event(
             status.last_error = Some(format!("{code:?}"));
             false
         }
+        ClientEvent::ClockSkew { skew_ms } => {
+            status.last_error = Some(format!(
+                "this computer's clock is {} s off, so clips are being dropped",
+                skew_ms.unsigned_abs() / 1000
+            ));
+            notify::clock_skew(*skew_ms);
+            false
+        }
         ClientEvent::ClipSkipped { got, limit } => {
             status.skipped = status.skipped.saturating_add(1);
             // Never silent, and never merely logged. A copy that vanished with no explanation is
@@ -227,6 +235,18 @@ fn log_event(event: &ClientEvent) {
         }
         ClientEvent::Presence { peers } => {
             eprintln!("{}", log_line("presence", &format!("{peers} connected")));
+        }
+        ClientEvent::Dropped { reason } => {
+            eprintln!("{}", log_line("clip_dropped", reason));
+        }
+        ClientEvent::ClockSkew { skew_ms } => {
+            eprintln!(
+                "{}",
+                log_line(
+                    "clock_skew",
+                    &format!("the relay's clock is {skew_ms} ms ahead of this one")
+                )
+            );
         }
         _ => {}
     }
