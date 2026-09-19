@@ -867,9 +867,26 @@ failure results in the message being discarded.
 | 2 | `device_id` is not this device's own `device_id` | The relay excludes the sender, but a malicious relay may not. This is the last line against a self echo loop |
 | 3 | `msg_id` has not been seen. Maintain an LRU set of the **last 256** `msg_id` values | Authoritative anti replay, and it doubles as the loop prevention the design requires |
 | 4 | `seq` is strictly greater than the highest `seq` already accepted from this `device_id` | Detects a relay replaying or rolling back one device's messages |
-| 5 | For a live message, `now - ts_ms <= 120000` (120 seconds) | Bounds how stale an applied clip can be |
+| 5 | For a live message, `now - ts_ms <= 86400000` (24 hours) | A sanity bound on how stale an applied clip can be, wide enough that no clock or time zone mistake short of a day breaks sync |
 | 6 | For a message marked `retained`, the age window extends to the relay's retention period instead | A retained clip is legitimately old |
-| 7 | `ts_ms` no more than 60000 ms (60 seconds) in the future | Clock skew tolerance. `ts_ms` is advisory; `seq` and `msg_id` carry the security weight |
+| 7 | `ts_ms` no more than 86400000 ms (24 hours) in the future | Clock skew tolerance. `ts_ms` is advisory; `seq` and `msg_id` carry the security weight |
+
+The state behind checks 3 and 4, the recent `msg_id` values and the highest `seq` per `device_id`,
+MUST survive a restart of the client. It is what actually refuses a replay, and a client that
+forgets it on restart can be sent an old clip in the gap, which a tight time window would then be
+the only thing to stop. That is how version 1 clients first worked, with windows of 120 seconds
+and 60 seconds, and it made sync depend on every device's clock being right: a device showing the
+correct local time in the wrong time zone is hours off, and every clip to and from it was
+dropped. A client SHOULD store this state per room and discard it when its account changes.
+
+A receiver still running the old windows is compatible with one running these, since nothing on
+the wire changed: it is only less tolerant of clocks.
+
+What remains, stated plainly: a device with no stored state for a sender, such as a new device or
+one just reset, cannot tell a fresh clip from a replayed one on first contact except by `ts_ms`. A
+malicious relay can therefore show such a device one old clip from within the last 24 hours. It
+cannot read it or alter it. It can also hold back the most recent clip and deliver it late within
+the same window, which it could already do by dropping it.
 
 ### 10.1 Retained clips
 
@@ -1068,8 +1085,8 @@ This section summarizes. `docs/THREAT_MODEL.md` is authoritative.
 - Count connections per room, and correlate connections that share a room.
 - Drop messages, delay messages, or refuse service entirely.
 - Lie about `peers`, `has_retained`, `retained` and `stored_at`, none of which are authenticated.
-- Attempt to replay a stored ciphertext, which receivers detect through `msg_id` dedup, the per
-  device `seq` check and the `ts_ms` age window.
+- Attempt to replay a stored ciphertext, which receivers detect through `msg_id` dedup and the per
+  device `seq` check, both kept across restarts, with the `ts_ms` age window as a sanity bound.
 
 ### 15.2 What the relay cannot do
 

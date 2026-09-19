@@ -210,6 +210,7 @@ fn status(paths: &Paths) -> Result<()> {
 
 fn reset(paths: &Paths) -> Result<()> {
     secrets::wipe(paths)?;
+    crate::replay_store::wipe(paths);
     println!("Account forgotten on this device.");
     println!();
     println!("This is how revocation works in v1: there is no way to remove one device from an");
