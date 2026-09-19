@@ -192,6 +192,9 @@ pub struct Summary {
     pub bytes: usize,
     /// First [`PREVIEW_CHARS`] characters, for text only. Empty for an image.
     pub preview: String,
+    /// The device the clip came from, or all zeros where that is not known, as for entries
+    /// written before this was recorded.
+    pub device_id: [u8; clip::DEVICE_ID_LEN],
 }
 
 /// The content type of an entry, without carrying the content.
@@ -249,6 +252,7 @@ struct Entry {
     id: Id,
     ts_ms: u64,
     content: Content,
+    device_id: [u8; clip::DEVICE_ID_LEN],
 }
 
 impl Entry {
@@ -263,6 +267,7 @@ impl Entry {
             kind,
             bytes: self.content.len(),
             preview,
+            device_id: self.device_id,
         }
     }
 }
@@ -388,6 +393,24 @@ impl Store {
     /// Returns [`Error::Io`] if the file could not be written, or [`Error::Crypto`] if sealing
     /// failed.
     pub fn append(&mut self, content: Content, sensitive: bool, ts_ms: u64) -> Result<Appended> {
+        self.append_from(content, sensitive, ts_ms, [0u8; clip::DEVICE_ID_LEN])
+    }
+
+    /// Appends an entry and records which device it came from.
+    ///
+    /// Otherwise identical to [`Store::append`]. A repeat moved to the top takes the new source,
+    /// since that is where it most recently came from.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Store::append`].
+    pub fn append_from(
+        &mut self,
+        content: Content,
+        sensitive: bool,
+        ts_ms: u64,
+        device_id: [u8; clip::DEVICE_ID_LEN],
+    ) -> Result<Appended> {
         if sensitive {
             return Ok(Appended::RefusedSensitive);
         }
@@ -408,6 +431,7 @@ impl Store {
             }
             let mut existing = self.entries.remove(position);
             existing.ts_ms = ts_ms;
+            existing.device_id = device_id;
             let id = existing.id;
             self.entries.insert(0, existing);
             self.persist()?;
@@ -415,7 +439,15 @@ impl Store {
         }
 
         let id: Id = asli_crypto::random::bytes()?;
-        self.entries.insert(0, Entry { id, ts_ms, content });
+        self.entries.insert(
+            0,
+            Entry {
+                id,
+                ts_ms,
+                content,
+                device_id,
+            },
+        );
         self.evict();
         self.persist()?;
         Ok(Appended::Stored(id))
@@ -526,8 +558,9 @@ impl Store {
             let inner = clip::Inner {
                 content_type: entry.content.content_type(),
                 // The clip framing carries a device id and a sequence number for replay defence
-                // on the wire. Neither means anything for a local file, so they are fixed.
-                device_id: [0u8; clip::DEVICE_ID_LEN],
+                // on the wire. Here the device id records where the clip came from, which the
+                // list shows, and the sequence number means nothing, so it is fixed.
+                device_id: entry.device_id,
                 seq: 0,
                 ts_ms: entry.ts_ms,
                 content: entry.content.as_bytes().to_vec(),
@@ -602,6 +635,7 @@ fn decode_all(raw: &[u8], key: &[u8; key::KEY_LEN]) -> Result<Vec<Entry>> {
             id,
             ts_ms: inner.ts_ms,
             content,
+            device_id: inner.device_id,
         });
     }
 
@@ -746,6 +780,24 @@ mod tests {
         let reopened = Store::open(temp.path(), &SECRET, Limits::default()).expect("reopens");
         assert_eq!(reopened.len(), 1);
         assert_eq!(reopened.get(&id).expect("gets"), text("hello"));
+    }
+
+    #[test]
+    fn the_source_device_survives_a_reopen() {
+        let temp = Temp::new("source");
+        let from = [4u8; clip::DEVICE_ID_LEN];
+        {
+            let mut store = store(&temp);
+            store
+                .append_from(text("from elsewhere"), false, NOW, from)
+                .expect("appends");
+            store
+                .append(text("unknown source"), false, NOW + 1)
+                .expect("appends");
+        }
+        let list = store(&temp).list();
+        assert_eq!(list[0].device_id, [0u8; clip::DEVICE_ID_LEN]);
+        assert_eq!(list[1].device_id, from);
     }
 
     #[test]
