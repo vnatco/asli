@@ -634,14 +634,9 @@ fn wire_frame(window: &AppWindow) {
         }
     });
 
-    let handle = window.as_weak();
-    window.on_minimize_window(move || {
-        if let Some(window) = handle.upgrade() {
-            window
-                .window()
-                .with_winit_window(|winit| winit.set_minimized(true));
-        }
-    });
+    // Minimise goes to the tray, like close: the tray is where this application lives, and a
+    // minimised window only sat in the taskbar as a second way back to the same place.
+    window.on_minimize_window(hide);
 
     let handle = window.as_weak();
     window.on_toggle_maximize(move || {
