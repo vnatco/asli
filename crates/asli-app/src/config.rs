@@ -230,6 +230,14 @@ impl Paths {
 /// Writes a file through a temporary file and a rename, so a crash cannot leave a half written
 /// config behind.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    // One writer at a time. Two threads write the same file, the sequence reservation from both
+    // the clipboard bridge and the connection loop, and with one shared temporary name they could
+    // interleave into an empty file, which then stops the daemon starting.
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = WRITING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let tmp = path.with_extension("tmp");
     {
         let mut file = fs::File::create(&tmp)?;

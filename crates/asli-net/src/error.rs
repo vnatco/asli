@@ -39,6 +39,12 @@ pub enum Error {
     Crypto(asli_crypto::Error),
     /// The socket closed or could not be established.
     Transport(String),
+    /// A well formed message of a type this client does not know.
+    ///
+    /// Kept apart from [`Error::Malformed`] because the protocol says to ignore it: a newer relay
+    /// may send a type an older client has never heard of, and dropping the connection over it
+    /// would make every older client reconnect each time one was sent.
+    UnknownType,
 }
 
 impl fmt::Display for Error {
@@ -62,6 +68,7 @@ impl fmt::Display for Error {
             }
             Self::Crypto(err) => write!(f, "cryptographic failure: {err}"),
             Self::Transport(detail) => write!(f, "connection problem: {detail}"),
+            Self::UnknownType => f.write_str("a message of a type this version does not know"),
         }
     }
 }

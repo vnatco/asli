@@ -172,9 +172,12 @@ pub async fn run_once(
 ) -> Result<Disconnect> {
     install_crypto_provider();
 
-    let (mut socket, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|e| Error::Transport(format!("{e}")))?;
+    // Bounded, so a network that swallows packets mid connect cannot hang the reconnect loop.
+    let (mut socket, _) =
+        tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+            .await
+            .map_err(|_| Error::Transport("the relay did not answer in time".to_owned()))?
+            .map_err(|e| Error::Transport(format!("{e}")))?;
 
     let hello = session.hello_frame()?;
     socket
@@ -182,46 +185,81 @@ pub async fn run_once(
         .await
         .map_err(|e| Error::Transport(format!("{e}")))?;
 
+    let mut unconfirmed = None;
+    let outcome = converse(&mut socket, session, local_rx, on_event, &mut unconfirmed).await;
+    // However the connection ended, a copy the relay never confirmed goes out again on the next
+    // one. Otherwise a copy made just as the network dropped, before this side noticed, was lost
+    // with the connection it was sent on.
+    if let Some(event) = unconfirmed {
+        session.stash_resend(event);
+    }
+    outcome
+}
+
+/// Everything after the handshake starts: relay traffic in, local copies out, liveness.
+async fn converse(
+    socket: &mut Socket,
+    session: &mut Session,
+    local_rx: &mut mpsc::Receiver<LocalEvent>,
+    on_event: &mut dyn FnMut(ClientEvent),
+    unconfirmed: &mut Option<LocalEvent>,
+) -> Result<Disconnect> {
+    // Liveness. A connection whose other end vanished, which is what sleep and a network change
+    // both leave behind, sends nothing and reports nothing: the socket just stays quiet forever,
+    // the tray says Synced, and nothing arrives. So this side pings, and treats a long enough
+    // silence as the end of the connection. The relay's own pings and the answers to ours both
+    // count as traffic.
+    let mut last_heard = tokio::time::Instant::now();
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // When the relay asked us to slow down, local clips wait until then. They are coalesced while
+    // they wait, so only the newest goes when the pause ends.
+    let mut hold_until: Option<tokio::time::Instant> = None;
+    // Pings are numbered, so the answer to the one sent right after a copy can be told apart from
+    // the answer to an earlier one. That answer is what confirms the copy reached the relay:
+    // frames arrive in order, so the relay read the copy before the ping.
+    let mut pings: u64 = 0;
+    let mut confirming: Option<u64> = None;
+
     loop {
+        let ready = session.is_ready();
+        let held = hold_until.is_some_and(|until| tokio::time::Instant::now() < until);
+
+        // A copy the last connection lost goes first, once this one can carry it.
+        if ready && !held && unconfirmed.is_none() {
+            if let Some(event) = session.take_resend() {
+                send_local(
+                    socket,
+                    session,
+                    vec![event],
+                    on_event,
+                    unconfirmed,
+                    &mut pings,
+                    &mut confirming,
+                )
+                .await?;
+            }
+        }
+
         tokio::select! {
             incoming = socket.next() => {
                 let Some(message) = incoming else {
                     return Ok(Disconnect::Eof);
                 };
                 let message = message.map_err(|e| Error::Transport(format!("{e}")))?;
+                last_heard = tokio::time::Instant::now();
 
                 match message {
                     WsMessage::Text(text) => {
-                        for action in session.handle_frame(text.as_str(), now_ms())? {
-                            match action {
-                                Action::Send(frame) => socket
-                                    .send(WsMessage::Text(frame.into()))
-                                    .await
-                                    .map_err(|e| Error::Transport(format!("{e}")))?,
-                                Action::AuthFailed(code) => {
-                                    return Ok(Disconnect::AuthFailed(code));
-                                }
-                                Action::Authenticated { peers, has_retained, stored_at } => {
-                                    on_event(ClientEvent::Authenticated { peers, has_retained, stored_at });
-                                }
-                                Action::Clip { text, ts_ms, retained } => {
-                                    on_event(ClientEvent::Clip(ReceivedClip { text, ts_ms, retained }));
-                                }
-                                Action::Image { png, ts_ms } => {
-                                    on_event(ClientEvent::Image { png, ts_ms });
-                                }
-                                Action::Presence { peers } => {
-                                    on_event(ClientEvent::Presence { peers });
-                                }
-                                Action::RelayError { code, retry_after_ms } => {
-                                    on_event(ClientEvent::RelayError { code, retry_after_ms });
-                                }
-                                Action::Dropped { reason, retained } => {
-                                    on_event(ClientEvent::Dropped { reason, retained });
-                                }
-                                Action::ClockSkew { skew_ms } => {
-                                    on_event(ClientEvent::ClockSkew { skew_ms });
-                                }
+                        let actions = match session.handle_frame(text.as_str(), now_ms()) {
+                            Ok(actions) => actions,
+                            // A type from a newer relay. The protocol says to ignore it.
+                            Err(Error::UnknownType) => continue,
+                            Err(other) => return Err(other),
+                        };
+                        for action in actions {
+                            if let Some(end) = apply_action(action, socket, &mut hold_until, on_event).await? {
+                                return Ok(end);
                             }
                         }
                     }
@@ -229,26 +267,171 @@ pub async fn run_once(
                         let code = frame.map_or(1000, |f| u16::from(f.code));
                         return Ok(Disconnect::Close(code));
                     }
+                    WsMessage::Pong(payload) => {
+                        if confirming.is_some_and(|n| payload.as_ref() == n.to_be_bytes()) {
+                            confirming = None;
+                            *unconfirmed = None;
+                        }
+                    }
                     // Protocol level pings are answered by the library. Binary frames are not part
                     // of v1, so they are ignored rather than treated as fatal.
-                    WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_)
-                    | WsMessage::Frame(_) => {}
+                    WsMessage::Ping(_) | WsMessage::Binary(_) | WsMessage::Frame(_) => {}
                 }
             }
 
-            local = local_rx.recv() => {
+            // Only once the handshake is done. Read earlier, a copy made while offline was taken
+            // off the queue before the relay would accept it and thrown away, and with it very
+            // often the one copy the person was waiting to see on the other machine.
+            local = local_rx.recv(), if ready && !held => {
                 let Some(event) = local else {
                     return Ok(Disconnect::LocalChannelClosed);
                 };
-                for frame in frames_for(session, event, on_event)? {
-                    socket
-                        .send(WsMessage::Text(frame.into()))
-                        .await
-                        .map_err(|e| Error::Transport(format!("{e}")))?;
+                let batch = coalesce(event, local_rx);
+                // One unconfirmed copy is tracked, the newest: a newer copy replaces it on every
+                // device's clipboard anyway, so once one is sent the older no longer matters.
+                // send_local only replaces it when this batch actually sends a copy.
+                send_local(socket, session, batch, on_event, unconfirmed, &mut pings, &mut confirming).await?;
+            }
+
+            _ = ping.tick() => {
+                if last_heard.elapsed() > SILENCE_LIMIT {
+                    return Ok(Disconnect::Eof);
                 }
+                pings = pings.wrapping_add(1);
+                socket
+                    .send(WsMessage::Ping(pings.to_be_bytes().to_vec().into()))
+                    .await
+                    .map_err(|e| Error::Transport(format!("{e}")))?;
+            }
+
+            () = tokio::time::sleep_until(hold_until.unwrap_or_else(tokio::time::Instant::now)), if held => {
+                hold_until = None;
             }
         }
     }
+}
+
+/// Sends local events, and asks the relay to confirm the copy among them.
+async fn send_local(
+    socket: &mut Socket,
+    session: &mut Session,
+    events: Vec<LocalEvent>,
+    on_event: &mut dyn FnMut(ClientEvent),
+    unconfirmed: &mut Option<LocalEvent>,
+    pings: &mut u64,
+    confirming: &mut Option<u64>,
+) -> Result<()> {
+    for event in events {
+        let copy = (!matches!(event, LocalEvent::FetchRetained)).then(|| event.clone());
+        let frames = frames_for(session, event, on_event)?;
+        let sent_something = !frames.is_empty();
+        for frame in frames {
+            socket
+                .send(WsMessage::Text(frame.into()))
+                .await
+                .map_err(|e| Error::Transport(format!("{e}")))?;
+        }
+        if let (Some(copy), true) = (copy, sent_something) {
+            *pings = pings.wrapping_add(1);
+            socket
+                .send(WsMessage::Ping(pings.to_be_bytes().to_vec().into()))
+                .await
+                .map_err(|e| Error::Transport(format!("{e}")))?;
+            *confirming = Some(*pings);
+            *unconfirmed = Some(copy);
+        }
+    }
+    Ok(())
+}
+
+/// Carries out one thing the session decided. Returns how the connection ends, if it does.
+async fn apply_action(
+    action: Action,
+    socket: &mut Socket,
+    hold_until: &mut Option<tokio::time::Instant>,
+    on_event: &mut dyn FnMut(ClientEvent),
+) -> Result<Option<Disconnect>> {
+    match action {
+        Action::Send(frame) => socket
+            .send(WsMessage::Text(frame.into()))
+            .await
+            .map_err(|e| Error::Transport(format!("{e}")))?,
+        Action::AuthFailed(code) => return Ok(Some(Disconnect::AuthFailed(code))),
+        Action::Authenticated {
+            peers,
+            has_retained,
+            stored_at,
+        } => on_event(ClientEvent::Authenticated {
+            peers,
+            has_retained,
+            stored_at,
+        }),
+        Action::Clip {
+            text,
+            ts_ms,
+            retained,
+        } => on_event(ClientEvent::Clip(ReceivedClip {
+            text,
+            ts_ms,
+            retained,
+        })),
+        Action::Image { png, ts_ms } => on_event(ClientEvent::Image { png, ts_ms }),
+        Action::Presence { peers } => on_event(ClientEvent::Presence { peers }),
+        Action::RelayError {
+            code,
+            retry_after_ms,
+        } => {
+            // Asked to slow down: local copies wait until then instead of being refused one by one.
+            if let Some(wait) = retry_after_ms {
+                *hold_until =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(wait));
+            }
+            on_event(ClientEvent::RelayError {
+                code,
+                retry_after_ms,
+            });
+        }
+        Action::Dropped { reason, retained } => {
+            on_event(ClientEvent::Dropped { reason, retained });
+        }
+        Action::ClockSkew { skew_ms } => on_event(ClientEvent::ClockSkew { skew_ms }),
+    }
+    Ok(None)
+}
+
+/// The connection to the relay.
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// How long to wait for the relay to accept a connection.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How often this side pings the relay.
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// How long a connection may be silent before it is treated as gone. Two pings and some slack.
+const SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(70);
+
+/// Collapses everything already queued behind `first` into what is still worth sending.
+///
+/// The clipboard is last write wins, so of several copies made while waiting only the newest
+/// matters, and sending them all in one burst would run straight into the relay's rate limit. A
+/// request for the stored clip is kept alongside, since it is not a copy.
+fn coalesce(first: LocalEvent, local_rx: &mut mpsc::Receiver<LocalEvent>) -> Vec<LocalEvent> {
+    let mut newest_copy = None;
+    let mut fetch = false;
+    let mut take = |event: LocalEvent| match event {
+        LocalEvent::FetchRetained => fetch = true,
+        copy => newest_copy = Some(copy),
+    };
+    take(first);
+    while let Ok(next) = local_rx.try_recv() {
+        take(next);
+    }
+    newest_copy
+        .into_iter()
+        .chain(fetch.then_some(LocalEvent::FetchRetained))
+        .collect()
 }
 
 /// Turns something that happened on this device into the frames that carry it.
@@ -302,6 +485,23 @@ fn frames_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backlog_of_copies_is_sent_as_the_newest_one() {
+        let (tx, mut rx) = mpsc::channel(16);
+        for text in ["first", "second"] {
+            tx.try_send(LocalEvent::Text(text.to_owned()))
+                .expect("queued");
+        }
+        tx.try_send(LocalEvent::FetchRetained).expect("queued");
+        tx.try_send(LocalEvent::Text("newest".to_owned()))
+            .expect("queued");
+
+        let batch = coalesce(LocalEvent::Text("zeroth".to_owned()), &mut rx);
+        assert_eq!(batch.len(), 2);
+        assert!(matches!(&batch[0], LocalEvent::Text(text) if text == "newest"));
+        assert!(matches!(batch[1], LocalEvent::FetchRetained));
+    }
 
     #[test]
     fn the_clock_looks_like_a_wall_clock() {

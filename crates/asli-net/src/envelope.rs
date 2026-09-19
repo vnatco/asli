@@ -85,6 +85,24 @@ pub enum Message {
     ClipEnd(ClipChunk),
 }
 
+/// Every message type this version understands, as spelled on the wire.
+const KNOWN_TYPES: &[&str] = &[
+    "hello",
+    "challenge",
+    "auth",
+    "auth_ok",
+    "auth_fail",
+    "clip",
+    "fetch_last",
+    "presence",
+    "ping",
+    "pong",
+    "error",
+    "clip_begin",
+    "clip_chunk",
+    "clip_end",
+];
+
 impl Message {
     /// Parses a frame.
     ///
@@ -92,7 +110,19 @@ impl Message {
     ///
     /// Returns [`Error::Malformed`] for invalid JSON, an unknown type, or an unknown field.
     pub fn parse(frame: &str) -> Result<Self> {
-        serde_json::from_str(frame).map_err(|_| Error::Malformed("frame did not match any type"))
+        serde_json::from_str(frame).map_err(|_| {
+            // Worth telling apart: a type this version has never heard of is to be ignored, while a
+            // known type that does not match its schema is a protocol error.
+            #[derive(Deserialize)]
+            struct Probe {
+                #[serde(rename = "type")]
+                kind: String,
+            }
+            match serde_json::from_str::<Probe>(frame) {
+                Ok(probe) if !KNOWN_TYPES.contains(&probe.kind.as_str()) => Error::UnknownType,
+                _ => Error::Malformed("frame did not match any type"),
+            }
+        })
     }
 
     /// Serializes a frame.
@@ -444,6 +474,24 @@ pub fn encode_b64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_type_this_version_does_not_know_is_told_apart_from_a_malformed_frame() {
+        assert!(matches!(
+            Message::parse(r#"{"v":1,"type":"from_the_future","anything":1}"#),
+            Err(Error::UnknownType)
+        ));
+        // A known type with a field it does not have is still a protocol error.
+        assert!(matches!(
+            Message::parse(r#"{"v":1,"type":"presence","peers":2,"extra":true}"#),
+            Err(Error::Malformed(_))
+        ));
+        assert!(matches!(
+            Message::parse("not json"),
+            Err(Error::Malformed(_))
+        ));
+    }
+
     use super::*;
 
     fn round_trip(frame: &str) -> Message {
