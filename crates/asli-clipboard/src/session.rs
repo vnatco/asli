@@ -208,6 +208,9 @@ mod tests {
         }
     }
 
+    // Session detection only means something on Linux. On Windows and macOS the plan is always
+    // the one native backend, whatever the display variables say.
+    #[cfg(target_os = "linux")]
     #[test]
     fn plain_x11_uses_xfixes() {
         let p = plan(&env(None, Some(":0"), Some("KDE"))).expect("has a plan");
@@ -215,6 +218,7 @@ mod tests {
         assert!(!p.degraded);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn wlroots_wayland_uses_data_control() {
         for desktop in ["Hyprland", "sway", "niri", "Wayfire", "COSMIC"] {
@@ -224,6 +228,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn kde_wayland_uses_data_control() {
         let p = plan(&env(Some("wayland-0"), Some(":0"), Some("KDE"))).expect("has a plan");
@@ -231,6 +236,7 @@ mod tests {
         assert!(!p.degraded);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn gnome_wayland_falls_back_to_xwayland_and_says_so() {
         let p = plan(&env(Some("wayland-0"), Some(":0"), Some("GNOME"))).expect("has a plan");
@@ -250,6 +256,7 @@ mod tests {
         assert!(!env(Some("wayland-0"), None, None).is_gnome());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn gnome_wayland_without_xwayland_is_an_honest_failure() {
         let err = plan(&env(Some("wayland-0"), None, Some("GNOME"))).expect_err("cannot work");
@@ -257,11 +264,27 @@ mod tests {
         assert!(err.to_string().contains("GNOME"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_headless_session_fails_clearly() {
         let err = plan(&env(None, None, None)).expect_err("no display");
         assert!(matches!(err, crate::Error::NoBackend(_)));
         assert!(err.to_string().contains("DISPLAY"));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn the_native_backend_is_chosen_whatever_the_display_variables_say() {
+        #[cfg(target_os = "windows")]
+        let native = Backend::Windows;
+        #[cfg(target_os = "macos")]
+        let native = Backend::MacOs;
+        for e in [
+            env(None, None, None),
+            env(Some("wayland-0"), Some(":0"), Some("GNOME")),
+        ] {
+            assert_eq!(plan(&e).expect("has a plan").backend, native);
+        }
     }
 
     #[test]
