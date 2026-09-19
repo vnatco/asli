@@ -28,6 +28,8 @@ const FILE: &str = "history.bin";
 pub struct StoreHistory {
     store: Store,
     enabled: bool,
+    /// Bumped on every change. See [`HistorySource::revision`].
+    revision: u64,
 }
 
 /// Opens the history for this account, discarding a file that cannot be read.
@@ -67,6 +69,7 @@ pub fn open(
     Ok(StoreHistory {
         store,
         enabled: config.keep_history,
+        revision: 0,
     })
 }
 
@@ -77,6 +80,7 @@ impl core::fmt::Debug for StoreHistory {
         f.debug_struct("StoreHistory")
             .field("enabled", &self.enabled)
             .field("entries", &self.store.len())
+            .field("revision", &self.revision)
             .finish()
     }
 }
@@ -134,6 +138,7 @@ impl HistorySource for StoreHistory {
             HistoryContent::ImagePng(png) => Content::ImagePng(png),
         };
 
+        self.revision = self.revision.wrapping_add(1);
         if let Err(err) = self.store.append(content, sensitive, ts_ms) {
             // Never fatal. Failing to remember a clip must not stop it being synced, which is the
             // thing the person actually asked for.
@@ -146,6 +151,7 @@ impl HistorySource for StoreHistory {
             return false;
         };
 
+        self.revision = self.revision.wrapping_add(1);
         match self.store.remove(&id) {
             Ok(()) => true,
             Err(err) => {
@@ -156,6 +162,7 @@ impl HistorySource for StoreHistory {
     }
 
     fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         if let Err(err) = self.store.clear() {
             eprintln!("{}", log_line("history_clear_failed", &err.to_string()));
         }
@@ -176,5 +183,10 @@ impl HistorySource for StoreHistory {
         // configuration by the caller, so it applies on the next start. The Settings screen says
         // so rather than implying the change took effect now.
         let _ = limit;
+    }
+
+    fn revision(&self) -> u64 {
+        // Enabled is part of what the screen shows, so flipping it counts as a change too.
+        self.revision.wrapping_mul(2) | u64::from(self.enabled)
     }
 }

@@ -28,7 +28,9 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use slint::{ComponentHandle as _, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use slint::{
+    ComponentHandle as _, Image, Model as _, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
+};
 
 use asli_crypto::{token, Identity};
 
@@ -111,6 +113,13 @@ pub trait HistorySource: Send {
 
     /// Changes how many entries are kept, dropping any excess immediately.
     fn set_limit(&mut self, limit: usize);
+
+    /// A number that changes whenever the entries do, so an open window knows to redraw.
+    ///
+    /// The daemon records into the history from another thread while the window is showing it,
+    /// and without something to compare, a copy made or received while the list was open only
+    /// appeared after navigating away and back.
+    fn revision(&self) -> u64;
 }
 
 /// One row, with no content attached.
@@ -146,6 +155,7 @@ pub struct MemoryHistory {
     entries: Vec<(HistoryEntry, HistoryContent)>,
     enabled: bool,
     limit: usize,
+    revision: u64,
 }
 
 impl MemoryHistory {
@@ -156,6 +166,7 @@ impl MemoryHistory {
             entries: Vec::new(),
             enabled,
             limit,
+            revision: 0,
         }
     }
 
@@ -187,6 +198,7 @@ impl MemoryHistory {
             ),
         );
         self.entries.truncate(self.limit.max(1));
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -213,6 +225,7 @@ impl HistorySource for MemoryHistory {
     fn forget(&mut self, index: usize) -> bool {
         if index < self.entries.len() {
             self.entries.remove(index);
+            self.revision = self.revision.wrapping_add(1);
             return true;
         }
         false
@@ -220,6 +233,7 @@ impl HistorySource for MemoryHistory {
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Turning history off and leaving the previous entries in place would be the wrong reading
@@ -234,6 +248,12 @@ impl HistorySource for MemoryHistory {
     fn set_limit(&mut self, limit: usize) {
         self.limit = limit.max(1);
         self.entries.truncate(self.limit);
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn revision(&self) -> u64 {
+        // Enabled is part of what the screen shows, so flipping it counts as a change too.
+        self.revision.wrapping_mul(2) | u64::from(self.enabled)
     }
 }
 
@@ -466,6 +486,7 @@ fn start_timer() {
             WINDOW.with_borrow(|window| {
                 if let Some(window) = window.as_ref() {
                     refresh_status(window);
+                    refresh_history_if_stale(window);
                 }
             });
         });
@@ -703,6 +724,59 @@ fn refresh_status(window: &AppWindow) {
     window.set_last_error(status.last_error.clone().unwrap_or_default().into());
 }
 
+thread_local! {
+    /// The history revision the list was last drawn from, and when. Main thread only.
+    static HISTORY_DRAWN: std::cell::Cell<Option<(u64, std::time::Instant)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Redraws the list when the history changed since it was drawn, and every half minute anyway,
+/// because each row says how long ago it was copied and "just now" goes stale by itself.
+fn refresh_history_if_stale(window: &AppWindow) {
+    const AGES: Duration = Duration::from_secs(30);
+    let Some(context) = CONTEXT.get() else {
+        return;
+    };
+    let Some(revision) = context
+        .history
+        .lock()
+        .ok()
+        .map(|history| history.revision())
+    else {
+        return;
+    };
+    match HISTORY_DRAWN.get() {
+        Some((drawn, at)) if drawn == revision => {
+            // Nothing new, only older: the ages are rewritten in the rows already there, rather
+            // than rebuilding the list under somebody who has scrolled down it.
+            if at.elapsed() >= AGES {
+                refresh_ages(window, context);
+                HISTORY_DRAWN.set(Some((revision, std::time::Instant::now())));
+            }
+        }
+        _ => refresh_history(window),
+    }
+}
+
+/// Rewrites how long ago each row was copied, in place.
+fn refresh_ages(window: &AppWindow, context: &Context) {
+    let Some(entries) = context.history.lock().ok().map(|history| history.entries()) else {
+        return;
+    };
+    let rows = window.get_history();
+    if rows.row_count() != entries.len() {
+        refresh_history(window);
+        return;
+    }
+    let now = asli_net::client::now_ms();
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(mut row) = rows.row_data(index) {
+            row.age = tray::relative_time(Some(entry.ts_ms), now).into();
+            rows.set_row_data(index, row);
+        }
+    }
+}
+
 /// Rebuilds the history list.
 fn refresh_history(window: &AppWindow) {
     let Some(context) = CONTEXT.get() else {
@@ -713,6 +787,7 @@ fn refresh_history(window: &AppWindow) {
     };
 
     window.set_history_enabled(history.enabled());
+    HISTORY_DRAWN.set(Some((history.revision(), std::time::Instant::now())));
 
     let now = asli_net::client::now_ms();
     let rows: Vec<HistoryRow> = history
@@ -1277,6 +1352,31 @@ mod tests {
         let mut history = MemoryHistory::new(true, 10);
         history.record(HistoryContent::Text("hunter2".to_owned()), true, 1);
         assert!(history.entries().is_empty(), "a secret must not be kept");
+    }
+
+    #[test]
+    fn every_change_moves_the_revision_so_an_open_list_redraws() {
+        let mut history = MemoryHistory::new(true, 10);
+        let mut seen = vec![history.revision()];
+        let mut changed = |history: &MemoryHistory| {
+            let now = history.revision();
+            assert!(
+                !seen.contains(&now),
+                "a change left the revision where it was"
+            );
+            seen.push(now);
+        };
+
+        history.record(HistoryContent::Text("one".to_owned()), false, 1);
+        changed(&history);
+        history.record(HistoryContent::Text("two".to_owned()), false, 2);
+        changed(&history);
+        assert!(history.forget(0));
+        changed(&history);
+        history.clear();
+        changed(&history);
+        history.set_enabled(false);
+        changed(&history);
     }
 
     #[test]
