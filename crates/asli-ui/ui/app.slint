@@ -498,7 +498,8 @@ export component AppWindow inherits Window {
     callback set-autostart(bool);
     callback set-keep-history(bool);
     callback hide-window();
-    callback start-drag();
+    // Where the pointer is, in window coordinates, so the release can be handed back.
+    callback start-drag(length, length);
     callback minimize-window();
     callback toggle-maximize();
 
@@ -592,10 +593,13 @@ export component AppWindow inherits Window {
                     height: 36px;
                     background: Theme.titlebar;
 
+                    // The move starts once the pointer moves with the button held, not on the
+                    // press, so a double click still reaches the maximise below.
                     drag := TouchArea {
-                        pointer-event(event) => {
-                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                root.start-drag();
+                        moved => {
+                            if (self.pressed) {
+                                root.start-drag(self.absolute-position.x + self.mouse-x,
+                                    self.absolute-position.y + self.mouse-y);
                             }
                         }
                         double-clicked => { root.toggle-maximize(); }
