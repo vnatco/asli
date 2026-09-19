@@ -42,8 +42,20 @@ Nothing is tagged yet and there are no downloads. What exists today:
   stays out of the Dock. Type checked from Linux; not yet run on a Mac.
 - `setup.sh --install` stops a running copy and starts the new one, so it also updates.
 
+### Changed
+
+- Sync no longer depends on clocks being right. The message ids and sequence numbers that refuse
+  a replayed clip are now saved across restarts, so the freshness window, which used to be two
+  minutes and carried that job alone, is now a 24 hour sanity bound. A device in the wrong time
+  zone syncs normally, and one more than 12 hours off is told so.
+
 ### Fixed
 
+- Paste It Here did nothing: a stored clip that was asked for was treated like one that was not,
+  and a stored clip this device had sent itself was dropped without a word.
+- The Windows executables and window had the generic program icon.
+- Clicking the tray icon did not bring an open window to the front.
+- The Status and Join screens could not scroll, so a short window cut them off.
 - The join token clear could erase something copied after it, such as a password from a password
   manager or a file. The clear now happens only if the clipboard still holds the token.
 - Restoring a history entry did not sync it to the other devices.
