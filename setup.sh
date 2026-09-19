@@ -182,6 +182,7 @@ readonly AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 # On macOS the binary lives inside an application bundle, so the system reads its Info.plist:
 # that is what keeps a menu bar app out of the Dock and gives it a name in permission prompts.
 readonly MAC_APP="${ASLI_MAC_APP:-$HOME/Applications/Asli.app}"
+readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/asli"
 
 # Stops every running copy, so the new binary is what runs next. Matched on the exact process
 # name, never on a command line, which would also match this script's own shell.
@@ -203,7 +204,9 @@ start_tray() {
     elif [ "$os" = "macos" ]; then
         open "$MAC_APP" --args tray
     else
-        nohup "$INSTALL_DIR/asli" tray >/dev/null 2>&1 &
+        # Logged to a file rather than discarded, so there is something to read when it misbehaves.
+        mkdir -p "$LOG_DIR"
+        nohup "$INSTALL_DIR/asli" tray >"$LOG_DIR/asli.log" 2>&1 &
     fi
     ok "Asli is running. Look for its icon in the tray or menu bar."
 }
@@ -312,8 +315,12 @@ do_install() {
 
     printf '\n'
     start_tray "$os"
-    printf '  It also starts by itself at login. To watch its log, quit it from the menu and run:\n'
-    printf '    %s tray\n' "$installed"
+    printf '  It also starts by itself at login.\n'
+    if [ "$os" = "linux" ]; then
+        printf '  Its log, for this run: %s\n' "$LOG_DIR/asli.log"
+    else
+        printf '  To watch its log, quit it from the menu and run: %s tray\n' "$installed"
+    fi
     if [ "$os" = "macos" ]; then
         printf '  If macOS ever asks whether Asli may paste from other apps, choose Allow, or it\n'
         printf '  cannot send what you copy on this Mac. It still receives either way.\n'
