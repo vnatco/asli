@@ -24,8 +24,44 @@ const TIMEOUT_MS: i32 = 4000;
 /// A missing or broken notification daemon must never take the daemon down with it. The clipboard
 /// still syncs on a machine with no notification service, so a failure here is logged by the
 /// caller at most, never propagated.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn send(summary: &str, body: &str) {
+    show(summary, body);
+}
+
+/// Sends a notification from a thread of its own, swallowing failures.
+///
+/// The call goes over the session bus and waits for an answer, and a session whose notification
+/// service is missing or hung never gives one: the bus holds the call while it tries to start a
+/// service that does not come. Made from the tray, that froze every later menu click for good.
+/// So calls are queued to one sender thread, in order, and a full queue drops the newest rather
+/// than blocking the caller.
+#[cfg(target_os = "linux")]
+fn send(summary: &str, body: &str) {
+    use std::sync::mpsc::{sync_channel, SyncSender};
+    use std::sync::OnceLock;
+
+    static QUEUE: OnceLock<Option<SyncSender<(String, String)>>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = sync_channel::<(String, String)>(16);
+        std::thread::Builder::new()
+            .name("asli-notify".to_owned())
+            .spawn(move || {
+                while let Ok((summary, body)) = rx.recv() {
+                    show(&summary, &body);
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    if let Some(queue) = queue {
+        let _ = queue.try_send((summary.to_owned(), body.to_owned()));
+    }
+}
+
+/// Shows one notification and waits for the service to take it.
+#[cfg(not(target_os = "macos"))]
+fn show(summary: &str, body: &str) {
     let _ = notify_rust::Notification::new()
         .appname(APP_NAME)
         .summary(summary)
