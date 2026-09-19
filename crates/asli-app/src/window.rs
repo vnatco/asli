@@ -180,6 +180,10 @@ impl MemoryHistory {
             return;
         }
 
+        // A repeat moves to the top rather than appearing twice, as it does in the encrypted
+        // store, so restoring an entry or copying the same thing again does not grow the list.
+        self.entries.retain(|(_, existing)| *existing != content);
+
         let (preview, is_image, bytes) = match &content {
             HistoryContent::Text(text) => (preview_of(text), false, text.len()),
             HistoryContent::ImagePng(png) => (String::new(), true, png.len()),
