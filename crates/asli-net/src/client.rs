@@ -101,6 +101,8 @@ pub enum ClientEvent {
     Dropped {
         /// Why, as a short fixed label.
         reason: &'static str,
+        /// Whether it was the relay's stored clip.
+        retained: bool,
     },
     /// This device's clock disagrees with the relay's. See [`Action::ClockSkew`].
     ClockSkew {
@@ -214,8 +216,8 @@ pub async fn run_once(
                                 Action::RelayError { code, retry_after_ms } => {
                                     on_event(ClientEvent::RelayError { code, retry_after_ms });
                                 }
-                                Action::Dropped { reason } => {
-                                    on_event(ClientEvent::Dropped { reason });
+                                Action::Dropped { reason, retained } => {
+                                    on_event(ClientEvent::Dropped { reason, retained });
                                 }
                                 Action::ClockSkew { skew_ms } => {
                                     on_event(ClientEvent::ClockSkew { skew_ms });

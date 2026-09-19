@@ -92,6 +92,9 @@ pub enum Action {
     Dropped {
         /// Why, as a short fixed label. Never content.
         reason: &'static str,
+        /// Whether it was the relay's stored clip rather than a live one, which is what a device
+        /// that asked for the stored clip needs to know to report that nothing came of it.
+        retained: bool,
     },
     /// This device's clock disagrees with the relay's by more than [`CLOCK_SKEW_WARN_MS`].
     ///
@@ -111,8 +114,8 @@ pub enum Action {
 pub const CLOCK_SKEW_WARN_MS: i64 = 30_000;
 
 /// A discard, reported to this device only.
-fn dropped(reason: &'static str) -> Vec<Action> {
-    vec![Action::Dropped { reason }]
+fn dropped(reason: &'static str, retained: bool) -> Vec<Action> {
+    vec![Action::Dropped { reason, retained }]
 }
 
 /// Drives one connection's worth of protocol.
@@ -346,10 +349,10 @@ impl Session {
         // Everything from here is a discard the relay never hears about. The device is told,
         // through Action::Dropped, so its log can say why.
         if clip.room != self.identity.room_id() {
-            return Ok(dropped("wrong_room"));
+            return Ok(dropped("wrong_room", clip.is_retained()));
         }
         if !self.epoch_is_acceptable(clip.epoch) {
-            return Ok(dropped("unknown_epoch"));
+            return Ok(dropped("unknown_epoch", clip.is_retained()));
         }
 
         let room_id_bytes: [u8; ROOM_ID_LEN] = self.identity.room_id_bytes();
@@ -361,7 +364,7 @@ impl Session {
             &nonce,
             &clip.ct,
         ) else {
-            return Ok(dropped("could_not_decrypt"));
+            return Ok(dropped("could_not_decrypt", clip.is_retained()));
         };
 
         let retained = clip.is_retained();
@@ -376,7 +379,7 @@ impl Session {
             now_ms,
         );
         if verdict != Verdict::Accept {
-            return Ok(dropped(verdict.reason()));
+            return Ok(dropped(verdict.reason(), retained));
         }
 
         if inner.content_type != ContentType::Text {
@@ -480,7 +483,7 @@ impl Session {
             return Ok(Vec::new());
         };
         let Ok(inner) = assembly.finish() else {
-            return Ok(dropped("could_not_decrypt"));
+            return Ok(dropped("could_not_decrypt", false));
         };
 
         let verdict = self.replay.check(
@@ -494,7 +497,7 @@ impl Session {
             now_ms,
         );
         if verdict != Verdict::Accept {
-            return Ok(dropped(verdict.reason()));
+            return Ok(dropped(verdict.reason(), false));
         }
 
         match inner.content_type {
@@ -893,7 +896,8 @@ mod tests {
         assert_eq!(
             a.handle_frame(&frame, NOW).unwrap(),
             vec![Action::Dropped {
-                reason: "own_device"
+                reason: "own_device",
+                retained: false
             }]
         );
     }
@@ -908,7 +912,8 @@ mod tests {
         assert_eq!(
             b.handle_frame(&frame, NOW).unwrap(),
             vec![Action::Dropped {
-                reason: "duplicate"
+                reason: "duplicate",
+                retained: false
             }],
             "replay"
         );
@@ -925,7 +930,10 @@ mod tests {
         // The relay now replays the earlier message, which carries a lower seq.
         assert_eq!(
             b.handle_frame(&first, NOW).unwrap(),
-            vec![Action::Dropped { reason: "rollback" }]
+            vec![Action::Dropped {
+                reason: "rollback",
+                retained: false
+            }]
         );
     }
 
@@ -937,7 +945,10 @@ mod tests {
         // Two minutes and one second later.
         assert_eq!(
             b.handle_frame(&frame, NOW + 120_001).unwrap(),
-            vec![Action::Dropped { reason: "too_old" }]
+            vec![Action::Dropped {
+                reason: "too_old",
+                retained: false
+            }]
         );
     }
 
@@ -983,7 +994,8 @@ mod tests {
         assert_eq!(
             b.handle_frame(&value.to_string(), NOW).unwrap(),
             vec![Action::Dropped {
-                reason: "could_not_decrypt"
+                reason: "could_not_decrypt",
+                retained: false
             }]
         );
     }
@@ -999,7 +1011,8 @@ mod tests {
         assert_eq!(
             b.handle_frame(&value.to_string(), NOW).unwrap(),
             vec![Action::Dropped {
-                reason: "wrong_room"
+                reason: "wrong_room",
+                retained: false
             }]
         );
     }
