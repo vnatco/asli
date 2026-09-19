@@ -931,7 +931,7 @@ event its own write produces can be suppressed.
 | `RETAIN_MAX_BYTES` | 65536 (64 KiB) | Messages above this are forwarded live but MUST NOT be retained |
 | `RETAIN_TTL` | 24 hours | Swept periodically **and** checked lazily on read, so an expired entry is never served even if the sweep is behind |
 | `RETAIN_GLOBAL_BUDGET_BYTES` | 268435456 (256 MiB) | Global ceiling across all rooms, with LRU eviction of the least recently active rooms |
-| `MAX_ROOMS` | configurable | New room creation is refused past the cap, with close code 4009 |
+| `MAX_ROOMS` | configurable | At the cap, the empty room idle longest is dropped, with its retained clip, to make way. New room creation is refused, with close code 4009, only when no room is empty |
 
 Exactly one clip is retained per room: the most recent one that satisfies the size rule. The
 clipboard is last write wins, so there is no value in retaining a history, and retaining one is
@@ -954,8 +954,8 @@ byte tag is 720912 bytes of ciphertext, which base64 encodes to 961216 character
 
 | Tier | Default | Action on breach |
 |---|---|---|
-| Per connection, messages | burst 10, refill 2 per second | `error` `RATE_LIMITED`, then close 4007 on repetition |
-| Per connection, bytes | burst 2 MiB, refill 256 KiB per second | close 4007 |
+| Per connection, messages | burst 10, refill 2 per second | `error` `RATE_LIMITED`, then close 4007 on repetition. Strikes are forgotten after a minute without one |
+| Per connection, bytes | burst 2 MiB, refill 256 KiB per second | `error` `RATE_LIMITED`, then close 4007 on repetition. Strikes are forgotten after a minute without one |
 | Per room, daily bytes | 50 MiB per rolling 24 hours | close 4008 |
 | Per IP, concurrent connections | 20 | reject at upgrade, close 4009 |
 | Per IP, new connections | burst 10, refill 1 per 5 seconds | reject at upgrade |

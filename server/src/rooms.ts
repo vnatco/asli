@@ -77,7 +77,12 @@ export class RoomRegistry {
   join(connection: Connection, nowMs: number): JoinResult {
     let room = this.rooms.get(connection.roomId);
     if (room === undefined) {
-      if (this.rooms.size >= this.options.maxRooms) return { ok: false, reason: 'too_many_rooms' };
+      // At the cap, the room idle the longest makes way, losing only its retained clip. Refusing
+      // instead let anyone fill every slot for a day: an empty room that holds a retained clip is
+      // kept until the clip expires, and minting a room costs nothing but a keypair.
+      if (this.rooms.size >= this.options.maxRooms && !this.evictIdlestRoom()) {
+        return { ok: false, reason: 'too_many_rooms' };
+      }
       room = {
         id: connection.roomId,
         connections: new Set(),
@@ -185,6 +190,20 @@ export class RoomRegistry {
       return null;
     }
     return room.retained;
+  }
+
+  /** Removes the empty room that has been idle longest. Returns false when every room is in use. */
+  private evictIdlestRoom(): boolean {
+    let idlest: Room | null = null;
+    for (const room of this.rooms.values()) {
+      if (room.connections.size > 0) continue;
+      if (idlest === null || room.lastActiveMs < idlest.lastActiveMs) idlest = room;
+    }
+    if (idlest === null) return false;
+    if (idlest.retained !== null) this.dropRetained(idlest);
+    if (idlest.presenceTimer !== null) clearTimeout(idlest.presenceTimer);
+    this.rooms.delete(idlest.id);
+    return true;
   }
 
   /** Expires retained clips and forgets empty rooms. Returns the number of entries dropped. */

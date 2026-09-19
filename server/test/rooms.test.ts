@@ -148,3 +148,29 @@ test('the global budget evicts the least recently active rooms', () => {
   assert.equal(registry.retainedFor(rooms[0] as string, 10), null, 'oldest evicted first');
   assert.notEqual(registry.retainedFor(rooms[2] as string, 10), null, 'newest kept');
 });
+
+test('at the room cap, the room idle longest makes way instead of new rooms being refused', () => {
+  const registry = new RoomRegistry(options({ maxRooms: 2 }));
+  const old = connection('old', 'ROOM-OLD');
+  const recent = connection('recent', 'ROOM-RECENT');
+  registry.join(old, 0);
+  registry.retain('ROOM-OLD', Buffer.from('clip'), 'm1', 0);
+  registry.leave(old, 10);
+  registry.join(recent, 20);
+  registry.retain('ROOM-RECENT', Buffer.from('clip'), 'm2', 20);
+  registry.leave(recent, 30);
+
+  assert.deepEqual(registry.join(connection('new', 'ROOM-NEW'), 40), { ok: true, peers: 1 });
+  assert.equal(registry.retainedFor('ROOM-OLD', 40), null, 'the idlest room was evicted');
+  assert.notEqual(registry.retainedFor('ROOM-RECENT', 40), null, 'the more recent one was kept');
+});
+
+test('rooms with people in them are never evicted to make room', () => {
+  const registry = new RoomRegistry(options({ maxRooms: 1 }));
+  registry.join(connection('a', ROOM), 0);
+  assert.deepEqual(registry.join(connection('b', OTHER_ROOM), 10), {
+    ok: false,
+    reason: 'too_many_rooms',
+  });
+  assert.equal(registry.peers(ROOM), 1);
+});

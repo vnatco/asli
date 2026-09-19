@@ -11,6 +11,7 @@
  * slot rather than a queue).
  */
 
+import { decodeCrockford } from './base32.ts';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -20,7 +21,7 @@ import type { RawData, WebSocket } from 'ws';
 
 import type { Config } from './config.ts';
 import { log, roomLogId } from './log.ts';
-import { AUTH_FAIL_CLOSE, verifyAuth } from './auth.ts';
+import { AUTH_FAIL_CLOSE, roomKey, verifyAuth } from './auth.ts';
 import type { AuthFailCode, NonceState } from './auth.ts';
 import {
   parseFrame,
@@ -55,6 +56,9 @@ type ChunkAssembly = {
   startedMs: number;
 };
 
+/** How long a rate limit strike counts against a connection before it is forgotten. */
+const RATE_STRIKE_MEMORY_MS = 60_000;
+
 type Session = {
   ws: WebSocket;
   conn: Connection;
@@ -66,6 +70,8 @@ type Session = {
   msgBucket: TokenBucket;
   byteBucket: TokenBucket;
   rateStrikes: number;
+  /** When the last rate limit strike happened, so strikes can expire. */
+  lastStrikeMs: number;
   pendingClip: string | null;
   backpressureSinceMs: number | null;
   joined: boolean;
@@ -79,6 +85,12 @@ type Session = {
  * Exported so the backpressure rule can be tested directly. Simulating a peer that never drains a
  * socket is flaky; the decision itself is the part that has to be right.
  */
+/** The room key for a room id as written in a frame, or null if it does not decode. */
+function roomKeyOf(roomText: string): string | null {
+  const bytes = decodeCrockford(roomText, 16);
+  return bytes === null ? null : roomKey(bytes);
+}
+
 export function shouldPark(bufferedAmount: number, softLimitBytes: number): boolean {
   return bufferedAmount > softLimitBytes;
 }
@@ -86,6 +98,8 @@ export function shouldPark(bufferedAmount: number, softLimitBytes: number): bool
 export type Relay = {
   httpServer: HttpServer;
   wss: WebSocketServer;
+  /** Serves operator metrics when METRICS_PORT is set; null when it is 0. Not listening yet. */
+  metricsServer: HttpServer | null;
   port: () => number;
   close: () => Promise<void>;
 };
@@ -268,12 +282,36 @@ export function createRelay(config: Config): Relay {
   function deliver(session: Session, frame: string): void {
     if (session.ws.readyState !== session.ws.OPEN) return;
 
-    if (shouldPark(session.ws.bufferedAmount, config.backpressureSoftBytes)) {
+    // A clip already waiting means a newer one must wait behind it, or rather replace it. Sending
+    // the newer one directly while the older one is still parked delivered them in the wrong
+    // order, and the peer's clipboard ended on the older clip.
+    if (
+      session.pendingClip !== null ||
+      shouldPark(session.ws.bufferedAmount, config.backpressureSoftBytes)
+    ) {
       // Last write wins, so the newest clip simply replaces whatever was waiting. This bounds
       // per connection memory to one message regardless of how slow the peer is.
       session.pendingClip = frame;
       if (session.backpressureSinceMs === null) session.backpressureSinceMs = Date.now();
       log.debug('backpressure', { conn: session.conn.id, bytes: session.ws.bufferedAmount });
+      return;
+    }
+    session.ws.send(frame);
+  }
+
+  /**
+   * Sends one chunk of an image, never parking it.
+   *
+   * A chunk cannot share the single parked slot that clips use: last write wins is right for whole
+   * clips and wrong for pieces of one, and a chunk overwriting the one before it left a slow
+   * receiver with a broken image every time. So chunks are sent in order, and a receiver whose
+   * buffer is already past the hard limit is disconnected rather than allowed to grow it further.
+   */
+  function deliverChunk(session: Session, frame: string): void {
+    if (session.ws.readyState !== session.ws.OPEN) return;
+    if (session.ws.bufferedAmount > config.backpressureHardBytes) {
+      log.warn('backpressure', { conn: session.conn.id, bytes: session.ws.bufferedAmount });
+      session.ws.close(1009, 'send buffer stalled');
       return;
     }
     session.ws.send(frame);
@@ -300,7 +338,7 @@ export function createRelay(config: Config): Relay {
       session.ws.close(4005, 'MALFORMED');
       return;
     }
-    if (chunk.roomText.toUpperCase() !== session.conn.roomId) {
+    if (roomKeyOf(chunk.roomText) !== session.conn.roomId) {
       session.ws.close(4005, 'ROOM_MISMATCH');
       return;
     }
@@ -365,7 +403,7 @@ export function createRelay(config: Config): Relay {
     for (const peer of sessions) {
       if (peer === session) continue;
       if (peer.state !== 'ready' || peer.conn.roomId !== session.conn.roomId) continue;
-      deliver(peer, frame);
+      deliverChunk(peer, frame);
       delivered += 1;
     }
 
@@ -390,7 +428,7 @@ export function createRelay(config: Config): Relay {
       session.ws.close(4005, 'MALFORMED');
       return;
     }
-    if (clip.roomText.toUpperCase() !== session.conn.roomId) {
+    if (roomKeyOf(clip.roomText) !== session.conn.roomId) {
       session.ws.close(4005, 'ROOM_MISMATCH');
       return;
     }
@@ -489,6 +527,7 @@ export function createRelay(config: Config): Relay {
       msgBucket: new TokenBucket(config.msgBurst, config.msgsPerSec, now),
       byteBucket: new TokenBucket(config.byteBurst, config.bytesPerSec, now),
       rateStrikes: 0,
+      lastStrikeMs: 0,
       pendingClip: null,
       backpressureSinceMs: null,
       joined: false,
@@ -507,6 +546,11 @@ export function createRelay(config: Config): Relay {
     });
 
     ws.on('message', (data: RawData, isBinary: boolean) => {
+      // Once a close has been decided, nothing more from this peer is acted on. The socket keeps
+      // emitting messages while it waits for the peer to acknowledge the close, and a peer that
+      // never does could otherwise go on sending clips, or finish an authentication that already
+      // timed out.
+      if (session.ws.readyState !== session.ws.OPEN) return;
       // v1 is text frames only. A binary frame is either a bug or a probe.
       if (isBinary) {
         session.ws.close(4005, 'binary frames are not used in v1');
@@ -516,6 +560,10 @@ export function createRelay(config: Config): Relay {
       const nowMs = Date.now();
 
       if (!session.msgBucket.take(1, nowMs) || !session.byteBucket.take(raw.length, nowMs)) {
+        // Strikes expire. Without that, a connection that lives for weeks was closed on its
+        // fourth breach ever, however far apart the breaches were.
+        if (nowMs - session.lastStrikeMs > RATE_STRIKE_MEMORY_MS) session.rateStrikes = 0;
+        session.lastStrikeMs = nowMs;
         session.rateStrikes += 1;
         const retryAfter = session.msgBucket.retryAfterMs(1, nowMs);
         log.warn('rate_limited', { conn: session.conn.id, count: session.rateStrikes });
@@ -621,16 +669,22 @@ export function createRelay(config: Config): Relay {
   const flusher = setInterval(() => {
     const now = Date.now();
     for (const session of sessions) {
-      if (session.pendingClip !== null && session.ws.bufferedAmount === 0) {
+      if (
+        session.pendingClip !== null &&
+        !shouldPark(session.ws.bufferedAmount, config.backpressureSoftBytes)
+      ) {
         const frame = session.pendingClip;
         session.pendingClip = null;
         session.backpressureSinceMs = null;
         session.ws.send(frame);
         continue;
       }
+      // A clip that has waited the whole grace period means a receiver that cannot keep up. The
+      // buffer itself never grows much past the soft limit, because nothing more is sent while a
+      // clip is parked, so waiting for it to pass the hard limit meant this never fired, and slow
+      // receivers held their buffers for as long as they stayed connected.
       if (
         session.backpressureSinceMs !== null &&
-        session.ws.bufferedAmount > config.backpressureHardBytes &&
         now - session.backpressureSinceMs > config.backpressureGraceMs
       ) {
         log.warn('backpressure', { conn: session.conn.id, bytes: session.ws.bufferedAmount });
@@ -645,7 +699,7 @@ export function createRelay(config: Config): Relay {
     registry.sweep(now);
     ipLimiter.sweep(now, 10 * 60 * 1000);
     for (const [roomId, quota] of roomQuotas) {
-      if (quota.retryAfterMs(now) === 0 && registry.peers(roomId) === 0) roomQuotas.delete(roomId);
+      if (quota.isIdle(now) && registry.peers(roomId) === 0) roomQuotas.delete(roomId);
     }
   }, 60_000);
   sweeper.unref?.();
@@ -653,6 +707,7 @@ export function createRelay(config: Config): Relay {
   return {
     httpServer,
     wss,
+    metricsServer,
     port: () => {
       const address = httpServer.address();
       return typeof address === 'object' && address !== null ? address.port : config.port;

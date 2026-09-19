@@ -11,7 +11,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { buildSigInput, roomIdForPublicKey, verifyAuth, SIG_INPUT_LEN } from '../src/auth.ts';
+import { buildSigInput, roomIdForPublicKey, roomKey, verifyAuth, SIG_INPUT_LEN } from '../src/auth.ts';
+import { decodeCrockford } from '../src/base32.ts';
 import type { NonceState } from '../src/auth.ts';
 import type { AuthFields } from '../src/validate.ts';
 
@@ -74,7 +75,8 @@ test('a valid signature from the reference implementation is accepted', () => {
   const result = verifyAuth(fields(), issued(), false);
   assert.equal(result.ok, true, result.ok ? '' : `rejected with ${result.code}`);
   if (!result.ok) return;
-  assert.equal(result.roomId, vectors.room_id);
+  // Rooms are keyed by the decoded id, so every spelling of it lands in the same room.
+  assert.equal(result.roomId, roomKey(decodeCrockford(vectors.room_id, 16)!));
 });
 
 test('a tampered signature is rejected', () => {
@@ -147,4 +149,11 @@ test('a public key that is not a valid encoding is rejected', () => {
   if (result.ok) return;
   // Either the key fails to import or the room binding fails first. Both are closed failures.
   assert.ok(['MALFORMED_AUTH', 'ROOM_MISMATCH'].includes(result.code));
+});
+
+test('two spellings of one room id are the same room', () => {
+  // Crockford decoding folds O to 0 and I and L to 1, so these name the same 16 bytes.
+  const canonical = decodeCrockford('E5V0APG0E0QQ5MEGA99JBPFDHM', 16)!;
+  const folded = decodeCrockford('E5VOAPGOEOQQ5MEGA99JBPFDHM', 16)!;
+  assert.equal(roomKey(folded), roomKey(canonical));
 });
