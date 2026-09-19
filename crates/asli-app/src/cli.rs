@@ -307,6 +307,7 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
         eprintln!("{}", log_line("clipboard", &clipboard.describe()));
 
         let controls = Controls::default();
+        controls.settings.load(&config);
         let io: Arc<dyn crate::clipboard_io::ClipboardIo> = Arc::new(clipboard);
         let account = load_account_patiently(paths)?;
 

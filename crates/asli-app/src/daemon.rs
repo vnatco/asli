@@ -17,7 +17,7 @@
 //! it, and allocates from the block in memory. A crash loses the unused remainder of the block,
 //! which is harmless, and can never reuse a number, which is the part that matters.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -57,6 +57,38 @@ pub struct Controls {
     /// something copied here seconds earlier. One that was asked for must be written, and without
     /// this the two could not be told apart, so the button never did anything.
     pub retained_pending: Arc<AtomicBool>,
+    /// Settings the window can change while the daemon runs. See [`LiveSettings`].
+    pub settings: LiveSettings,
+}
+
+/// The settings that take effect at once, shared between the window and the daemon.
+///
+/// The daemon used to copy these out of the configuration when it started, so the Settings screen
+/// saved a change to disk and the running daemon went on using the old value until a restart: the
+/// notifications switch did nothing, and a new relay address was ignored however long one waited.
+#[derive(Debug, Clone, Default)]
+pub struct LiveSettings {
+    /// Whether an arriving clip raises a notification.
+    pub notifications: Arc<AtomicBool>,
+    /// Largest copy this device sends, in bytes.
+    pub max_content_bytes: Arc<AtomicUsize>,
+    /// Set when the relay address changed, so the daemon drops its connection and reconnects to
+    /// the new one straight away.
+    pub reconnect: Arc<AtomicBool>,
+}
+
+impl LiveSettings {
+    /// Takes the current values from the configuration.
+    pub fn load(&self, config: &Config) {
+        self.notifications
+            .store(config.notifications, Ordering::Relaxed);
+        self.max_content_bytes
+            .store(config.max_content_bytes, Ordering::Relaxed);
+    }
+
+    fn notifications(&self) -> bool {
+        self.notifications.load(Ordering::Relaxed)
+    }
 }
 
 impl Controls {
@@ -311,9 +343,9 @@ fn on_live_event(
     controls: &Controls,
     status: &mut Status,
     connected_once: &Arc<AtomicBool>,
-    notifications: bool,
     history: &SharedHistory,
 ) {
+    let notifications = controls.settings.notifications();
     let now = client::now_ms();
 
     // Pausing must also stop arriving content from overwriting the local clipboard. Dropping it
@@ -503,14 +535,13 @@ pub async fn run(
 
     // The watcher thread is blocking, so it gets its own bridge into the async side.
     let (local_tx, mut local_rx) = mpsc::channel::<LocalEvent>(16);
-    let notifications = config.notifications;
     // The bridge consumes its sender, and the retained pump needs one of its own.
     let local_tx_for_retained = local_tx.clone();
     spawn_clipboard_bridge(
         observed,
         local_tx,
         Bridge {
-            cap: config.max_content_bytes,
+            cap: Arc::clone(&controls.settings.max_content_bytes),
             paused: Arc::clone(&controls.paused),
             history: Arc::clone(&history),
             paths: paths.clone(),
@@ -528,11 +559,7 @@ pub async fn run(
             rx: &mut local_rx,
             tx_for_retained: local_tx_for_retained,
         },
-        Sinks {
-            notifications,
-            history,
-            replay,
-        },
+        Sinks { history, replay },
     )
     .await
 }
@@ -565,7 +592,8 @@ impl ReplaySaver {
 /// What the clipboard bridge needs besides its two channels.
 struct Bridge {
     /// Largest copy this device sends, in bytes.
-    cap: usize,
+    /// Read on every copy, so a change in Settings applies to the next one.
+    cap: Arc<AtomicUsize>,
     /// Set while sync is paused.
     paused: Arc<AtomicBool>,
     /// Where this device's own copies are recorded.
@@ -654,6 +682,7 @@ fn spawn_clipboard_bridge(
                 }
                 match event {
                     Observed::Text(text) => {
+                        let cap = cap.load(Ordering::Relaxed);
                         if text.len() > cap {
                             eprintln!(
                                 "{}",
@@ -687,6 +716,7 @@ fn spawn_clipboard_bridge(
                         eprintln!("{}", log_line("clip_queued", &format!("{bytes} bytes")));
                     }
                     Observed::Image(png) => {
+                        let cap = cap.load(Ordering::Relaxed);
                         if png.len() > cap {
                             eprintln!(
                                 "{}",
@@ -752,8 +782,6 @@ struct LocalChannel<'a> {
 /// The two travel together because they are the same decision made twice: what happens to a clip
 /// once it has arrived, beyond being pasted. One tells the person, the other remembers it.
 struct Sinks {
-    /// Whether an arriving clip raises a notification.
-    notifications: bool,
     /// Where arriving clips are recorded so they can be put back later.
     history: SharedHistory,
     /// Where what has been accepted is saved, so replay protection survives a restart.
@@ -853,7 +881,6 @@ async fn run_connection_loop(
         tx_for_retained: local_tx_for_retained,
     } = local;
     let Sinks {
-        notifications,
         history,
         mut replay,
     } = sinks;
@@ -867,7 +894,10 @@ async fn run_connection_loop(
     let connected_once = Arc::new(AtomicBool::new(false));
 
     loop {
-        let url = config.relay_url.clone();
+        // Read afresh on every attempt, so a relay changed in Settings is the one connected to.
+        let url = paths
+            .load_config()
+            .map_or_else(|_| config.relay_url.clone(), |live| live.relay_url);
         "Connecting".clone_into(&mut status.state);
         eprintln!(
             "{}",
@@ -903,21 +933,31 @@ async fn run_connection_loop(
             Arc::clone(&controls.retained_wanted),
         );
 
-        let outcome = client::run_once(&url, &mut session, local_rx, &mut |event| {
+        let reconnect = Arc::clone(&controls.settings.reconnect);
+        reconnect.store(false, Ordering::Relaxed);
+        let mut on_event = |event| {
             on_live_event(
                 &event,
                 io.as_ref(),
                 &controls,
                 &mut status,
                 &connected_once,
-                notifications,
                 &history,
             );
             // Saved as soon as a clip is accepted, not at disconnect: a crash must not open the
             // window this exists to close.
             replay.save_if_changed();
-        })
-        .await;
+        };
+        let connection = client::run_once(&url, &mut session, local_rx, &mut on_event);
+        // A relay changed in Settings ends this connection now rather than whenever it next
+        // drops, which could be days.
+        let outcome = tokio::select! {
+            outcome = connection => outcome,
+            () = wait_for(&reconnect) => {
+                eprintln!("{}", log_line("reconnecting", "the relay address changed"));
+                Ok(Disconnect::Eof)
+            }
+        };
 
         retained_pump.abort();
 
@@ -940,7 +980,17 @@ async fn run_connection_loop(
                 &format!("{}, retrying in {delay} ms", status.state)
             )
         );
-        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        // Asked for, so at once. The backoff is for failures, and this is not one.
+        if !reconnect.swap(false, Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+    }
+}
+
+/// Resolves once `flag` is set. A quarter second of polling is invisible for a settings change.
+async fn wait_for(flag: &AtomicBool) {
+    while !flag.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
