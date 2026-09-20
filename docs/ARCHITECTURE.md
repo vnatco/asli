@@ -59,7 +59,7 @@ switched off can catch up.
 | `asli-clipboard` | The `ClipboardWatcher` trait plus one backend per platform. All the operating system ugliness lives here and nowhere else. | Linux verified. Windows and macOS written, not yet observed running |
 | `asli-history` | The local clipboard history, encrypted at rest under a key derived from the account key. | Done |
 | `asli-ui` | The compiled Slint markup for the window, kept apart so every hand written crate can forbid unsafe code. | Done |
-| `asli-app` | The `asli` binary: tray and menu, the window, configuration, keychain access, autostart, notifications, the single instance lock, and the wiring between the rest. | Linux done |
+| `asli-app` | The `asli` binary: tray and menu, the window, configuration, keychain access, autostart, notifications, the single instance lock, the list of devices on the account, and the wiring between the rest. | Linux done |
 | `server/` | The Node relay. TypeScript, `ws`, in memory. | Deployed |
 
 The split exists for one practical reason: `asli-core` and `asli-crypto` have no I/O, so the
@@ -117,6 +117,24 @@ main thread with a timer tolerance, and hands its result to the core over a chan
 5. Convert line endings back to the platform convention and write to the clipboard.
 6. Record the platform sequence anchor (`changeCount`, `GetClipboardSequenceNumber`, or our own X11
    selection ownership) so the resulting change event is recognised as ours.
+
+### 4.3 A device announcing itself
+
+1. On every successful handshake, and again whenever the relay reports a different connection
+   count, the client seals an announcement holding its device id, its name and its operating
+   system, and sends it.
+2. The relay validates the envelope's shape, caps the ciphertext, drops a repeat of a message id
+   it has already seen and forwards it to the other connections in the room. It never retains one
+   and never lets one take a parked clip's place.
+3. A receiver drops its own announcement, one whose timestamp is outside the clip window and one
+   that fails to open, and otherwise records the name, the operating system and the time.
+4. A device counts as online while this one is connected and has been heard from since the
+   connection count last went down. Nothing reports a departure, so the device that does not
+   answer a lower count is the one that left.
+
+The list is kept in a small file beside the configuration, tagged with the account it belongs to,
+so "last seen two days ago" survives a restart and joining another account starts it over. Only
+the Status screen and the history's "from" line read it.
 
 ## 5. Loop prevention, in three layers
 
@@ -184,7 +202,8 @@ the configuration directory with a clear user facing explanation that it is weak
 `THREAT_MODEL.md` for what that weakness actually means.
 
 Configuration holds the relay URL, launch at login, enabled content types, the size limit,
-notification preferences and the device id. It never holds key material.
+notification preferences, the device id and the name this device announces to the others (empty
+meaning the computer's own name). It never holds key material.
 
 ## 8. What is deliberately not here
 
