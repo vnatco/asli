@@ -331,12 +331,18 @@ mod platform {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
+    use super::startup_approved;
     use crate::error::{Error, Result};
 
     /// The per user key Windows reads at login. No administrator rights are needed to write it,
     /// and Settings, Apps, Startup lists and toggles what is here.
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE: &str = "Asli";
+
+    /// Explorer's own record of which `Run` entries it will actually start. See the
+    /// [`startup_approved`](super::startup_approved) module for why writing it is not optional.
+    const APPROVED_KEY: &str =
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 
     /// `CREATE_NO_WINDOW`. `reg.exe` is a console program, and started from the windowed binary
     /// without this it flashes a console window on screen.
@@ -363,32 +369,70 @@ mod platform {
         sibling.exists().then_some(sibling)
     }
 
-    pub fn is_enabled() -> Result<bool> {
-        // reg query exits 1 when the value does not exist, which is the answer rather than a
-        // failure.
-        Ok(reg(&["query", RUN_KEY, "/v", VALUE])?.status.success())
+    /// Whether a value exists. `reg query` exits 1 when it does not, which is an answer rather
+    /// than a failure.
+    fn exists(key: &str) -> Result<bool> {
+        Ok(reg(&["query", key, "/v", VALUE])?.status.success())
     }
 
-    pub fn set_enabled(enabled: bool) -> Result<()> {
-        let output = if enabled {
-            let command = format!("\"{}\" tray", launch_target()?.display());
-            reg(&[
-                "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &command, "/f",
-            ])?
-        } else {
-            if !is_enabled()? {
-                return Ok(());
-            }
-            reg(&["delete", RUN_KEY, "/v", VALUE, "/f"])?
-        };
+    pub fn is_enabled() -> Result<bool> {
+        if !exists(RUN_KEY)? {
+            return Ok(false);
+        }
+        // An entry the user switched off in Task Manager is still in Run, and login still ignores
+        // it. Report what Windows will do, not what the Run key says on its own.
+        let output = reg(&["query", APPROVED_KEY, "/v", VALUE])?;
+        if !output.status.success() {
+            return Ok(true);
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(startup_approved::reads_as_enabled(&text, VALUE))
+    }
 
+    /// Fails unless `reg.exe` succeeded.
+    fn checked(output: &Output, key: &str) -> Result<()> {
         if output.status.success() {
             Ok(())
         } else {
             Err(Error::ConfigDir(format!(
-                "reg.exe could not update {RUN_KEY}: {}",
+                "reg.exe could not update {key}: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )))
+        }
+    }
+
+    pub fn set_enabled(enabled: bool) -> Result<()> {
+        if enabled {
+            let command = format!("\"{}\" tray", launch_target()?.display());
+            checked(
+                &reg(&[
+                    "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &command, "/f",
+                ])?,
+                RUN_KEY,
+            )?;
+            checked(
+                &reg(&[
+                    "add",
+                    APPROVED_KEY,
+                    "/v",
+                    VALUE,
+                    "/t",
+                    "REG_BINARY",
+                    "/d",
+                    startup_approved::ENABLED,
+                    "/f",
+                ])?,
+                APPROVED_KEY,
+            )
+        } else {
+            // Both, and each only if it is there: a value switched off in Task Manager reads as
+            // disabled already, and its Run entry would otherwise be left behind.
+            for key in [RUN_KEY, APPROVED_KEY] {
+                if exists(key)? {
+                    checked(&reg(&["delete", key, "/v", VALUE, "/f"])?, key)?;
+                }
+            }
+            Ok(())
         }
     }
 
@@ -584,6 +628,81 @@ mod launch_agent {
             assert!(!is_enabled_in(&dir));
             set_enabled_in(&dir, false, "/usr/local/bin/asli").expect("disables twice");
             let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Explorer's record of which `Run` entries it will actually start.
+///
+/// Writing the `Run` value is not enough. Explorer keeps a parallel key,
+/// `...\Explorer\StartupApproved\Run`, holding one binary value per entry: the first byte says
+/// whether the entry is on, and the remaining eleven are the time the user last switched it off.
+/// An entry with no value there was observed being enumerated and then skipped at login, which is
+/// the whole reason this exists, so the value is written alongside the `Run` one and removed with
+/// it.
+///
+/// The low bit of the first byte is the off switch: Task Manager writes `03` when the user turns
+/// an app off and `02` when they turn it back on. Reading it is what makes `asli autostart`
+/// report what Windows will do rather than what the `Run` key alone suggests.
+///
+/// Pure text handling, so it is compiled and tested on every platform even though only Windows
+/// uses it.
+#[cfg(any(target_os = "windows", test))]
+mod startup_approved {
+    /// Twelve bytes: on, and never switched off.
+    pub const ENABLED: &str = "020000000000000000000000";
+
+    /// Reads a `reg query ... /v <value>` listing of a `REG_BINARY` value.
+    ///
+    /// Anything unreadable counts as enabled: the `Run` value is there, and a listing this could
+    /// not parse is no reason to tell the owner their setting is off.
+    pub fn reads_as_enabled(listing: &str, value: &str) -> bool {
+        let Some(hex) = listing
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix(value))
+            .find(|rest| rest.starts_with(char::is_whitespace))
+            .and_then(|rest| rest.split_whitespace().next_back())
+        else {
+            return true;
+        };
+        match u8::from_str_radix(hex.get(..2).unwrap_or(""), 16) {
+            Ok(first) => first & 1 == 0,
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_enabled_value_is_twelve_bytes_of_on() {
+            assert_eq!(ENABLED.len(), 24, "twelve bytes, two hex digits each");
+            assert!(ENABLED.starts_with("02"));
+        }
+
+        #[test]
+        fn task_manager_switching_the_app_off_reads_as_off() {
+            let off = "\r\nHKEY_CURRENT_USER\\...\\StartupApproved\\Run\r\n    \
+                       Asli    REG_BINARY    03000000EEFC1B8A2FA5DC01\r\n\r\n";
+            assert!(!reads_as_enabled(off, "Asli"));
+
+            let on = "\r\n    Asli    REG_BINARY    020000000000000000000000\r\n";
+            assert!(reads_as_enabled(on, "Asli"));
+        }
+
+        #[test]
+        fn an_unreadable_listing_does_not_claim_the_setting_is_off() {
+            for listing in ["", "\r\nHKEY_CURRENT_USER\\...\\Run\r\n", "    Asli    REG_BINARY"] {
+                assert!(reads_as_enabled(listing, "Asli"), "for {listing:?}");
+            }
+        }
+
+        #[test]
+        fn another_entry_whose_name_starts_the_same_is_not_mistaken_for_ours() {
+            let other = "\r\n    AsliOther    REG_BINARY    030000000000000000000000\r\n";
+            assert!(reads_as_enabled(other, "Asli"));
         }
     }
 }
