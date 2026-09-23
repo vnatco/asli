@@ -46,6 +46,9 @@ HANDOFF.md
 docs/research/
 docs/PLAN.md
 docs/NAMING.md
+# Here rather than in .git/info/exclude, which does not survive a re-initialised repository, a
+# fresh clone or a copied tree. Nothing stops this one being named in a tracked file.
+ROADMAP.md
 
 # Design references (mockups, exported assets). Working material, not the product.
 references/
