@@ -502,7 +502,28 @@ mod platform {
         // agent should start the binary inside the bundle, not a link that may be removed.
         let exe = std::env::current_exe().map_err(Error::Io)?;
         let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-        launch_agent::set_enabled_in(&agents_dir()?, enabled, &exe.display().to_string())
+        launch_agent::set_enabled_in(
+            &agents_dir()?,
+            enabled,
+            &exe.display().to_string(),
+            &log_file()?,
+        )
+    }
+
+    /// Where the agent sends the output of a copy started at login.
+    ///
+    /// `~/Library/Logs` is where a user's applications log on macOS, and launchd will write there
+    /// without any help. It matters more here than anywhere else: a copy started at login has no
+    /// terminal, and a menu bar application that fails to appear leaves nothing at all to read.
+    pub fn log_file() -> Result<String> {
+        std::env::var_os("HOME")
+            .map(|home| {
+                PathBuf::from(home)
+                    .join("Library/Logs/Asli/asli.log")
+                    .display()
+                    .to_string()
+            })
+            .ok_or_else(|| Error::ConfigDir("HOME is not set".to_owned()))
     }
 
     pub fn target() -> Result<Option<String>> {
@@ -542,7 +563,7 @@ mod launch_agent {
             .replace('>', "&gt;")
     }
 
-    pub fn contents(exe: &str) -> String {
+    pub fn contents(exe: &str, log: &str) -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -563,9 +584,14 @@ mod launch_agent {
              \t<string>Interactive</string>\n\
              \t<key>LimitLoadToSessionType</key>\n\
              \t<string>Aqua</string>\n\
+             \t<key>StandardOutPath</key>\n\
+             \t<string>{1}</string>\n\
+             \t<key>StandardErrorPath</key>\n\
+             \t<string>{1}</string>\n\
              </dict>\n\
              </plist>\n",
-            xml(exe)
+            xml(exe),
+            xml(log)
         )
     }
 
@@ -587,11 +613,16 @@ mod launch_agent {
         )
     }
 
-    pub fn set_enabled_in(dir: &Path, enabled: bool, exe: &str) -> Result<()> {
+    pub fn set_enabled_in(dir: &Path, enabled: bool, exe: &str, log: &str) -> Result<()> {
         let path = dir.join(FILE);
         if enabled {
             fs::create_dir_all(dir).map_err(Error::Io)?;
-            fs::write(&path, contents(exe)).map_err(Error::Io)?;
+            // launchd creates the file but not the directory above it, and a path it cannot open
+            // is dropped in silence, which is the one thing this is here to prevent.
+            if let Some(parent) = Path::new(log).parent() {
+                fs::create_dir_all(parent).map_err(Error::Io)?;
+            }
+            fs::write(&path, contents(exe, log)).map_err(Error::Io)?;
         } else if path.exists() {
             fs::remove_file(&path).map_err(Error::Io)?;
         }
@@ -611,7 +642,10 @@ mod launch_agent {
 
         #[test]
         fn the_agent_starts_the_tray_at_login_and_is_not_restarted_after_quit() {
-            let text = contents("/Applications/Asli.app/Contents/MacOS/asli");
+            let text = contents(
+                "/Applications/Asli.app/Contents/MacOS/asli",
+                "/Users/v/Library/Logs/Asli/asli.log",
+            );
             assert!(text.contains("<string>dev.vnat.asli</string>"));
             assert!(text.contains(
                 "<string>/Applications/Asli.app/Contents/MacOS/asli</string>\n\t\t<string>tray</string>"
@@ -621,19 +655,41 @@ mod launch_agent {
                 text.contains("<key>KeepAlive</key>\n\t<false/>"),
                 "Quit from the menu must stay quit"
             );
+            // A copy started at login has no terminal. Without these, a menu bar application that
+            // never appears leaves nothing at all to read, which is how one lost morning went.
+            assert!(text.contains(
+                "<key>StandardOutPath</key>\n\t<string>/Users/v/Library/Logs/Asli/asli.log</string>"
+            ));
+            assert!(text.contains(
+                "<key>StandardErrorPath</key>\n\t<string>/Users/v/Library/Logs/Asli/asli.log</string>"
+            ));
         }
 
         #[test]
         fn a_path_cannot_break_out_of_its_element() {
-            let text = contents("/Users/a&b/<odd>/asli");
+            let text = contents(
+                "/Users/a&b/<odd>/asli",
+                "/Users/a&b/Library/Logs/Asli/asli.log",
+            );
             assert!(text.contains("<string>/Users/a&amp;b/&lt;odd&gt;/asli</string>"));
+            assert!(text.contains("<string>/Users/a&amp;b/Library/Logs/Asli/asli.log</string>"));
         }
 
         #[test]
         fn the_target_reads_back_as_written() {
             let dir = scratch("target");
-            set_enabled_in(&dir, true, "/Users/a&b/Apps/Asli.app/Contents/MacOS/asli")
-                .expect("enables");
+            let log = dir.join("Logs/asli.log");
+            set_enabled_in(
+                &dir,
+                true,
+                "/Users/a&b/Apps/Asli.app/Contents/MacOS/asli",
+                &log.display().to_string(),
+            )
+            .expect("enables");
+            assert!(
+                log.parent().is_some_and(std::path::Path::exists),
+                "launchd does not create the directory, so enabling must"
+            );
             assert_eq!(
                 target_in(&dir).as_deref(),
                 Some("/Users/a&b/Apps/Asli.app/Contents/MacOS/asli")
@@ -644,12 +700,13 @@ mod launch_agent {
         #[test]
         fn enabling_and_disabling_write_and_remove_the_file() {
             let dir = scratch("toggle");
-            set_enabled_in(&dir, true, "/usr/local/bin/asli").expect("enables");
+            let log = dir.join("Logs/asli.log").display().to_string();
+            set_enabled_in(&dir, true, "/usr/local/bin/asli", &log).expect("enables");
             assert!(is_enabled_in(&dir));
-            set_enabled_in(&dir, true, "/usr/local/bin/asli").expect("enables twice");
-            set_enabled_in(&dir, false, "/usr/local/bin/asli").expect("disables");
+            set_enabled_in(&dir, true, "/usr/local/bin/asli", &log).expect("enables twice");
+            set_enabled_in(&dir, false, "/usr/local/bin/asli", &log).expect("disables");
             assert!(!is_enabled_in(&dir));
-            set_enabled_in(&dir, false, "/usr/local/bin/asli").expect("disables twice");
+            set_enabled_in(&dir, false, "/usr/local/bin/asli", &log).expect("disables twice");
             let _ = fs::remove_dir_all(dir);
         }
     }

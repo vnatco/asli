@@ -182,7 +182,13 @@ readonly AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 # On macOS the binary lives inside an application bundle, so the system reads its Info.plist:
 # that is what keeps a menu bar app out of the Dock and gives it a name in permission prompts.
 readonly MAC_APP="${ASLI_MAC_APP:-$HOME/Applications/Asli.app}"
-readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/asli"
+# macOS keeps a user's application logs in ~/Library/Logs, Linux in the XDG state directory. The
+# same file either way, and the same one the login agent writes to, so there is one log to read.
+if [ "$(uname -s)" = "Darwin" ]; then
+    readonly LOG_DIR="$HOME/Library/Logs/Asli"
+else
+    readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/asli"
+fi
 
 # Stops every running copy, so the new binary is what runs next. Matched on the exact process
 # name, never on a command line, which would also match this script's own shell.
@@ -202,7 +208,19 @@ start_tray() {
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '  would start the tray\n'
     elif [ "$os" = "macos" ]; then
-        open "$MAC_APP" --args tray
+        mkdir -p "$LOG_DIR"
+        # Started the way login starts it, through the agent, so the install exercises the same
+        # path and its output lands in the same log. `open` is the fallback for a machine with
+        # launch at login turned off, and it leaves no log: LaunchServices discards both streams,
+        # which is why a menu bar item that failed to appear once took a morning to explain.
+        local agent="$HOME/Library/LaunchAgents/dev.vnat.asli.plist"
+        if [ -f "$agent" ]; then
+            launchctl bootstrap "gui/$(id -u)" "$agent" 2>/dev/null ||
+                launchctl kickstart -k "gui/$(id -u)/dev.vnat.asli" 2>/dev/null ||
+                open "$MAC_APP" --args tray
+        else
+            open "$MAC_APP" --args tray
+        fi
     else
         # Logged to a file rather than discarded, so there is something to read when it misbehaves.
         mkdir -p "$LOG_DIR"
@@ -316,10 +334,10 @@ do_install() {
     printf '\n'
     start_tray "$os"
     printf '  It also starts by itself at login.\n'
-    if [ "$os" = "linux" ]; then
-        printf '  Its log, for this run: %s\n' "$LOG_DIR/asli.log"
-    else
+    if [ "$os" = "windows" ]; then
         printf '  To watch its log, quit it from the menu and run: %s tray\n' "$installed"
+    else
+        printf '  Its log, now and at every login: %s\n' "$LOG_DIR/asli.log"
     fi
     if [ "$os" = "macos" ]; then
         printf '  If macOS ever asks whether Asli may paste from other apps, choose Allow, or it\n'
