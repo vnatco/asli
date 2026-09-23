@@ -39,6 +39,7 @@ export type EventName =
   | 'rate_limited'
   | 'quota_exceeded'
   | 'backpressure'
+  | 'fetch_last_backpressure'
   | 'protocol_error';
 
 export type EventFields = {

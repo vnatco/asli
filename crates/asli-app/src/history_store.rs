@@ -192,3 +192,16 @@ impl HistorySource for StoreHistory {
         self.revision.wrapping_mul(2) | u64::from(self.enabled)
     }
 }
+
+/// Removes the archive, overwriting it first.
+///
+/// For `asli reset`. The records are sealed with a key derived from the same root secret, so the
+/// leaked key this command abandons would still read anything left behind.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::Io`] if the file exists and cannot be overwritten or removed.
+pub fn wipe(paths: &Paths) -> crate::Result<()> {
+    asli_history::wipe_file(&paths.dir.join(FILE))
+        .map_err(|e| crate::Error::Parse(format!("could not wipe the history: {e}")))
+}

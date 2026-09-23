@@ -173,6 +173,47 @@ pub fn now_ms() -> u64 {
 /// retries by itself: pacing belongs to [`crate::backoff`] and the decision belongs to
 /// [`crate::state`].
 ///
+/// Refuses a relay URL whose transport is not encrypted.
+///
+/// `wss://` always passes. `ws://` passes only for a loopback host, which is how the relay is run
+/// locally while working on it; there is no address on a network where cleartext is acceptable,
+/// and no setting to turn this off.
+fn require_encrypted_transport(url: &str) -> Result<()> {
+    if is_encrypted_transport(url) {
+        Ok(())
+    } else {
+        Err(Error::Transport(
+            "the relay address must start with wss://, or ws:// for a local relay".to_owned(),
+        ))
+    }
+}
+
+/// Split out so it can be tested without a relay, and reused by the settings screen.
+#[must_use]
+pub fn is_encrypted_transport(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.starts_with("wss://") {
+        return true;
+    }
+    let Some(rest) = lower.strip_prefix("ws://") else {
+        return false;
+    };
+    // Host part only: up to the first `/`, `?` or `#`, minus any port and any credentials, which
+    // is what stops `ws://localhost@evil.example/` and `ws://evil.example/localhost` passing.
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = host.strip_prefix('[').map_or_else(
+        || host.split(':').next().unwrap_or_default(),
+        |v6| v6.split(']').next().unwrap_or_default(),
+    );
+    host == "localhost" || host == "::1" || host == "127.0.0.1"
+}
+
 /// # Errors
 ///
 /// Returns [`Error::Transport`] if the socket fails, and a protocol error if the relay sends
@@ -184,6 +225,13 @@ pub async fn run_once(
     on_event: &mut dyn FnMut(ClientEvent),
 ) -> Result<Disconnect> {
     install_crypto_provider();
+
+    // Before anything is sent. A relay reached over plain `ws://` still receives sealed payloads,
+    // but it hands a network attacker the room id, the sizes and the timing of every clip, and
+    // lets one tamper with the handshake. The protocol requires `wss://` for exactly that reason,
+    // and a mistyped scheme in Settings, or an edited configuration file, must not be able to
+    // downgrade the transport in silence.
+    require_encrypted_transport(url)?;
 
     // Bounded, so a network that swallows packets mid connect cannot hang the reconnect loop.
     let (mut socket, _) =
@@ -518,6 +566,37 @@ fn frames_for(
 
 #[cfg(test)]
 mod tests {
+    use super::is_encrypted_transport;
+
+    #[test]
+    fn cleartext_is_refused_unless_the_relay_is_local() {
+        for url in [
+            "wss://asli.vnat.dev/v1",
+            "WSS://ASLI.VNAT.DEV/v1",
+            "  wss://asli.vnat.dev/v1  ",
+            "ws://localhost:3006/v1",
+            "ws://127.0.0.1:3006/v1",
+            "ws://[::1]:3006/v1",
+        ] {
+            assert!(is_encrypted_transport(url), "must be allowed: {url}");
+        }
+
+        for url in [
+            "ws://asli.vnat.dev/v1",
+            "ws://192.168.1.10:3006/v1",
+            // A host that only looks local. Credentials before the @, and a path after the host,
+            // are the two ways to smuggle the word past a careless check.
+            "ws://localhost@evil.example/v1",
+            "ws://evil.example/localhost",
+            "ws://localhost.evil.example/v1",
+            "http://asli.vnat.dev/v1",
+            "asli.vnat.dev/v1",
+            "",
+        ] {
+            assert!(!is_encrypted_transport(url), "must be refused: {url}");
+        }
+    }
+
     use super::*;
 
     #[test]

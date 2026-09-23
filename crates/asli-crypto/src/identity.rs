@@ -13,7 +13,7 @@
 //! no first sight state. There is no trust on first use, so there is no room squatting and no way
 //! to lock the owner out.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -182,8 +182,10 @@ pub fn verify_signature(
 ) -> Result<()> {
     let key = VerifyingKey::from_bytes(public_key).map_err(|_| Error::BadPublicKey)?;
     let sig = Signature::from_bytes(signature);
+    // Strict, and nothing else. A fallback to the permissive verifier stood here and made the
+    // word "strict" above worth nothing: everything `verify_strict` rejects, small order public
+    // keys and malleable signatures, was simply retried and accepted.
     key.verify_strict(message, &sig)
-        .or_else(|_| key.verify(message, &sig).map_err(|_| Error::BadSignature))
         .map_err(|_| Error::BadSignature)
 }
 
@@ -268,5 +270,41 @@ mod tests {
         let id = Identity::from_secret(&TEST_SECRET);
         assert!(parse_public_key(&id.public_key()).is_ok());
         assert_eq!(parse_public_key(&[0u8; 31]), Err(Error::BadPublicKey));
+    }
+}
+
+#[cfg(test)]
+mod strictness_tests {
+    use super::*;
+
+    /// A small order public key. `verify_strict` refuses it; the permissive verifier does not,
+    /// which is the whole reason the fallback had to go.
+    const SMALL_ORDER_KEY: [u8; PUB_KEY_LEN] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_small_order_key_never_verifies() {
+        assert!(matches!(
+            verify_signature(&SMALL_ORDER_KEY, b"anything", &[0u8; SIGNATURE_LEN]),
+            Err(Error::BadSignature | Error::BadPublicKey)
+        ));
+    }
+
+    #[test]
+    fn a_real_signature_still_verifies_and_a_tampered_one_does_not() {
+        let identity = Identity::from_secret(&[3u8; KEY_LEN]);
+        let message = b"asli/v1/test message";
+        let signature = identity.sign(message);
+        let public_key = identity.public_key();
+
+        verify_signature(&public_key, message, &signature).expect("a real signature verifies");
+
+        let mut tampered = signature;
+        tampered[0] ^= 0x01;
+        assert!(verify_signature(&public_key, message, &tampered).is_err());
+        assert!(verify_signature(&public_key, b"another message", &signature).is_err());
     }
 }

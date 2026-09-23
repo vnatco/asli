@@ -683,6 +683,22 @@ fn create_private(path: &Path) -> Result<File> {
     options.open(path).map_err(Error::Io)
 }
 
+/// Removes a history file, overwriting it first, whether or not it can be opened or decrypted.
+///
+/// For `asli reset`. The history is sealed with a key derived from the same root secret, so a
+/// leaked key still reads it: forgetting the account while leaving the archive in place answers
+/// the wrong half of the question.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the file exists and cannot be overwritten or removed.
+pub fn wipe_file(path: &Path) -> Result<()> {
+    if path.exists() {
+        shred(path)?;
+    }
+    Ok(())
+}
+
 /// Overwrites a file's contents before unlinking it.
 fn shred(path: &Path) -> Result<()> {
     let len = fs::metadata(path)?.len();

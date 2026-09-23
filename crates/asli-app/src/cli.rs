@@ -211,6 +211,16 @@ fn status(paths: &Paths) -> Result<()> {
 fn reset(paths: &Paths) -> Result<()> {
     secrets::wipe(paths)?;
     crate::replay_store::wipe(paths);
+
+    // The archive and the device list go too. Both are readable with the key this command exists
+    // to abandon: the history is sealed under a key derived from the same root secret, and the
+    // device list names every machine on the account. Forgetting the key and leaving either in
+    // place answers only half of "the key leaked".
+    if let Err(err) = crate::history_store::wipe(paths) {
+        eprintln!("{}", log_line("history_wipe_failed", &err.to_string()));
+    }
+    crate::devices::wipe(paths);
+
     println!("Account forgotten on this device.");
     println!();
     println!("This is how revocation works in v1: there is no way to remove one device from an");

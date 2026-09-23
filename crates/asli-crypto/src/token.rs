@@ -64,6 +64,20 @@ pub fn encode(secret: &[u8; KEY_LEN]) -> Zeroizing<String> {
     token
 }
 
+/// `str::strip_prefix`, ignoring ASCII case, and safe on any input.
+///
+/// Works in characters rather than bytes, so no input can ask for a slice that splits one.
+///
+/// Returns the remainder after the prefix, or `None` when the input does not start with it.
+fn strip_prefix_ignore_ascii_case<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    let end = input
+        .char_indices()
+        .nth(prefix.chars().count())
+        .map_or(input.len(), |(at, _)| at);
+    let head = input.get(..end)?;
+    head.eq_ignore_ascii_case(prefix).then(|| &input[end..])
+}
+
 /// Parses a join token back into the root secret.
 ///
 /// Parsing is strict about structure and tolerant about presentation: surrounding whitespace is
@@ -77,12 +91,12 @@ pub fn encode(secret: &[u8; KEY_LEN]) -> Zeroizing<String> {
 pub fn parse(input: &str) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let trimmed = input.trim();
 
-    if trimmed.len() < TOKEN_PREFIX.len()
-        || !trimmed[..TOKEN_PREFIX.len()].eq_ignore_ascii_case(TOKEN_PREFIX)
-    {
+    // Split on a character boundary, never a byte offset. Slicing a `str` at byte 6 panics when
+    // byte 6 lands inside a multi byte character, and this runs on every keystroke in the join
+    // field: one pasted emoji would have taken the window down with it.
+    let Some(body) = strip_prefix_ignore_ascii_case(trimmed, TOKEN_PREFIX) else {
         return Err(Error::TokenPrefix);
-    }
-    let body = &trimmed[TOKEN_PREFIX.len()..];
+    };
 
     let decoded = Zeroizing::new(base32::decode(body)?);
     if decoded.len() != 1 + KEY_LEN + CHECKSUM_LEN {
@@ -191,5 +205,38 @@ mod tests {
         let mut other = TEST_SECRET;
         other[31] ^= 0x01;
         assert_ne!(*encode(&TEST_SECRET), *encode(&other));
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn a_pasted_character_cannot_crash_the_parser() {
+        // Every one of these used to reach a byte slice that split a character in half.
+        for input in [
+            "a\u{1F600}\u{1F600}",
+            "\u{1F600}",
+            "asli\u{1F600}",
+            "\u{00E9}\u{00E9}\u{00E9}\u{00E9}",
+            "asli1_\u{1F600}",
+            "\u{202E}asli1_",
+            "",
+            "     ",
+        ] {
+            // The only requirement is that it returns rather than panics.
+            let _ = parse(input);
+        }
+    }
+
+    #[test]
+    fn the_prefix_is_still_matched_case_insensitively() {
+        let secret = [7u8; KEY_LEN];
+        let token = encode(&secret);
+        let upper = token.to_uppercase();
+        assert_eq!(*parse(&token).expect("round trip"), secret);
+        assert_eq!(*parse(&upper).expect("upper case round trip"), secret);
+        assert!(matches!(parse("xxxx1_abc"), Err(Error::TokenPrefix)));
     }
 }

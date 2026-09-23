@@ -43,6 +43,21 @@ pub enum Claim {
     AlreadyRunning,
 }
 
+/// Opens the lock file, owner only from the moment it is created.
+///
+/// It carries the process id of the running copy, which is a hint about the machine's state and
+/// belongs to nobody else.
+fn open_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Tries to become the one running daemon for these paths.
 ///
 /// # Errors
@@ -51,13 +66,8 @@ pub enum Claim {
 /// than another process holding it.
 pub fn claim(paths: &Paths) -> Result<Claim> {
     let path = paths.dir.join("asli.lock");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|e| Error::ConfigDir(format!("{}: {e}", path.display())))?;
+    let mut file =
+        open_owner_only(&path).map_err(|e| Error::ConfigDir(format!("{}: {e}", path.display())))?;
 
     let deadline = std::env::var_os(RESTART_ENV).map(|_| Instant::now() + RESTART_WAIT);
 

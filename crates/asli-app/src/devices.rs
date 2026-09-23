@@ -251,7 +251,9 @@ impl Registry {
         let Ok(bytes) = serde_json::to_vec_pretty(&self.stored) else {
             return;
         };
-        if let Err(err) = std::fs::write(paths.dir.join(FILE), bytes) {
+        // Owner only, and atomically: this names every machine on the account, its operating
+        // system and when it was last seen, which is a precise description of the owner's setup.
+        if let Err(err) = crate::config::write_atomically(&paths.dir.join(FILE), &bytes, 0o600) {
             eprintln!("{}", log_line("devices_save_failed", &err.to_string()));
         }
     }
@@ -385,6 +387,14 @@ fn command_output(program: &str, args: &[&str]) -> String {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .unwrap_or_default()
+}
+
+/// Forgets the device list, with the account.
+///
+/// It names every machine on the account, its operating system and when it was last seen, which
+/// describes the owner's setup and outlives the account it belonged to.
+pub fn wipe(paths: &Paths) {
+    let _ = std::fs::remove_file(paths.dir.join(FILE));
 }
 
 #[cfg(test)]

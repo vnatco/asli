@@ -139,6 +139,13 @@ impl Paths {
 
         fs::create_dir_all(&dir)
             .map_err(|e| Error::ConfigDir(format!("{}: {e}", dir.display())))?;
+        // The directory too, not only the files in it. On a distribution whose home directories
+        // are world readable, the default here would list every file this application keeps.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
         Ok(Self { dir })
     }
 
@@ -245,13 +252,37 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<(
 
     let tmp = path.with_extension("tmp");
     {
-        let mut file = fs::File::create(&tmp)?;
+        // Created with the mode already on it. Writing first and restricting afterwards left the
+        // finished, fsynced contents readable by every other user on the machine for a moment,
+        // and this runs on every copy, so a moment repeated hundreds of times a day is a window.
+        let mut file = create_private(&tmp, mode)?;
         file.write_all(bytes)?;
         file.sync_all()?;
     }
     set_owner_only(&tmp, mode)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Creates a file that is owner only from the moment it exists.
+///
+/// The mode is passed to `open`, so there is no instant at which the file is both present and
+/// readable by anyone else. Truncates, because every caller rewrites the whole file.
+#[cfg(unix)]
+fn create_private(path: &Path, mode: u32) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    Ok(fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)?)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path, _mode: u32) -> Result<fs::File> {
+    // Windows and macOS inherit the user profile's access control, which is owner only by default.
+    Ok(fs::File::create(path)?)
 }
 
 /// Restricts a file to its owner. Everything this application writes is either a secret or a hint

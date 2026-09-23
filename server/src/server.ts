@@ -534,7 +534,32 @@ export function createRelay(config: Config): Relay {
     });
   }
 
+  // How long to tell a peer to wait when its socket is already behind. One second: long enough
+  // for the buffer to drain, short enough that catching up after a reconnect is not slow.
+  const BACKPRESSURE_RETRY_AFTER_MS = 1000;
+
   function handleFetchLast(session: Session): void {
+    // Every other outbound path checks the socket's buffer before adding to it; this one did not,
+    // and it is the one a client can ask for on demand. A peer that requests a retained clip and
+    // then reads slowly turns roughly sixty bytes a second of upload into a hundred kilobytes a
+    // second of relay heap, which is how one connection eats a box with a 128 MB limit.
+    if (shouldPark(session.ws.bufferedAmount, config.backpressureSoftBytes)) {
+      // RATE_LIMITED rather than a new code: the error codes are a closed set in the protocol and
+      // in the client's enum, so inventing one here would be a protocol change that older clients
+      // would read as a malformed frame. The meaning is right, and the retry floor says when.
+      sendError(
+        session,
+        'RATE_LIMITED',
+        'the connection is behind; try again once it has caught up',
+        BACKPRESSURE_RETRY_AFTER_MS,
+      );
+      log.debug('fetch_last_backpressure', {
+        conn: session.conn.id,
+        bytes: session.ws.bufferedAmount,
+      });
+      return;
+    }
+
     const retained = registry.retainedFor(session.conn.roomId, Date.now());
     if (retained === null) {
       sendError(session, 'NO_RETAINED', 'no clip is currently retained for this room');

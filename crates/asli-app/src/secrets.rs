@@ -11,6 +11,8 @@
 //! disk, and the status output says exactly that rather than implying otherwise.
 
 use std::fs;
+use std::io::Write as _;
+use std::path::Path;
 
 use zeroize::Zeroizing;
 
@@ -76,8 +78,8 @@ pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
         match entry.set_password(&encoded) {
             Ok(()) => {
                 // A previous run may have left a file fallback behind. Two copies of the key is
-                // one copy too many.
-                let _ = fs::remove_file(paths.secret_file());
+                // one copy too many, and the one being dropped is overwritten, not just unlinked.
+                let _ = shred_secret_file(&paths.secret_file());
                 return Ok(Store::Keychain);
             }
             // A keychain that is there but locked must not be bypassed. The key would go to the
@@ -144,10 +146,27 @@ pub fn wipe(paths: &Paths) -> Result<()> {
             return Err(Error::KeychainLocked(err.to_string()));
         }
     }
-    let path = paths.secret_file();
-    if path.exists() {
-        fs::remove_file(path)?;
+    shred_secret_file(&paths.secret_file())?;
+    Ok(())
+}
+
+/// Removes the key file, overwriting its bytes first.
+///
+/// `remove_file` unlinks and no more: on ext4 and APFS the blocks holding the base32 encoded
+/// account key stay intact until something else claims them, so a sold laptop or an old backup
+/// still yields the key to anyone who carves free space. The history store already shreds for
+/// exactly this reason, and the key is worth more than the history it protects.
+fn shred_secret_file(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(()); // Nothing there, which is the desired end state.
+    };
+
+    if let Ok(mut file) = fs::OpenOptions::new().write(true).open(path) {
+        let len = usize::try_from(metadata.len()).unwrap_or(0);
+        let _ = file.write_all(&vec![0u8; len]);
+        let _ = file.sync_all();
     }
+    fs::remove_file(path)?;
     Ok(())
 }
 
@@ -189,6 +208,11 @@ fn write_secret_file(paths: &Paths, encoded: &str) -> Result<()> {
         ))
     };
 
+    // Written to a temporary file and renamed over the target, so the key file is either the old
+    // contents or the new ones. Truncating in place and then writing left a window in which a
+    // crash, an OOM kill or a power cut yielded an empty key file, and there is no second copy:
+    // that window loses the account outright.
+    let tmp = path.with_extension("tmp");
     // Created owner only from the first byte. Writing first and restricting afterwards left a
     // moment where the file was readable by other users, and a handle opened then stays open.
     let mut options = fs::OpenOptions::new();
@@ -198,9 +222,12 @@ fn write_secret_file(paths: &Paths, encoded: &str) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(&path).map_err(failed)?;
+    let mut file = options.open(&tmp).map_err(failed)?;
     file.write_all(encoded.as_bytes()).map_err(failed)?;
     file.sync_all().map_err(failed)?;
+    drop(file);
+    owner_only(&tmp)?;
+    fs::rename(&tmp, &path).map_err(failed)?;
     // Still applied, for a file that already existed with wider permissions.
     owner_only(&path)?;
     Ok(())
