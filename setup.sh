@@ -215,8 +215,11 @@ start_tray() {
         # which is why a menu bar item that failed to appear once took a morning to explain.
         local agent="$HOME/Library/LaunchAgents/dev.vnat.asli.plist"
         if [ -f "$agent" ]; then
+            # Unloaded first, or launchd keeps the definition it read at the last login and this
+            # run gets the old one: a rewritten agent would take effect only after a reboot, which
+            # is the sort of thing that is discovered a week later.
+            launchctl bootout "gui/$(id -u)/dev.vnat.asli" 2>/dev/null || :
             launchctl bootstrap "gui/$(id -u)" "$agent" 2>/dev/null ||
-                launchctl kickstart -k "gui/$(id -u)/dev.vnat.asli" 2>/dev/null ||
                 open "$MAC_APP" --args tray
         else
             open "$MAC_APP" --args tray
