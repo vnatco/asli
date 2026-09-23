@@ -31,6 +31,10 @@ pub enum Error {
     Net(asli_net::Error),
     /// A QR code could not be rendered.
     Qr(String),
+    /// `asli join` reached the end of stdin without a token.
+    NoToken,
+    /// The token was passed as a command line argument, where other users can read it.
+    TokenInArgv,
 }
 
 impl fmt::Display for Error {
@@ -40,7 +44,7 @@ impl fmt::Display for Error {
             Self::Io(err) => write!(f, "file error: {err}"),
             Self::Parse(detail) => write!(f, "could not parse a stored file: {detail}"),
             Self::NoAccount => f.write_str(
-                "no account on this device yet. Run 'asli create' to make one, or 'asli join <token>' to use an existing one",
+                "no account on this device yet. Run 'asli create' to make one, or 'asli join' to use an existing one",
             ),
             Self::AccountExists => f.write_str(
                 "an account already exists on this device. Run 'asli reset' first if you really want to replace it",
@@ -54,6 +58,15 @@ impl fmt::Display for Error {
             Self::Clipboard(err) => write!(f, "{err}"),
             Self::Net(err) => write!(f, "{err}"),
             Self::Qr(detail) => write!(f, "could not render the QR code: {detail}"),
+            Self::TokenInArgv => f.write_str(
+                "do not pass the token as an argument: other users on this machine can read it \
+                 from the process list, and your shell has just written it to its history file. \
+                 Run 'asli join' on its own and paste it when asked. Since this one has been \
+                 exposed, consider running 'asli create' and re-joining your devices",
+            ),
+            Self::NoToken => f.write_str(
+                "no token on stdin. Run 'asli join' and paste the token when it asks, or pipe it in",
+            ),
         }
     }
 }

@@ -16,6 +16,7 @@ use crate::daemon::Controls;
 use crate::error::{Error, Result};
 use crate::{autostart, daemon, instance, notify, qr, secrets, tray};
 use asli_crypto::{token, Identity};
+use zeroize::Zeroizing;
 use clap::{Parser, Subcommand};
 
 /// One clipboard, every machine.
@@ -40,10 +41,15 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Join an account that already exists, using its token.
+    /// Join an account that already exists. Reads the token from stdin, never from the command
+    /// line: `/proc/<pid>/cmdline` is world readable, so an argument would hand the account key
+    /// to any other local user, and shells record it in their history besides.
     Join {
-        /// The token from `asli create`, starting with `asli1_`.
-        token: String,
+        /// Accepted only so that the old form can be refused with an explanation rather than a
+        /// bare parser error. Never used. Clap would otherwise print the rejected argument, and
+        /// the rejected argument is the account key.
+        #[arg(hide = true)]
+        token: Option<String>,
     },
     /// Run the daemon in the foreground, with no tray and no window.
     Run,
@@ -82,7 +88,7 @@ fn dispatch() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Tray) {
         Command::Create { force } => create(&paths, force),
-        Command::Join { token } => join(&paths, &token),
+        Command::Join { token } => join(&paths, token.is_some()),
         Command::Run => run(&paths, false),
         Command::Tray => run(&paths, true),
         Command::Autostart { state } => autostart_command(&paths, state.as_deref()),
@@ -110,8 +116,38 @@ fn create(paths: &Paths, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn join(paths: &Paths, raw: &str) -> Result<()> {
-    let secret = token::parse(raw)?;
+/// Reads the join token from stdin.
+///
+/// Never from `argv`. On Linux `/proc/<pid>/cmdline` is world readable, so a token passed as an
+/// argument is readable by every other user on the machine for as long as the process lives, and
+/// the shell writes it to its history file besides. The token is the account key in full: those
+/// two are not acceptable places for it.
+///
+/// Typing is not hidden. The threat being closed here is a token at rest in a history file or
+/// visible in a process list, not someone reading the screen, and the token is already on display
+/// on the device that produced it. Hiding it would only make a mistyped character invisible.
+fn read_token() -> Result<Zeroizing<String>> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        print!("Paste the join token (starts with 'asli1_'): ");
+        std::io::stdout().flush()?;
+    }
+
+    let mut line = Zeroizing::new(String::new());
+    if stdin.lock().read_line(&mut line)? == 0 {
+        return Err(Error::NoToken);
+    }
+    Ok(line)
+}
+
+fn join(paths: &Paths, token_in_argv: bool) -> Result<()> {
+    if token_in_argv {
+        return Err(Error::TokenInArgv);
+    }
+    let raw = read_token()?;
+    let secret = token::parse(&raw)?;
     let identity = Identity::from_secret(&secret);
     let store = secrets::store(paths, identity.secret())?;
     let config = paths.load_config()?;
@@ -138,7 +174,7 @@ fn present_token(secret: &[u8; 32]) -> Result<()> {
     println!("{}", qr::render(&token)?);
     println!("  {}", token.as_str());
     println!();
-    println!("Scan this on your other devices, or paste the token with 'asli join <token>'.");
+    println!("Scan this on your other devices, or run 'asli join' there and paste it when asked.");
     println!("Anyone who has it has your clipboard. Do not send it over chat or email.");
     println!("Scanning the QR is safest. Copying it from the window marks it so clipboard");
     println!("history and cloud sync skip it, and clears it after 90 seconds, but any");
@@ -166,7 +202,7 @@ fn status(paths: &Paths) -> Result<()> {
         println!("Room id:       {}", identity.room_id());
         println!("Key stored in: {}", store.describe());
     } else {
-        println!("Account:       none yet. Run 'asli create' or 'asli join <token>'");
+        println!("Account:       none yet. Run 'asli create' or 'asli join'");
         println!("Key store:     {}", secrets::available_store().describe());
     }
 

@@ -663,7 +663,12 @@ export function createRelay(config: Config): Relay {
         return;
       }
 
-      const parsed = parseFrame(raw, config.maxFrameBytes);
+      // The cap depends on how far this connection has got. Only a session that has proved it
+      // holds the room key may send a full sized frame; before that a few kilobytes is plenty,
+      // and the check happens before the JSON is parsed.
+      const frameLimit =
+        session.state === 'ready' ? config.maxFrameBytes : config.handshakeFrameBytes;
+      const parsed = parseFrame(raw, frameLimit);
       if (!parsed.ok) {
         if (parsed.code === 'UNKNOWN_TYPE') {
           sendError(session, 'UNKNOWN_TYPE', 'unknown message type');

@@ -629,8 +629,8 @@ fn decode_all(raw: &[u8], key: &[u8; key::KEY_LEN]) -> Result<Vec<Entry>> {
             .map_err(|_| Error::Malformed)?;
         let ciphertext = &record[ID_LEN + clip::NONCE_LEN..];
 
-        let inner = clip::open(key, 0, &ROOM, &id, &nonce, ciphertext)?;
-        let content = Content::from_parts(inner.content_type, inner.content)?;
+        let mut inner = clip::open(key, 0, &ROOM, &id, &nonce, ciphertext)?;
+        let content = Content::from_parts(inner.content_type, inner.take_content())?;
         entries.push(Entry {
             id,
             ts_ms: inner.ts_ms,

@@ -22,9 +22,9 @@ Preferred: open a private security advisory through GitHub, using the "Report a 
 button under the repository's Security tab. That creates a private thread visible only to the
 maintainers.
 
-Alternative contact: **TODO, add a dedicated security contact address and, if one is offered, a PGP
-key fingerprint, before the first public release.** This placeholder must not survive into a tagged
-version.
+Alternative contact: **contact@vnat.dev**, if you cannot or would rather not use GitHub. Mail to
+that address is read by the maintainer. There is no PGP key; if you need one to send a report,
+say so in a first message with no details in it and one will be published.
 
 Please include: what you found, how to reproduce it, the affected component (client, relay, protocol
 or documentation), the platform and version, and what you think the impact is. A proof of concept is

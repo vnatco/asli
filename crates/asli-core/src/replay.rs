@@ -32,6 +32,30 @@ pub const DEFAULT_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// A day, for the same reason as [`DEFAULT_MAX_AGE_MS`]: wide enough for any time zone mistake.
 pub const DEFAULT_FUTURE_SKEW_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// How far a device's sequence number may jump in one step before the clip is refused.
+///
+/// Without a bound this is a permanent denial of sync. `seq` is chosen by the sender and the high
+/// water mark is persisted and never lowered, so one clip claiming a peer's device id with
+/// `seq = u64::MAX` would park that peer's mark at the ceiling and every genuine clip from it
+/// afterwards would read as a rollback, on every device, across restarts, until the replay store
+/// was edited by hand. Only a room member can do it, and a room member can already read the
+/// clipboard, so this is denial of service rather than disclosure. It is still worth closing.
+///
+/// The value is deliberately generous. A device reserves [`SEQ_RESERVATION`] numbers per start,
+/// so a peer that restarted a thousand times while this device was away has legitimately advanced
+/// by a million. A jump past that is not a peer that has been busy, it is a forged number.
+///
+/// [`SEQ_RESERVATION`]: https://docs.rs/asli-app
+pub const MAX_SEQ_JUMP: u64 = 1_000_000;
+
+/// How many devices a guard tracks a sequence number for.
+///
+/// `highest_seq` is keyed by an attacker chosen device id, which made it the one unbounded
+/// collection in the tree: a room member could mint ids until the store filled the disk. A real
+/// account has a handful of devices, so the cap is far above any honest use and the oldest entry
+/// is dropped once it is reached.
+pub const DEFAULT_DEVICE_CAPACITY: usize = 64;
+
 /// The decision for one incoming clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -47,6 +71,9 @@ pub enum Verdict {
     TooOld,
     /// The sender's clock is implausibly far ahead.
     FromTheFuture,
+    /// The sequence number jumped further than [`MAX_SEQ_JUMP`] in one step. Refused without
+    /// recording, so a forged number cannot park the high water mark out of reach.
+    SeqJump,
 }
 
 impl Verdict {
@@ -66,6 +93,7 @@ impl Verdict {
             Self::Rollback => "rollback",
             Self::TooOld => "too_old",
             Self::FromTheFuture => "future_skew",
+            Self::SeqJump => "seq_jump",
         }
     }
 }
@@ -106,6 +134,9 @@ pub struct ReplayGuard {
     seen: VecDeque<[u8; MSG_ID_LEN]>,
     capacity: usize,
     highest_seq: HashMap<[u8; DEVICE_ID_LEN], u64>,
+    /// Device ids in the order they were first seen, so the map above can be bounded.
+    device_order: VecDeque<[u8; DEVICE_ID_LEN]>,
+    device_capacity: usize,
     max_age_ms: u64,
     retained_max_age_ms: u64,
     future_skew_ms: u64,
@@ -123,6 +154,8 @@ impl ReplayGuard {
             seen: VecDeque::with_capacity(DEFAULT_MSG_ID_CAPACITY),
             capacity: DEFAULT_MSG_ID_CAPACITY,
             highest_seq: HashMap::new(),
+            device_order: VecDeque::new(),
+            device_capacity: DEFAULT_DEVICE_CAPACITY,
             max_age_ms: DEFAULT_MAX_AGE_MS,
             retained_max_age_ms,
             future_skew_ms: DEFAULT_FUTURE_SKEW_MS,
@@ -157,9 +190,16 @@ impl ReplayGuard {
             return Verdict::TooOld;
         }
 
-        if let Some(highest) = self.highest_seq.get(&incoming.device_id) {
-            if incoming.seq <= *highest {
+        if let Some(highest) = self.highest_seq.get(&incoming.device_id).copied() {
+            if incoming.seq <= highest {
                 return Verdict::Rollback;
+            }
+            // The bound applies only once a device is known. A first clip from a device has no
+            // mark to jump from, and refusing it against a baseline of zero would lock out an
+            // honest peer that had genuinely advanced a long way before this device was added,
+            // which is a worse failure than the one being prevented.
+            if incoming.seq - highest > MAX_SEQ_JUMP {
+                return Verdict::SeqJump;
             }
         }
 
@@ -172,7 +212,22 @@ impl ReplayGuard {
             self.seen.pop_front();
         }
         self.seen.push_back(incoming.msg_id);
-        self.highest_seq.insert(incoming.device_id, incoming.seq);
+
+        if self
+            .highest_seq
+            .insert(incoming.device_id, incoming.seq)
+            .is_none()
+        {
+            // A device not seen before. Remember the order so the map can be bounded, and drop
+            // the oldest entry once it is full rather than letting minted device ids grow it
+            // without limit.
+            self.device_order.push_back(incoming.device_id);
+            while self.device_order.len() > self.device_capacity {
+                if let Some(evicted) = self.device_order.pop_front() {
+                    self.highest_seq.remove(&evicted);
+                }
+            }
+        }
     }
 
     /// Device ids this guard has accepted a clip from. The client derives its "connected devices"
@@ -196,8 +251,24 @@ impl ReplayGuard {
     /// Takes back what an earlier run learned. Never lowers anything already known.
     pub fn restore(&mut self, memory: &Memory) {
         for (device, seq) in &memory.highest_seq {
-            let highest = self.highest_seq.entry(*device).or_insert(0);
-            *highest = (*highest).max(*seq);
+            // A restored file is bounded the same way a live guard is. It is written by this
+            // process, but it is still a file on disk, and a guard that trusted it without a cap
+            // would reintroduce the unbounded map one restart later.
+            if self.highest_seq.len() >= self.device_capacity
+                && !self.highest_seq.contains_key(device)
+            {
+                continue;
+            }
+            match self.highest_seq.entry(*device) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let highest = slot.get_mut();
+                    *highest = (*highest).max(*seq);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(*seq);
+                    self.device_order.push_back(*device);
+                }
+            }
         }
         for msg_id in &memory.recent {
             if !self.seen.contains(msg_id) {
@@ -267,6 +338,44 @@ mod tests {
         assert_eq!(g.check(&clip(2, THEIRS, 4, NOW), NOW), Verdict::Rollback);
         assert_eq!(g.check(&clip(3, THEIRS, 5, NOW), NOW), Verdict::Rollback);
         assert_eq!(g.check(&clip(4, THEIRS, 6, NOW), NOW), Verdict::Accept);
+    }
+
+    #[test]
+    fn refuses_an_implausible_sequence_jump_without_recording_it() {
+        let mut g = guard();
+        assert_eq!(g.check(&clip(1, THEIRS, 5, NOW), NOW), Verdict::Accept);
+
+        // The attack: one clip claiming that device's id at the ceiling. Left unchecked it parks
+        // the high water mark where no genuine clip can ever reach it, permanently and across
+        // restarts.
+        assert_eq!(g.check(&clip(2, THEIRS, u64::MAX, NOW), NOW), Verdict::SeqJump);
+
+        // The mark must be untouched, so the device keeps syncing normally afterwards.
+        assert_eq!(g.check(&clip(3, THEIRS, 6, NOW), NOW), Verdict::Accept);
+    }
+
+    #[test]
+    fn a_first_clip_from_an_unknown_device_is_not_bounded() {
+        let mut g = guard();
+        // No mark to jump from. An honest peer that advanced a long way before this device was
+        // added must not be locked out.
+        assert_eq!(
+            g.check(&clip(1, THEIRS, MAX_SEQ_JUMP * 4, NOW), NOW),
+            Verdict::Accept
+        );
+    }
+
+    #[test]
+    fn the_device_map_is_bounded() {
+        let mut g = guard();
+        // Every clip carries a distinct, attacker chosen device id, which is what made this the
+        // one collection in the tree that could grow without limit.
+        for n in 0..u8::try_from(DEFAULT_DEVICE_CAPACITY * 3).expect("fits in a byte") {
+            let mut device = [0u8; DEVICE_ID_LEN];
+            device[0] = n;
+            assert!(g.check(&clip(n, device, 1, NOW), NOW).is_accept());
+        }
+        assert_eq!(g.known_devices(), DEFAULT_DEVICE_CAPACITY);
     }
 
     #[test]

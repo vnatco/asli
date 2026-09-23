@@ -551,7 +551,7 @@ impl Session {
         }
 
         let room_id_bytes: [u8; ROOM_ID_LEN] = self.identity.room_id_bytes();
-        let Ok(inner) = clip::open(
+        let Ok(mut inner) = clip::open(
             &self.identity.enc_key(clip.epoch),
             clip.epoch,
             &room_id_bytes,
@@ -582,7 +582,7 @@ impl Session {
             // Images are specified but not produced by any v1 client.
             return Ok(Vec::new());
         }
-        let Ok(text) = String::from_utf8(inner.content) else {
+        let Ok(text) = String::from_utf8(inner.take_content()) else {
             return Ok(Vec::new());
         };
 
@@ -742,7 +742,7 @@ impl Session {
         let Some(assembly) = self.assembly.take() else {
             return Ok(Vec::new());
         };
-        let Ok(inner) = assembly.finish() else {
+        let Ok(mut inner) = assembly.finish() else {
             return Ok(dropped("could_not_decrypt", false));
         };
 
@@ -763,7 +763,7 @@ impl Session {
 
         match inner.content_type {
             ContentType::ImagePng => Ok(vec![Action::Image {
-                png: inner.content,
+                png: inner.take_content(),
                 ts_ms: inner.ts_ms,
                 device_id: inner.device_id,
             }]),

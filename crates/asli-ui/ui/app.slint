@@ -476,6 +476,10 @@ export component AppWindow inherits Window {
     property <bool> toast-good: true;
     property <bool> toast-shown: false;
     property <bool> token-copied: false;
+    // The join string is the account key in full, so it is not drawn until asked for. Leaving the
+    // Join String screen hides it again, so that a window left open on it is not a standing
+    // display of the key.
+    property <bool> token-revealed: false;
     property <bool> confirm-clear: false;
     property <bool> confirm-join-other: false;
 
@@ -524,6 +528,10 @@ export component AppWindow inherits Window {
         root.token-copied = true;
         copied-timer.running = false;
         copied-timer.running = true;
+    }
+
+    changed screen => {
+        root.token-revealed = false;
     }
 
     toast-timer := Timer {
@@ -1077,13 +1085,24 @@ export component AppWindow inherits Window {
                                                 border-radius: 14px;
                                                 background: #FFFFFF;
 
-                                                Image {
+                                                if root.token-revealed: Image {
                                                     x: 12px;
                                                     y: 12px;
                                                     width: 175px;
                                                     height: 175px;
                                                     source: root.qr;
                                                     image-rendering: pixelated;
+                                                }
+                                                if !root.token-revealed: Text {
+                                                    x: 16px;
+                                                    y: 16px;
+                                                    width: parent.width - 32px;
+                                                    height: parent.height - 32px;
+                                                    text: "Hidden";
+                                                    color: #8A8A8A;
+                                                    font-size: 13px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
                                                 }
                                             }
                                               }
@@ -1107,7 +1126,7 @@ export component AppWindow inherits Window {
                                                     x: 12px;
                                                     y: 11px;
                                                     width: parent.width - 24px;
-                                                    text: root.token;
+                                                    text: root.token-revealed ? root.token : "asli1_**********************************************************";
                                                     read-only: true;
                                                     color: Theme.text;
                                                     font-size: 12px;
@@ -1123,7 +1142,14 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 spacing: 8px;
                                                 alignment: start;
-                                                Button {
+                                                if !root.token-revealed: Button {
+                                                    text: "Reveal join string";
+                                                    show-icon: false;
+                                                    pad-x: 14px;
+                                                    kind: ButtonKind.primary;
+                                                    clicked => { root.token-revealed = true; }
+                                                }
+                                                if root.token-revealed: Button {
                                                     text: root.token-copied ? "Copied" : "Copy join string";
                                                     icon: root.token-copied ? Icons.check : Icons.copy;
                                                     show-icon: true;

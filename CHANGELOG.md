@@ -64,6 +64,28 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- `asli join` no longer takes the token as a command line argument. `/proc/<pid>/cmdline` is
+  world readable on Linux, so any other local user could read the account key out of the process
+  list while a join was running, and the shell wrote it to its history file as well. The token is
+  read from stdin now, and the old form is refused with an explanation rather than a parser error
+  that printed the key back out.
+- The join string is no longer drawn until it is asked for. Opening the Join String screen shows
+  a Reveal button, and leaving the screen hides the string again, so a window left open on it is
+  not a standing display of the account key.
+- A device's sequence number can no longer jump an implausible distance in one step. The high
+  water mark is persisted and never lowered, so a single clip claiming a peer's device id with
+  `seq = u64::MAX` parked that peer's mark out of reach and stopped it syncing on every device,
+  across restarts, until the replay store was edited by hand.
+- The per device sequence map is bounded. It was keyed by a sender chosen device id with no cap,
+  which made it the one collection in the tree that an account member could grow without limit.
+- A decrypted clip is wiped when it is dropped rather than left legible in a freed allocation,
+  where it reached swap and hibernation images. This covers clips the crypto layer still owns:
+  ones the replay guard rejected, ones of a content type the client does not handle, and every
+  error path.
+- The relay caps a frame at four kilobytes until the connection has authenticated. A `hello` is
+  under two hundred bytes, and anyone who had done nothing but open a socket could previously
+  make the relay parse a megabyte of JSON per frame.
+- `SECURITY.md` has a real security contact address in place of the TODO placeholder.
 - On Linux, a notification service that never answered froze the tray: every menu click after the
   first notification did nothing. Notifications are now sent from a thread of their own.
 - A connection left dead by sleep or a network change was never noticed: the tray said Synced

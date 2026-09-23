@@ -13,6 +13,8 @@ export type Config = {
   readonly logLevel: string;
 
   readonly maxFrameBytes: number;
+  /** Frame cap before a connection has authenticated. See MAX_FRAME_BYTES in the defaults. */
+  readonly handshakeFrameBytes: number;
   readonly maxContentBytes: number;
   readonly retainMaxBytes: number;
   readonly retainGlobalBudgetBytes: number;
@@ -84,6 +86,10 @@ export function loadConfig(): Config {
     logLevel: readString('LOG_LEVEL', 'info'),
 
     maxFrameBytes: readInt('MAX_FRAME_BYTES', MIB, 4 * KIB, 64 * MIB),
+    // An unauthenticated connection has no business sending a megabyte. `hello` is under 200
+    // bytes and `auth` a little over 300, so 4 KiB is generous, and it keeps anyone who has done
+    // nothing but open a socket from making the relay parse a megabyte of JSON per frame.
+    handshakeFrameBytes: readInt('HANDSHAKE_FRAME_BYTES', 4 * KIB, 512, 64 * KIB),
     maxContentBytes: readInt('MAX_CONTENT_BYTES', 700 * KIB, KIB, 32 * MIB),
     retainMaxBytes: readInt('RETAIN_MAX_BYTES', 64 * KIB, 0, 16 * MIB),
     retainGlobalBudgetBytes: readInt('RETAIN_GLOBAL_BUDGET_BYTES', 256 * MIB, 0, 8192 * MIB),

@@ -109,6 +109,38 @@ pub struct Inner {
     pub content: Vec<u8>,
 }
 
+impl Inner {
+    /// Takes the decrypted payload out, leaving the clip empty.
+    ///
+    /// [`Drop`] wipes whatever is still here, which makes the field impossible to move out of
+    /// normally. A caller that genuinely needs to own the bytes says so through this method, and
+    /// takes responsibility for them: from that point the buffer is theirs and this crate no
+    /// longer wipes it.
+    #[must_use]
+    pub fn take_content(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.content)
+    }
+}
+
+impl Drop for Inner {
+    /// Wipes the decrypted payload when it goes out of scope.
+    ///
+    /// The keys in this crate have always been zeroized; the thing the keys protect was not. A
+    /// decrypted clip is whatever was copied, which is routinely a password or a recovery phrase,
+    /// and a plain `Vec` left to the allocator stays legible in the freed page and travels into
+    /// swap and hibernation images.
+    ///
+    /// The honest limit, stated because it would otherwise be easy to overestimate what this
+    /// buys. It wipes clips this crate still owns: ones rejected by the replay guard, ones of a
+    /// content type the client does not handle, and every error path. A clip that is accepted is
+    /// moved out through [`Inner::take_content`] and lives on in the caller, and the operating
+    /// system's own clipboard is beyond reach entirely.
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.content.zeroize();
+    }
+}
+
 /// Builds the 51 byte associated data for a clip.
 #[must_use]
 pub fn build_aad(
