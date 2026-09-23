@@ -5,8 +5,8 @@
 //! reading back what was written rather than by assuming the write worked.
 //!
 //! Each platform has exactly one sanctioned mechanism and they share nothing, so there is no
-//! common abstraction worth inventing: an XDG autostart entry on Linux, the `Run` key on Windows,
-//! and a launchd agent on macOS.
+//! common abstraction worth inventing: an XDG autostart entry on Linux, a Startup folder shortcut
+//! on Windows, and a launchd agent on macOS.
 
 use crate::error::{Error, Result};
 
@@ -331,21 +331,28 @@ mod platform {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
-    use super::startup_approved;
+    use super::{shortcut, startup_approved};
     use crate::error::{Error, Result};
 
-    /// The per user key Windows reads at login. No administrator rights are needed to write it,
-    /// and Settings, Apps, Startup lists and toggles what is here.
-    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    const VALUE: &str = "Asli";
+    /// The shortcut Explorer opens at login, in this user's Startup folder.
+    const LNK: &str = "Asli.lnk";
 
-    /// Explorer's own record of which `Run` entries it will actually start. See the
-    /// [`startup_approved`](super::startup_approved) module for why writing it is not optional.
-    const APPROVED_KEY: &str =
+    /// Where an earlier build put the entry. Explorer enumerated it at logon and started it only
+    /// for other applications, so it is removed whenever the setting is applied rather than left
+    /// behind looking like it works.
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    const RUN_VALUE: &str = "Asli";
+    const APPROVED_RUN_KEY: &str =
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 
-    /// `CREATE_NO_WINDOW`. `reg.exe` is a console program, and started from the windowed binary
-    /// without this it flashes a console window on screen.
+    /// Explorer's record of which Startup folder shortcuts it will actually open. Only ever read,
+    /// never written: a shortcut with no value here starts normally, and Task Manager writes one
+    /// when the owner switches the entry off.
+    const APPROVED_FOLDER_KEY: &str =
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder";
+
+    /// `CREATE_NO_WINDOW`. `reg.exe` and `powershell.exe` are console programs, and started from
+    /// the windowed binary without this they flash a console window on screen.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     /// Runs `reg.exe`, the same tool a person would use, so no registry library is needed.
@@ -355,6 +362,33 @@ mod platform {
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(Error::Io)
+    }
+
+    /// Runs a PowerShell script, which is how the shortcut is written and read.
+    ///
+    /// A `.lnk` is a COM object, not a text file, and `WScript.Shell` is the scripted way in to
+    /// the same `IShellLink` a person gets from the Explorer right click menu. Shipped with every
+    /// supported Windows, so this stays true to the rest of the module: use the tool that is
+    /// already there rather than take a dependency.
+    fn powershell(script: &str) -> Result<Output> {
+        Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(Error::Io)
+    }
+
+    /// This user's Startup folder.
+    fn startup_dir() -> Result<PathBuf> {
+        std::env::var_os("APPDATA")
+            .map(|appdata| {
+                PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs\Startup")
+            })
+            .ok_or_else(|| Error::ConfigDir("APPDATA is not set".to_owned()))
+    }
+
+    fn shortcut_path() -> Result<PathBuf> {
+        Ok(startup_dir()?.join(LNK))
     }
 
     /// What login should start: the windowed binary when it sits beside this one, since the
@@ -369,90 +403,79 @@ mod platform {
         sibling.exists().then_some(sibling)
     }
 
-    /// Whether a value exists. `reg query` exits 1 when it does not, which is an answer rather
-    /// than a failure.
-    fn exists(key: &str) -> Result<bool> {
-        Ok(reg(&["query", key, "/v", VALUE])?.status.success())
-    }
-
     pub fn is_enabled() -> Result<bool> {
-        if !exists(RUN_KEY)? {
+        if !shortcut_path()?.exists() {
             return Ok(false);
         }
-        // An entry the user switched off in Task Manager is still in Run, and login still ignores
-        // it. Report what Windows will do, not what the Run key says on its own.
-        let output = reg(&["query", APPROVED_KEY, "/v", VALUE])?;
+        // A shortcut the owner switched off in Task Manager is still in the folder, and login
+        // still ignores it. Report what Windows will do, not what the folder alone suggests.
+        let output = reg(&["query", APPROVED_FOLDER_KEY, "/v", LNK])?;
         if !output.status.success() {
             return Ok(true);
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        Ok(startup_approved::reads_as_enabled(&text, VALUE))
+        Ok(startup_approved::reads_as_enabled(&text, LNK))
     }
 
-    /// Fails unless `reg.exe` succeeded.
-    fn checked(output: &Output, key: &str) -> Result<()> {
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(Error::ConfigDir(format!(
-                "reg.exe could not update {key}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )))
+    /// Removes the registry entries an earlier build wrote, so no machine keeps a dead one.
+    fn remove_run_entries() -> Result<()> {
+        for key in [RUN_KEY, APPROVED_RUN_KEY] {
+            if reg(&["query", key, "/v", RUN_VALUE])?.status.success() {
+                let output = reg(&["delete", key, "/v", RUN_VALUE, "/f"])?;
+                if !output.status.success() {
+                    return Err(Error::ConfigDir(format!(
+                        "reg.exe could not remove {key}\\{RUN_VALUE}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+            }
         }
+        Ok(())
     }
 
     pub fn set_enabled(enabled: bool) -> Result<()> {
+        remove_run_entries()?;
+
+        let path = shortcut_path()?;
         if enabled {
-            let command = format!("\"{}\" tray", launch_target()?.display());
-            checked(
-                &reg(&[
-                    "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &command, "/f",
-                ])?,
-                RUN_KEY,
-            )?;
-            checked(
-                &reg(&[
-                    "add",
-                    APPROVED_KEY,
-                    "/v",
-                    VALUE,
-                    "/t",
-                    "REG_BINARY",
-                    "/d",
-                    startup_approved::ENABLED,
-                    "/f",
-                ])?,
-                APPROVED_KEY,
-            )
-        } else {
-            // Both, and each only if it is there: a value switched off in Task Manager reads as
-            // disabled already, and its Run entry would otherwise be left behind.
-            for key in [RUN_KEY, APPROVED_KEY] {
-                if exists(key)? {
-                    checked(&reg(&["delete", key, "/v", VALUE, "/f"])?, key)?;
-                }
+            let target = launch_target()?;
+            let working = target.parent().unwrap_or(&target);
+            std::fs::create_dir_all(startup_dir()?).map_err(Error::Io)?;
+            let script = shortcut::create_script(
+                &path.display().to_string(),
+                &target.display().to_string(),
+                &working.display().to_string(),
+            );
+            let output = powershell(&script)?;
+            if !output.status.success() || !path.exists() {
+                return Err(Error::ConfigDir(format!(
+                    "could not write {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
             }
-            Ok(())
+        } else if path.exists() {
+            std::fs::remove_file(&path).map_err(Error::Io)?;
         }
+        Ok(())
     }
 
-    #[allow(clippy::unnecessary_wraps)] // Same signature on every platform; Linux can fail.
     pub fn describe_location() -> Result<String> {
-        Ok(format!(r"{RUN_KEY}\{VALUE}"))
+        Ok(shortcut_path()?.display().to_string())
     }
 
-    /// The program the entry starts, from the quoted path this module wrote.
+    /// The program the shortcut opens, read back out of the `.lnk`.
     pub fn target() -> Result<Option<String>> {
-        let output = reg(&["query", RUN_KEY, "/v", VALUE])?;
+        let path = shortcut_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let output = powershell(&shortcut::read_script(&path.display().to_string()))?;
         if !output.status.success() {
             return Ok(None);
         }
-        let text = String::from_utf8_lossy(&output.stdout);
-        Ok(text
-            .lines()
-            .find(|line| line.trim_start().starts_with(VALUE))
-            .and_then(|line| line.split('"').nth(1))
-            .map(str::to_owned))
+        let target = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        Ok((!target.is_empty()).then_some(target))
     }
 }
 
@@ -632,26 +655,23 @@ mod launch_agent {
     }
 }
 
-/// Explorer's record of which `Run` entries it will actually start.
+/// Explorer's record of which startup entries the owner has switched off.
 ///
-/// Writing the `Run` value is not enough. Explorer keeps a parallel key,
-/// `...\Explorer\StartupApproved\Run`, holding one binary value per entry: the first byte says
-/// whether the entry is on, and the remaining eleven are the time the user last switched it off.
-/// An entry with no value there was observed being enumerated and then skipped at login, which is
-/// the whole reason this exists, so the value is written alongside the `Run` one and removed with
-/// it.
+/// Under `...\Explorer\StartupApproved\` Explorer keeps one binary value per entry: the first
+/// byte says whether the entry is on, and the remaining eleven are the time it was last switched
+/// off. The low bit of the first byte is the off switch, since Task Manager writes `03` when the
+/// owner turns an app off and `02` when they turn it back on.
 ///
-/// The low bit of the first byte is the off switch: Task Manager writes `03` when the user turns
-/// an app off and `02` when they turn it back on. Reading it is what makes `asli autostart`
-/// report what Windows will do rather than what the `Run` key alone suggests.
+/// Only read, never written. A fresh entry has no value here and starts anyway, and writing one
+/// is no substitute for an entry Explorer will honour: a `Run` value with a byte identical to a
+/// working application's was still skipped at logon, twice, which is why autostart is a Startup
+/// folder shortcut now. Reading it is what makes `asli autostart` report what Windows will do
+/// rather than what the entry's presence alone suggests.
 ///
 /// Pure text handling, so it is compiled and tested on every platform even though only Windows
 /// uses it.
 #[cfg(any(target_os = "windows", test))]
 mod startup_approved {
-    /// Twelve bytes: on, and never switched off.
-    pub const ENABLED: &str = "020000000000000000000000";
-
     /// Reads a `reg query ... /v <value>` listing of a `REG_BINARY` value.
     ///
     /// Anything unreadable counts as enabled: the `Run` value is there, and a listing this could
@@ -677,24 +697,22 @@ mod startup_approved {
         use super::*;
 
         #[test]
-        fn the_enabled_value_is_twelve_bytes_of_on() {
-            assert_eq!(ENABLED.len(), 24, "twelve bytes, two hex digits each");
-            assert!(ENABLED.starts_with("02"));
-        }
-
-        #[test]
         fn task_manager_switching_the_app_off_reads_as_off() {
-            let off = "\r\nHKEY_CURRENT_USER\\...\\StartupApproved\\Run\r\n    \
-                       Asli    REG_BINARY    03000000EEFC1B8A2FA5DC01\r\n\r\n";
-            assert!(!reads_as_enabled(off, "Asli"));
+            let off = "\r\nHKEY_CURRENT_USER\\...\\StartupApproved\\StartupFolder\r\n    \
+                       Asli.lnk    REG_BINARY    03000000EEFC1B8A2FA5DC01\r\n\r\n";
+            assert!(!reads_as_enabled(off, "Asli.lnk"));
 
-            let on = "\r\n    Asli    REG_BINARY    020000000000000000000000\r\n";
-            assert!(reads_as_enabled(on, "Asli"));
+            let on = "\r\n    Asli.lnk    REG_BINARY    020000000000000000000000\r\n";
+            assert!(reads_as_enabled(on, "Asli.lnk"));
         }
 
         #[test]
         fn an_unreadable_listing_does_not_claim_the_setting_is_off() {
-            for listing in ["", "\r\nHKEY_CURRENT_USER\\...\\Run\r\n", "    Asli    REG_BINARY"] {
+            for listing in [
+                "",
+                "\r\nHKEY_CURRENT_USER\\...\\Run\r\n",
+                "    Asli    REG_BINARY",
+            ] {
                 assert!(reads_as_enabled(listing, "Asli"), "for {listing:?}");
             }
         }
@@ -703,6 +721,91 @@ mod startup_approved {
         fn another_entry_whose_name_starts_the_same_is_not_mistaken_for_ours() {
             let other = "\r\n    AsliOther    REG_BINARY    030000000000000000000000\r\n";
             assert!(reads_as_enabled(other, "Asli"));
+        }
+    }
+}
+
+/// The PowerShell that writes and reads the Startup folder shortcut.
+///
+/// Pure text handling, so it is compiled and tested on every platform even though only Windows
+/// uses it.
+#[cfg(any(target_os = "windows", test))]
+mod shortcut {
+    /// Quotes a path as a single quoted PowerShell string.
+    ///
+    /// Single quotes because PowerShell expands `$` and treats the backtick as an escape inside
+    /// double quotes, and a Windows path is full of neither but a user name can hold anything. In
+    /// a single quoted string the only character with a meaning is the quote itself, which is
+    /// written twice.
+    pub fn ps_quote(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+
+    /// Creates the shortcut, pointing at the binary with the `tray` argument.
+    pub fn create_script(lnk: &str, target: &str, working: &str) -> String {
+        format!(
+            "$ErrorActionPreference = 'Stop'; \
+             $s = (New-Object -ComObject WScript.Shell).CreateShortcut({}); \
+             $s.TargetPath = {}; \
+             $s.Arguments = 'tray'; \
+             $s.WorkingDirectory = {}; \
+             $s.Description = 'Encrypted clipboard sync across your own machines'; \
+             $s.Save()",
+            ps_quote(lnk),
+            ps_quote(target),
+            ps_quote(working)
+        )
+    }
+
+    /// Prints the program the shortcut opens, and nothing else.
+    pub fn read_script(lnk: &str) -> String {
+        format!(
+            "$ErrorActionPreference = 'Stop'; \
+             Write-Output (New-Object -ComObject WScript.Shell).CreateShortcut({}).TargetPath",
+            ps_quote(lnk)
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_shortcut_starts_the_tray_from_its_own_directory() {
+            let script = create_script(
+                r"C:\Users\v\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Asli.lnk",
+                r"C:\Users\v\AppData\Local\Programs\Asli\asliw.exe",
+                r"C:\Users\v\AppData\Local\Programs\Asli",
+            );
+            assert!(script
+                .contains(r"$s.TargetPath = 'C:\Users\v\AppData\Local\Programs\Asli\asliw.exe'"));
+            assert!(
+                script.contains("$s.Arguments = 'tray'"),
+                "login should start the tray"
+            );
+            assert!(script.contains("$s.Save()"));
+            assert!(
+                script.contains("$ErrorActionPreference = 'Stop'"),
+                "a failure must not exit zero and look like success"
+            );
+        }
+
+        #[test]
+        fn a_quote_in_a_user_name_cannot_end_the_string_early() {
+            assert_eq!(
+                ps_quote(r"C:\Users\o'brien\asliw.exe"),
+                r"'C:\Users\o''brien\asliw.exe'"
+            );
+            let script = create_script(r"C:\a'b.lnk", r"C:\o'dd\asliw.exe", r"C:\o'dd");
+            assert!(script.contains(r"'C:\o''dd\asliw.exe'"));
+            assert_eq!(script.matches("$s.Save()").count(), 1);
+        }
+
+        #[test]
+        fn reading_prints_the_target_and_nothing_else() {
+            let script = read_script(r"C:\Startup\Asli.lnk");
+            assert!(script.contains(".TargetPath"));
+            assert!(!script.contains("Save"));
         }
     }
 }

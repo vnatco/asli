@@ -48,10 +48,13 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir = if ($env:ASLI_INSTALL_DIR) { $env:ASLI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\Asli' }
 $Shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Asli.lnk'
-$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-# Explorer's record of which Run entries it will actually start at login. Written beside the Run
-# value, so it has to be removed beside it too.
-$ApprovedKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+$StartupShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Asli.lnk'
+# Where earlier builds put the login entry. Explorer never started it, so it is removed on
+# uninstall rather than left behind looking like it works.
+$LegacyRunKeys = @(
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+)
 $Binaries = @('asli.exe', 'asliw.exe')
 
 function Write-Info { param([string]$Message) Write-Host "==> $Message" -ForegroundColor White }
@@ -253,12 +256,18 @@ function Invoke-Uninstall {
         Write-Ok 'Start menu shortcut removed'
     }
 
-    foreach ($key in @($RunKey, $ApprovedKey)) {
+    if (Test-Path $StartupShortcut) {
+        Write-Info "Removing $StartupShortcut"
+        if (-not $DryRun) { Remove-Item $StartupShortcut -Force }
+        Write-Ok 'launch at login shortcut removed'
+    }
+
+    foreach ($key in $LegacyRunKeys) {
         $entry = Get-ItemProperty -Path $key -Name 'Asli' -ErrorAction SilentlyContinue
         if ($entry) {
-            Write-Info "Removing the launch at login entry from $key"
+            Write-Info "Removing the old registry entry from $key"
             if (-not $DryRun) { Remove-ItemProperty -Path $key -Name 'Asli' }
-            Write-Ok 'autostart entry removed'
+            Write-Ok 'old autostart entry removed'
         }
     }
 
