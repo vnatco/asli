@@ -44,12 +44,6 @@ png = "0.18"
 # Default features give Windows Credential Manager, macOS Keychain and Linux Secret Service over
 # pure Rust zbus, which is exactly the set we want and no native libdbus build dependency.
 keyring = "4"
-# Menu definitions. Default features pull gtk3 and libxdo; this project deliberately has no GTK
-# anywhere, so they stay off.
-muda = { version = "0.20", default-features = false }
-# The tray. The ksni feature is a pure Rust StatusNotifierItem implementation, replacing the
-# default libappindicator and libxdo backends, which is what keeps GTK out of the dependency tree.
-tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The compiled window markup. A crate of its own so this one keeps `forbid(unsafe_code)`: Slint's
@@ -76,10 +70,25 @@ zeroize = "1"
 # notifications go through osascript instead. See src/notify.rs.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 notify-rust = "4"
+# Menu definitions. Default features pull gtk3 and libxdo; this project deliberately has no GTK
+# anywhere, so they stay off.
+muda = { version = "0.20", default-features = false }
+# The tray. The ksni feature is a pure Rust StatusNotifierItem implementation, replacing the
+# default libappindicator and libxdo backends, which is what keeps GTK out of the dependency tree.
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
 
 # Only to hide the Dock icon when run without a bundle. Already in the tree through the macOS
 # clipboard backend, so this adds features, not crates.
 [target.'cfg(target_os = "macos")'.dependencies]
+# One version behind the other platforms, deliberately, and it must stay that way until Slint
+# moves: `i-slint-backend-winit` builds muda 0.19 for the macOS menu bar, and muda defines the
+# Objective-C class `MudaMenuDelegate`. A second copy from muda 0.20 is the same class name
+# registered twice, which the release build (`lto = true`) refuses outright with "symbol multiply
+# defined", and which without LTO would leave the runtime to pick one of the two and the tray menu
+# to dispatch through whichever it picked. So on macOS everything shares Slint's copy. No ksni
+# here: that backend is for Linux, and macOS uses NSStatusItem either way.
+muda = { version = "0.19", default-features = false }
+tray-icon = { version = "0.24", default-features = false }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
