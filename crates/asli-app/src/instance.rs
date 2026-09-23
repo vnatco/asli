@@ -55,7 +55,15 @@ fn open_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    // A lock file from an older version already exists with whatever the umask gave it, and the
+    // mode above only applies at creation. Repaired here, so upgrading is enough.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
 }
 
 /// Tries to become the one running daemon for these paths.
