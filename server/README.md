@@ -67,7 +67,8 @@ nonsense value. The defaults are the public relay's.
 | `HOST` | 0.0.0.0 | Listen address |
 | `METRICS_PORT` | 9090 | Prometheus style counters, bound to loopback. Set to 0 to disable |
 | `LOG_LEVEL` | info | debug, info, warn or error |
-| `MAX_FRAME_BYTES` | 1 MiB | Largest accepted WebSocket frame |
+| `MAX_FRAME_BYTES` | 1 MiB | Largest accepted WebSocket frame, once the session is authenticated |
+| `HANDSHAKE_FRAME_BYTES` | 4 KiB | Frame cap before authentication. `hello` is under 200 bytes and `auth` a little over 300 |
 | `MAX_CONTENT_BYTES` | 700 KiB | Content cap announced to clients. Base64 expansion is why it is not 1 MiB |
 | `RETAIN_MAX_BYTES` | 64 KiB | Messages above this are forwarded live but never stored |
 | `RETAIN_GLOBAL_BUDGET_BYTES` | 256 MiB | Ceiling across all rooms, with least recently used eviction |

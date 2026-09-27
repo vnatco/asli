@@ -119,6 +119,12 @@ it becomes a data bug. The relay responds to such a message with close code 4005
 Receivers MUST check the frame size before parsing. Parsing a 1 MiB hostile JSON document in order to
 then reject it is the mistake this rule exists to prevent.
 
+A relay SHOULD apply a tighter cap until a connection has authenticated. `hello` is under 200 bytes
+and `auth` a little over 300, so a connection that has done nothing but open a socket has no reason
+to send a full sized frame. The public relay uses 4 KiB (`HANDSHAKE_FRAME_BYTES`) for the
+`connected` and `challenged` states and `max_frame_bytes` only once the session is `ready`. A client
+never notices: no conforming handshake message comes close to the smaller cap.
+
 ### 3.2 Binary framing, reserved
 
 A future version MAY negotiate `bin1` in `hello` (section 7.1). `bin1` is a fixed binary layout, not
@@ -960,6 +966,7 @@ failure results in the message being discarded.
 | 2 | `device_id` is not this device's own `device_id` | The relay excludes the sender, but a malicious relay may not. This is the last line against a self echo loop |
 | 3 | `msg_id` has not been seen. Maintain an LRU set of the **last 256** `msg_id` values | Authoritative anti replay, and it doubles as the loop prevention the design requires |
 | 4 | `seq` is strictly greater than the highest `seq` already accepted from this `device_id` | Detects a relay replaying or rolling back one device's messages |
+| 4b | `seq` is no more than 1000000 above the highest already accepted from this `device_id`, once that device is known. Refuse without recording | Without it, one clip claiming a peer's `device_id` with `seq = 2^64 - 1` parks that peer's persisted mark out of reach and stops it syncing everywhere, across restarts, permanently. The bound does not apply to the first clip from an unknown device: there is no mark to jump from, and refusing against a baseline of zero would lock out an honest peer that advanced a long way before this device was added |
 | 5 | For a live message, `now - ts_ms <= 86400000` (24 hours) | A sanity bound on how stale an applied clip can be, wide enough that no clock or time zone mistake short of a day breaks sync |
 | 6 | For a message marked `retained`, the age window extends to the relay's retention period instead | A retained clip is legitimately old |
 | 7 | `ts_ms` no more than 86400000 ms (24 hours) in the future | Clock skew tolerance. `ts_ms` is advisory; `seq` and `msg_id` carry the security weight |
@@ -970,7 +977,15 @@ forgets it on restart can be sent an old clip in the gap, which a tight time win
 the only thing to stop. That is how version 1 clients first worked, with windows of 120 seconds
 and 60 seconds, and it made sync depend on every device's clock being right: a device showing the
 correct local time in the wrong time zone is hours off, and every clip to and from it was
-dropped. A client SHOULD store this state per room and discard it when its account changes.
+dropped. A client SHOULD store this state per room and discard it when its account changes. It MUST also
+bound the number of `device_id` values it tracks, because `device_id` is chosen by the sender and
+an account member can otherwise mint them without limit; the reference client keeps 64 and evicts
+the oldest.
+
+Note the limit of checks 4 and 4b, honestly. Every device in a room shares one signing key, so a
+forged `seq` from a room member is indistinguishable from an honest one, and the bound limits the
+damage rather than preventing it. Per device signing keys would fix it, along with the
+unauthenticated `announce` of section 7.12, and both are left to a future version.
 
 A receiver still running the old windows is compatible with one running these, since nothing on
 the wire changed: it is only less tolerant of clocks.
@@ -1035,7 +1050,8 @@ explicitly out of scope.
 
 | Limit | Public relay default | Enforced by |
 |---|---|---|
-| `max_frame_bytes` | 1 MiB | The WebSocket layer, before JSON parsing |
+| `max_frame_bytes` | 1 MiB | The WebSocket layer, before JSON parsing, once authenticated |
+| Handshake frame cap | 4 KiB | The relay, before JSON parsing, until the session is `ready` |
 | `max_content_bytes` | 700 KiB | The client, at capture time |
 | Base64 expansion | 4/3 | Why the two numbers above differ |
 
