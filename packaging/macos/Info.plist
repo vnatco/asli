@@ -10,8 +10,14 @@
 	<string>dev.vnat.asli</string>
 	<key>CFBundleExecutable</key>
 	<string>asli</string>
+	<!-- Contents/Resources/asli.icns, rendered from packaging/linux/asli.svg. -->
+	<key>CFBundleIconFile</key>
+	<string>asli</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<!-- Both versions are rewritten from Cargo.toml by build-installer.sh. -->
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>

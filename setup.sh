@@ -225,6 +225,8 @@ install_macos_bundle() {
     run mkdir -p "$MAC_APP/Contents/MacOS"
     run install -m 755 "$built" "$MAC_APP/Contents/MacOS/asli"
     run install -m 644 "$REPO_ROOT/packaging/macos/Info.plist" "$MAC_APP/Contents/Info.plist"
+    run mkdir -p "$MAC_APP/Contents/Resources"
+    run install -m 644 "$REPO_ROOT/packaging/macos/asli.icns" "$MAC_APP/Contents/Resources/asli.icns"
     # Apple Silicon refuses to run unsigned code, and a bundle whose contents changed needs its
     # signature redone. An ad hoc signature is local only and proves nothing to anyone else, which
     # is fine for a build made on this Mac.
