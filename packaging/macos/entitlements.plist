@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the signed Asli.app, applied with the hardened runtime by build-installer.sh.
+
+  Empty on purpose. Every hardened runtime entitlement is an exception that switches a protection
+  back off, and Asli needs none of them: it is native code with no JIT (no allow-jit, no
+  allow-unsigned-executable-memory), loads no third party plug-ins (no
+  disable-library-validation), reads no DYLD_ variables (no allow-dyld-environment-variables), and
+  sends no Apple Events to other applications (notifications come from osascript displaying its
+  own). It is not sandboxed, so network access and the keychain need no entitlement either.
+
+  If a future change needs one, add it here with the reason beside it.
+-->
+<plist version="1.0">
+<dict/>
+</plist>
