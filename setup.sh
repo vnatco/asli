@@ -172,23 +172,15 @@ ensure_node() {
     fi
 }
 
-# Freedesktop locations for the application entry and its icon, so the window and the task
-# manager show the Asli mark rather than a generic one. Without these the icon works only on a
-# machine where somebody copied them by hand.
-readonly DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-readonly DESKTOP_ENTRY="$DATA_HOME/applications/asli.desktop"
-readonly ICON_FILE="$DATA_HOME/icons/hicolor/scalable/apps/asli.svg"
-readonly AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+# On Linux, installing and removing is packaging/linux/install.sh, the same script the AppImage
+# runs, so a source build and a downloaded one install identically.
+readonly LINUX_INSTALLER="$REPO_ROOT/packaging/linux/install.sh"
 # On macOS the binary lives inside an application bundle, so the system reads its Info.plist:
 # that is what keeps a menu bar app out of the Dock and gives it a name in permission prompts.
 readonly MAC_APP="${ASLI_MAC_APP:-$HOME/Applications/Asli.app}"
-# macOS keeps a user's application logs in ~/Library/Logs, Linux in the XDG state directory. The
-# same file either way, and the same one the login agent writes to, so there is one log to read.
-if [ "$(uname -s)" = "Darwin" ]; then
-    readonly LOG_DIR="$HOME/Library/Logs/Asli"
-else
-    readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/asli"
-fi
+# macOS keeps a user's application logs in ~/Library/Logs, the same file the login agent writes
+# to, so there is one log to read.
+readonly LOG_DIR="$HOME/Library/Logs/Asli"
 
 # Stops every running copy, so the new binary is what runs next. Matched on the exact process
 # name, never on a command line, which would also match this script's own shell.
@@ -201,13 +193,12 @@ stop_running() {
     fi
 }
 
-# Starts the tray detached from this terminal, so closing the terminal does not end it.
+# Starts the menu bar app detached from this terminal, so closing the terminal does not end it.
 start_tray() {
-    local os="$1"
     info "Starting Asli"
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '  would start the tray\n'
-    elif [ "$os" = "macos" ]; then
+    else
         mkdir -p "$LOG_DIR"
         # Started the way login starts it, through the agent, so the install exercises the same
         # path and its output lands in the same log. `open` is the fallback for a machine with
@@ -224,10 +215,6 @@ start_tray() {
         else
             open "$MAC_APP" --args tray
         fi
-    else
-        # Logged to a file rather than discarded, so there is something to read when it misbehaves.
-        mkdir -p "$LOG_DIR"
-        nohup "$INSTALL_DIR/asli" tray >"$LOG_DIR/asli.log" 2>&1 &
     fi
     ok "Asli is running. Look for its icon in the tray or menu bar."
 }
@@ -249,84 +236,25 @@ install_macos_bundle() {
     ok "Asli.app installed, and $INSTALL_DIR/asli links into it"
 }
 
-# Tells the desktop about new or removed entries. Every one of these is optional: a desktop that
-# lacks the tool picks the change up at next login instead.
-refresh_desktop_caches() {
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        run update-desktop-database -q "$DATA_HOME/applications" || true
-    fi
-    if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -e "$DATA_HOME/icons/hicolor/index.theme" ]; then
-        run gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" || true
-    fi
-    if command -v kbuildsycoca6 >/dev/null 2>&1; then
-        run kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
-    fi
-}
-
-# Quotes a program path for a desktop entry Exec= line, the same way the app does. Percent signs
-# are doubled everywhere; inside quotes the quote, backtick, dollar sign and backslash are escaped,
-# and every backslash is then doubled again because the value itself is an escaped string.
-desktop_exec_quote() {
-    local path="${1//%/%%}"
-    case "$1" in
-        *[[:space:]\"\'\\\<\>~\|\&\;\$\*\?#\(\)\`]*) ;;
-        *) printf '%s' "$path"; return ;;
-    esac
-    local bs=$'\\' out='' c i
-    for (( i = 0; i < ${#path}; i++ )); do
-        c="${path:i:1}"
-        case "$c" in
-            "$bs") out+="$bs$bs$bs$bs" ;;
-            '"'|'`'|'$') out+="$bs$bs$c" ;;
-            *) out+="$c" ;;
-        esac
-    done
-    printf '"%s"' "$out"
-}
-
 do_install() {
     local os="$1"
     local built="$REPO_ROOT/target/release/asli"
     [ -x "$built" ] || [ "$DRY_RUN" -eq 1 ] || die "no binary at $built. The build step should have produced it."
 
+    if [ "$os" = "linux" ]; then
+        local args=(--binary "$built")
+        [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+        "$LINUX_INSTALLER" "${args[@]}" || die "the install failed. The output above says why."
+        return
+    fi
+
     info "Installing"
     stop_running
-    if [ "$os" = "macos" ]; then
-        install_macos_bundle "$built"
-    else
-        run mkdir -p "$INSTALL_DIR"
-        run install -m 755 "$built" "$INSTALL_DIR/asli"
-        ok "binary installed at $INSTALL_DIR/asli"
-    fi
-
-    if [ "$os" = "linux" ]; then
-        run mkdir -p "$(dirname "$ICON_FILE")" "$(dirname "$DESKTOP_ENTRY")"
-        run install -m 644 "$REPO_ROOT/packaging/linux/asli.svg" "$ICON_FILE"
-        # The packaged entry says Exec=asli, which relies on PATH. The installed one names the
-        # binary exactly, because ~/.local/bin is not on PATH in every session. Written line by
-        # line rather than with sed, so a path containing & or | cannot corrupt the replacement,
-        # and quoted, so a path with a space is still one argument.
-        if [ "$DRY_RUN" -eq 1 ]; then
-            printf '  would write: %s\n' "$DESKTOP_ENTRY"
-        else
-            local program line
-            program="$(desktop_exec_quote "$INSTALL_DIR/asli")"
-            while IFS= read -r line || [ -n "$line" ]; do
-                case "$line" in
-                    "Exec=asli "*) printf 'Exec=%s %s\n' "$program" "${line#Exec=asli }" ;;
-                    *) printf '%s\n' "$line" ;;
-                esac
-            done < "$REPO_ROOT/packaging/linux/asli.desktop" > "$DESKTOP_ENTRY"
-            chmod 644 "$DESKTOP_ENTRY"
-        fi
-        refresh_desktop_caches
-        ok "application entry and icon installed"
-    fi
+    install_macos_bundle "$built"
 
     # The binary writes the entry itself, so it points at the installed copy, and it is the same
-    # code that runs every time the tray starts. On macOS that is the copy inside the bundle.
-    local installed="$INSTALL_DIR/asli"
-    [ "$os" = "macos" ] && installed="$MAC_APP/Contents/MacOS/asli"
+    # code that runs every time the tray starts: the copy inside the bundle.
+    local installed="$MAC_APP/Contents/MacOS/asli"
     run "$installed" autostart on || warn "could not enable launch at login. Run 'asli autostart on' later."
 
     case ":$PATH:" in
@@ -335,55 +263,35 @@ do_install() {
     esac
 
     printf '\n'
-    start_tray "$os"
+    start_tray
     printf '  It also starts by itself at login.\n'
-    if [ "$os" = "windows" ]; then
-        printf '  To watch its log, quit it from the menu and run: %s tray\n' "$installed"
-    else
-        printf '  Its log, now and at every login: %s\n' "$LOG_DIR/asli.log"
-    fi
-    if [ "$os" = "macos" ]; then
-        printf '  If macOS ever asks whether Asli may paste from other apps, choose Allow, or it\n'
-        printf '  cannot send what you copy on this Mac. It still receives either way.\n'
-    fi
+    printf '  Its log, now and at every login: %s\n' "$LOG_DIR/asli.log"
+    printf '  If macOS ever asks whether Asli may paste from other apps, choose Allow, or it\n'
+    printf '  cannot send what you copy on this Mac. It still receives either way.\n'
 }
 
 do_uninstall() {
+    local os="$1"
+    if [ "$os" = "linux" ]; then
+        local args=(--uninstall)
+        [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+        "$LINUX_INSTALLER" "${args[@]}"
+        return
+    fi
+
     stop_running
 
     local target="$INSTALL_DIR/asli"
     if [ -e "$target" ] || [ -L "$target" ]; then
         info "Removing $target"
         run rm -f "$target"
-        ok "binary removed"
-    else
-        ok "nothing installed at $target"
+        ok "link removed"
     fi
-
-    # The second name is what builds before this one wrote, so an older install is cleaned too.
-    local autostart
-    for autostart in "$AUTOSTART_DIR/asli.desktop" "$AUTOSTART_DIR/dev.vnat.asli.desktop"; do
-        if [ -e "$autostart" ]; then
-            info "Removing autostart entry $autostart"
-            run rm -f "$autostart"
-            ok "autostart entry removed"
-        fi
-    done
-
-    local removed_entry=0
-    local file
-    for file in "$DESKTOP_ENTRY" "$ICON_FILE"; do
-        if [ -e "$file" ]; then
-            info "Removing $file"
-            run rm -f "$file"
-            removed_entry=1
-        fi
-    done
-    [ "$removed_entry" -eq 1 ] && refresh_desktop_caches && ok "application entry and icon removed"
 
     local agent="$HOME/Library/LaunchAgents/dev.vnat.asli.plist"
     if [ -e "$agent" ]; then
         info "Removing launch agent $agent"
+        [ "$DRY_RUN" -eq 1 ] || launchctl bootout "gui/$(id -u)/dev.vnat.asli" 2>/dev/null || :
         run rm -f "$agent"
         ok "launch agent removed"
     fi
@@ -409,7 +317,7 @@ main() {
     [ "$DRY_RUN" -eq 1 ] && info "Dry run: nothing will be changed."
 
     if [ "$DO_UNINSTALL" -eq 1 ]; then
-        do_uninstall
+        do_uninstall "$os"
         exit 0
     fi
 
