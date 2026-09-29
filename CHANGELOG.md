@@ -42,8 +42,33 @@ Nothing is tagged yet and there are no downloads. What exists today:
   stays out of the Dock. Type checked from Linux; not yet run on a Mac.
 - `setup.sh --install` stops a running copy and starts the new one, so it also updates.
 
+### Added
+
+- Installers, one build script per operating system, each writing into `dist/` with the version
+  and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,
+  and `packaging/release.sh` uploads the result to a draft GitHub release.
+  - Linux: an AppImage that installs itself for the current user when opened, and starts Asli;
+    a `.deb`, an `.rpm` and a tarball, all from one machine with no containers. The binary is built
+    against glibc 2.28, so it runs on Debian 10, Ubuntu 18.10, RHEL 8 and anything newer rather
+    than only on the distribution that built it.
+  - Windows: a per user installer, with no administrator prompt, that installs both executables,
+    adds the Start menu entry, turns on start at login, registers an uninstaller in Settings, Apps,
+    and starts Asli. Unsigned, so SmartScreen warns once.
+  - macOS: a universal disk image for Apple silicon and Intel, signed with a Developer ID,
+    notarized and stapled when the signing variables are set.
+- The macOS bundle has an icon, `asli.icns`, in the installer and in `setup.sh --install` alike.
+
 ### Changed
 
+- Windows builds link the C runtime statically, so they start on a machine without the Visual C++
+  redistributable.
+- On Linux, `setup.sh --install` and `--uninstall` now run `packaging/linux/install.sh`, the same
+  script the AppImage runs, and install a copy of it at `~/.local/share/asli/install.sh` so
+  uninstalling needs nothing else.
+- The Linux login and menu entries name the program in `TryExec`, so a desktop ignores them once the
+  program has been removed, as a package manager removing the `.deb` or `.rpm` leaves them behind.
+- The Arch packages install the icon their menu entry names, depend on fontconfig, and `asli-bin`
+  follows the new tarball name. It is x86_64 only, since no aarch64 tarball is built.
 - The window is redesigned throughout: its own title bar, a sidebar with icons and the sync state
   at its foot, a welcome screen with two ways in, a join screen with a way back, a status card
   whose colour, label and action follow the connection, and new icons for the application and the
@@ -146,8 +171,16 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - The macOS backend. Same position: no AppKit call in it has been observed running, and the
   behaviour of the macOS 15.4 pasteboard alert is inferred from documentation rather than observed.
 
+- The installer build scripts on real hardware. The Linux one has run, and its AppImage installed,
+  started and uninstalled in an isolated session on Arch. The Windows installer has only been
+  compiled and run under Wine, from a cross built binary, and `build-installer.ps1` has not run on
+  Windows. The macOS script has not run at all: no signing, notarization or disk image has been
+  made yet.
+
 ### Known gaps
 
 - No release has been tagged, so no artifact has been published.
+- Dragging Asli to the Trash on macOS leaves its launchd agent behind, pointing at nothing. It
+  starts nothing, but it stays until removed by hand or Start at login is turned off first.
 - macOS on real hardware, including the three pasteboard permission questions.
 - No libsodium interop check yet; the frozen vectors pin our own output only.

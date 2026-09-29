@@ -53,7 +53,11 @@ Where things land:
 |---|---|---|---|
 | Binary | `~/.local/bin/asli` (`ASLI_INSTALL_DIR` overrides) | `%LOCALAPPDATA%\Programs\Asli\` (`ASLI_INSTALL_DIR` overrides) | `~/Applications/Asli.app` (`ASLI_MAC_APP` overrides), linked from `~/.local/bin/asli` |
 | Menu entry | `~/.local/share/applications/asli.desktop` and the icon beside it in `hicolor` | Start menu shortcut | The bundle itself, in Applications |
-| Launch at login | `~/.config/autostart/asli.desktop` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Asli` | `~/Library/LaunchAgents/dev.vnat.asli.plist` |
+| Launch at login | `~/.config/autostart/asli.desktop` | `Asli.lnk` in the Startup folder | `~/Library/LaunchAgents/dev.vnat.asli.plist` |
+| Uninstaller | `~/.local/share/asli/install.sh --uninstall` | `.\setup.ps1 -Uninstall` | `./setup.sh --uninstall` |
+
+On Linux the install itself is `packaging/linux/install.sh`, the same script the AppImage runs, so a
+source build and a downloaded one install identically.
 
 `--install` stops a copy that is already running and starts the new one, so it is also how you
 update. On macOS the bundle gets an ad hoc signature, which Apple Silicon requires to run it and which
@@ -68,9 +72,17 @@ cargo build --release -p asli-app
 The binary is `target/release/asli` (`asli.exe` on Windows). On Linux it is a single file whose only
 runtime requirement is a D-Bus session for the tray.
 
+On Windows the C runtime is linked statically (`.cargo/config.toml`), so the executables run on a
+machine without the Visual C++ redistributable. A `RUSTFLAGS` variable replaces that setting.
+
 On Windows, add `--features windowed` to also get `asliw.exe`, the identical program linked as a
 windowed application, so that starting it at login does not open a console. `asli.exe` is the one to
 use from a terminal, and the only one whose log you can see. The setup script builds both.
+
+### Release installers
+
+The AppImage, `.deb`, `.rpm`, Windows installer and macOS disk image are built by one script per
+operating system under `packaging/`. `packaging/README.md` has the whole flow.
 
 ## 5. Tests, and why they are not enough
 
