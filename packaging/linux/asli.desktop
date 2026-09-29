@@ -5,6 +5,8 @@ GenericName=Clipboard Sync
 Comment=Keep the clipboard in sync across your own machines, end to end encrypted
 # The tray is the front door, so this launches the tray and not the headless daemon.
 Exec=asli tray
+# Hides the entry once the program is gone. install.sh rewrites both lines to the installed path.
+TryExec=asli
 # Must match the app id the window declares in crates/asli-app/src/window.rs, which is also this
 # file's basename. If the three ever disagree, the window loses its icon on Wayland.
 Icon=asli

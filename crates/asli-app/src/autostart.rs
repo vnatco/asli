@@ -161,17 +161,32 @@ mod platform {
         out.replace("%%", "%")
     }
 
+    /// Escapes a path for a plain string value such as `TryExec=`, where only the backslash and
+    /// leading space mean anything, unlike `Exec=`, which is a command line.
+    fn string_value(path: &str) -> String {
+        let escaped = path.replace('\\', "\\\\");
+        match escaped.strip_prefix(' ') {
+            Some(rest) => format!("\\s{rest}"),
+            None => escaped,
+        }
+    }
+
+    /// The entry, with `TryExec` naming the binary, so that the entry does nothing at login once
+    /// the program is gone. Removing a package deletes the binary but cannot reach a file in each
+    /// user's home, and without this that file would go on trying to start a missing program.
     fn contents(exe: &str) -> String {
         format!(
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=Asli\n\
              Comment=Encrypted clipboard sync across your own machines\n\
+             TryExec={}\n\
              Exec={} tray\n\
              Icon=asli\n\
              Terminal=false\n\
              Categories=Utility;\n\
              X-GNOME-Autostart-enabled=true\n",
+            string_value(exe),
             exec_quote(exe)
         )
     }
@@ -251,6 +266,10 @@ mod platform {
                 "a tray app must not open a terminal at login"
             );
             assert!(text.contains(" tray\n"), "login should start the tray");
+            assert!(
+                text.contains("TryExec=/usr/bin/asli\n"),
+                "a removed binary must leave an entry that starts nothing"
+            );
             assert!(is_enabled_in(&dir));
 
             set_enabled_in(&dir, false, "/usr/bin/asli").expect("disables");
