@@ -348,7 +348,10 @@ mod tests {
         // The attack: one clip claiming that device's id at the ceiling. Left unchecked it parks
         // the high water mark where no genuine clip can ever reach it, permanently and across
         // restarts.
-        assert_eq!(g.check(&clip(2, THEIRS, u64::MAX, NOW), NOW), Verdict::SeqJump);
+        assert_eq!(
+            g.check(&clip(2, THEIRS, u64::MAX, NOW), NOW),
+            Verdict::SeqJump
+        );
 
         // The mark must be untouched, so the device keeps syncing normally afterwards.
         assert_eq!(g.check(&clip(3, THEIRS, 6, NOW), NOW), Verdict::Accept);

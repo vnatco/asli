@@ -16,8 +16,8 @@ use crate::daemon::Controls;
 use crate::error::{Error, Result};
 use crate::{autostart, daemon, instance, notify, qr, secrets, tray};
 use asli_crypto::{token, Identity};
-use zeroize::Zeroizing;
 use clap::{Parser, Subcommand};
+use zeroize::Zeroizing;
 
 /// One clipboard, every machine.
 #[derive(Debug, Parser)]
