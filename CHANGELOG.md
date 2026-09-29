@@ -89,6 +89,16 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- The Windows installer's Start menu entry failed with "Windows can't find ..." and had no icon.
+  NSIS wrote it with an environment variable block naming the target as `%USERPROFILE%\...`, which
+  Windows preferred to the real path and could not resolve. Every shortcut is now written by
+  `asli.exe` itself, the same code as the working Startup entry, and read back and checked after
+  writing, at the end of the install, and when the installer is built.
+- The Startup shortcut stored its icon location as `,0`, with no path. It names `asliw.exe` now.
+- On a dark Start menu or taskbar the Windows icon was a near black tile at small sizes. Its 16 to
+  48 pixel sizes are now drawn for contrast, a bright tile with a light mark, and the running
+  window uses them rather than scaling down the 256 pixel picture.
+
 - `asli join` no longer takes the token as a command line argument. `/proc/<pid>/cmdline` is
   world readable on Linux, so any other local user could read the account key out of the process
   list while a join was running, and the shell wrote it to its history file as well. The token is

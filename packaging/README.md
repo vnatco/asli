@@ -108,13 +108,13 @@ Every installer carries the Asli mark, all of it rendered from `linux/asli.svg`:
 
 | File | Used by |
 |---|---|
-| `windows/asli.ico` | Compiled into `asli.exe` and `asliw.exe`, the installer and uninstaller icon, the Apps entry |
+| `windows/asli.ico` | Compiled into `asli.exe` and `asliw.exe`, the installer and uninstaller icon, the Apps entry, the running window. Its 16 to 48 pixel sizes are separate high contrast art |
 | `windows/installer-sidebar.bmp` | The picture on the installer's first and last pages, from `windows/installer-sidebar.svg` |
 | `macos/asli.icns` | The app bundle and the mounted disk image |
 | `linux/asli.svg`, `icons/asli-256.png` | The menu entry in every Linux package, and the AppImage's own icon |
 
-`icons/render.sh` renders the `.icns` and the sidebar picture again after the mark changes. The
-`.ico` and the 256 pixel PNG were made by hand from the same SVG.
+`icons/render.sh` renders the `.ico`, the `.icns` and the sidebar picture again after the mark
+changes. The 256 pixel PNG was made by hand from the same SVG.
 
 ## Untested, stated plainly
 
