@@ -8,9 +8,10 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/vnatco/asli"
 license=('MIT')
 # The tray speaks StatusNotifierItem over D-Bus directly, so there is no GTK, no appindicator and no
-# webview to depend on. A running D-Bus session is the only runtime requirement, which is unusual
-# in this category and is the reason this package is as small as it is.
-depends=('dbus')
+# webview to depend on. A running D-Bus session, and fontconfig for the window's text, are the only
+# runtime requirements, which is unusual in this category and is why this package is as small as
+# it is.
+depends=('dbus' 'fontconfig')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # Replace with real sums before publishing: run updpkgsums in this directory.
@@ -45,5 +46,8 @@ package() {
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 packaging/linux/asli.desktop "$pkgdir/usr/share/applications/asli.desktop"
+  # Icon=asli in the entry needs an icon of that name, or the menu shows a generic one.
+  install -Dm644 packaging/linux/asli.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/asli.svg"
+  install -Dm644 packaging/icons/asli-256.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/asli.png"
   install -Dm644 packaging/linux/systemd/asli.service "$pkgdir/usr/lib/systemd/user/asli.service"
 }

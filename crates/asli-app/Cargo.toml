@@ -105,12 +105,30 @@ embed-resource = "3"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 # The crate is asli-app but the binary and the product are both asli, and the crate name is what
-# cargo-deb would otherwise put in dpkg -l.
+# cargo-deb would otherwise put in dpkg -l. packaging/linux/build-installer.sh builds the package.
 [package.metadata.deb]
 name = "asli"
-maintainer-scripts = []
+maintainer = "vnatco <contact@vnat.co>"
+section = "utils"
+priority = "optional"
+extended-description = """\
+A tray app that keeps the clipboard in sync across your own computers, over the internet, end to \
+end encrypted. The relay it talks to only ever sees ciphertext."""
+# Written out rather than worked out by dpkg-shlibdeps, which exists only on Debian and would tie
+# building the package to one distribution. The binary is linked against glibc 2.28 and names
+# fontconfig and nothing else; a D-Bus session is what the tray needs at runtime.
+depends = "libc6 (>= 2.28), libfontconfig1, dbus"
 assets = [
     ["target/release/asli", "usr/bin/", "755"],
     ["../../README.md", "usr/share/doc/asli/README.md", "644"],
     ["../../LICENSE", "usr/share/doc/asli/LICENSE", "644"],
+    ["../../packaging/linux/asli.desktop", "usr/share/applications/asli.desktop", "644"],
+    ["../../packaging/linux/asli.svg", "usr/share/icons/hicolor/scalable/apps/asli.svg", "644"],
+    ["../../packaging/icons/asli-256.png", "usr/share/icons/hicolor/256x256/apps/asli.png", "644"],
+    ["../../packaging/linux/systemd/asli.service", "usr/lib/systemd/user/asli.service", "644"],
 ]
+
+# The RPM is described in packaging/linux/rpm-metadata.toml. cargo-generate-rpm refuses to read
+# that file unless this table exists, so it is here and nearly empty.
+[package.metadata.generate-rpm]
+name = "asli"

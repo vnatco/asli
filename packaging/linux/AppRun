@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# What runs when the Asli AppImage is opened.
+#
+# It installs rather than running in place, because a clipboard sync tool has to start at login,
+# and a login entry that points inside an AppImage breaks the moment the file is moved or the
+# mount it ran from goes away. So it hands its binary to install.sh, the same script
+# `setup.sh --install` uses, which installs it under ~/.local, registers the menu entry, the icon
+# and start at login, and starts it. Opening the AppImage again reinstalls only if the version
+# differs, then brings the running window forward.
+#
+#   Asli.AppImage               install and start (also what a double click does)
+#   Asli.AppImage --uninstall   remove it again; the account key and settings stay
+#   Asli.AppImage --version     print the version inside
+
+HERE="$(dirname "$(readlink -f "$0")")"
+INSTALLER="$HERE/usr/share/asli/install.sh"
+
+case "${1:-}" in
+    ""|--install|tray) set -- --binary "$HERE/usr/bin/asli" ;;
+    --uninstall) set -- --uninstall ;;
+    --version) exec "$HERE/usr/bin/asli" --version ;;
+    *)
+        sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//' >&2
+        exit 2
+        ;;
+esac
+
+# Run from a terminal, the output is the report.
+if [ -t 1 ]; then
+    exec bash "$INSTALLER" "$@"
+fi
+
+# Double clicked, nobody sees the output, so it goes to a file, and a failure says where.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/asli"
+mkdir -p "$LOG_DIR"
+if bash "$INSTALLER" "$@" >"$LOG_DIR/install.log" 2>&1; then
+    exit 0
+fi
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send --app-name=Asli "Asli could not be installed" "What went wrong is in $LOG_DIR/install.log"
+fi
+exit 1

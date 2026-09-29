@@ -1,4 +1,5 @@
-# RPM metadata for cargo-generate-rpm, passed with --metadata-overwrite.
+# RPM metadata for cargo-generate-rpm, passed with
+# --metadata-overwrite rpm-metadata.toml#package.metadata.generate-rpm.
 #
 # It lives here rather than in crates/asli-app/Cargo.toml so that packaging details stay out of the
 # code tree, where they would otherwise sit in the middle of the dependency list.
@@ -8,7 +9,11 @@ name = "asli"
 summary = "One clipboard, every machine"
 # Only a D-Bus session is needed at runtime. There is no GTK, no appindicator and no webview, which
 # is the whole reason this package is small and the dependency list is one line.
-requires = { dbus = "*" }
+# Written out rather than worked out, because the automatic scan needs rpm's own tooling and would
+# tie building the package to one distribution. The binary is linked against glibc 2.28 and names
+# fontconfig and nothing else.
+auto-req = "no"
+requires = { glibc = ">= 2.28", fontconfig = "*", dbus = "*" }
 
 [[package.metadata.generate-rpm.assets]]
 source = "target/release/asli"
@@ -30,6 +35,16 @@ doc = true
 [[package.metadata.generate-rpm.assets]]
 source = "packaging/linux/asli.desktop"
 dest = "/usr/share/applications/asli.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "packaging/linux/asli.svg"
+dest = "/usr/share/icons/hicolor/scalable/apps/asli.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "packaging/icons/asli-256.png"
+dest = "/usr/share/icons/hicolor/256x256/apps/asli.png"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]

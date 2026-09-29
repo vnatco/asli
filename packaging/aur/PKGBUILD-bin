@@ -7,26 +7,29 @@ _pkgname=asli
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="One clipboard, every machine. Zero knowledge clipboard sync over an encrypted relay (binary release)"
-arch=('x86_64' 'aarch64')
+# x86_64 only: packaging/linux/build-installer.sh builds for the machine it runs on, and the
+# release is built on an x86_64 one.
+arch=('x86_64')
 url="https://github.com/vnatco/asli"
 license=('MIT')
-# Same single runtime requirement as the source package: a D-Bus session, nothing else.
-depends=('dbus')
+# Same runtime requirements as the source package: a D-Bus session, and fontconfig for the window.
+depends=('dbus' 'fontconfig')
 provides=('asli')
 conflicts=('asli')
 
-source_x86_64=("$_pkgname-$pkgver-x86_64-linux.tar.gz::$url/releases/download/v$pkgver/$_pkgname-$pkgver-x86_64-linux.tar.gz")
-source_aarch64=("$_pkgname-$pkgver-aarch64-linux.tar.gz::$url/releases/download/v$pkgver/$_pkgname-$pkgver-aarch64-linux.tar.gz")
-# Replace both with the real sums from the release's SHA256SUMS before publishing.
+# The tarball packaging/linux/build-installer.sh attaches to every release.
+source_x86_64=("$_pkgname-$pkgver-linux-x86_64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-$pkgver-linux-x86_64.tar.gz")
+# Replace with the real sum from the release's SHA256SUMS before publishing.
 sha256sums_x86_64=('SKIP')
-sha256sums_aarch64=('SKIP')
 
 package() {
-  local stage="$_pkgname-$pkgver-${CARCH}-linux"
+  local stage="$_pkgname-$pkgver-linux-${CARCH}"
   cd "$stage"
   install -Dm755 asli "$pkgdir/usr/bin/asli"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
   install -Dm644 asli.desktop "$pkgdir/usr/share/applications/asli.desktop"
   install -Dm644 asli.service "$pkgdir/usr/lib/systemd/user/asli.service"
+  install -Dm644 asli.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/asli.svg"
+  install -Dm644 asli.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/asli.png"
 }
