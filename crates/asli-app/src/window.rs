@@ -453,10 +453,53 @@ fn show(screen: Screen) {
         eprintln!("{}", log_line("window_failed", &err.to_string()));
         return;
     }
+    #[cfg(target_os = "windows")]
+    use_resource_icon(&window);
     if already_open && !wayland_session() {
         bring_to_front(&window);
     }
     start_timer();
+}
+
+/// Gives the window the icon compiled into the executable, in place of the 256 pixel picture the
+/// markup names.
+///
+/// The taskbar and Alt+Tab show the window's own icon, and Windows makes the small sizes of the
+/// markup's one picture by scaling it down, which leaves a dark tile that disappears against a
+/// dark taskbar. The icon resource (`packaging/windows/asli.ico`) has 16 to 48 pixel sizes drawn
+/// for exactly that, and asking for it by size lets Windows pick the one drawn for the display's
+/// scale. Set after every show, because the platform window may have been made afresh; the
+/// toolkit applies its own icon only when the markup's picture changes, which it never does.
+#[cfg(target_os = "windows")]
+fn use_resource_icon(window: &AppWindow) {
+    use slint::winit_030::winit::dpi::PhysicalSize;
+    use slint::winit_030::winit::platform::windows::{IconExtWindows as _, WindowExtWindows as _};
+    use slint::winit_030::winit::window::Icon;
+    use slint::winit_030::WinitWindowAccessor as _;
+
+    /// The resource id `build.rs` gives the icon.
+    const ICON_RESOURCE: u16 = 1;
+
+    window.window().with_winit_window(|winit| {
+        let scale = winit.scale_factor();
+        // Rounded and clamped, so the cast cannot lose anything that matters: a scale factor is
+        // a small positive number and so is the result.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pixels = |points: f64| {
+            let side = (points * scale).round().clamp(16.0, 256.0) as u32;
+            Some(PhysicalSize::new(side, side))
+        };
+        // The small icon, in the title bar's place and the taskbar at small sizes, and the large
+        // one, which the taskbar and Alt+Tab use.
+        match Icon::from_resource(ICON_RESOURCE, pixels(16.0)) {
+            Ok(icon) => winit.set_window_icon(Some(icon)),
+            Err(err) => eprintln!("{}", log_line("window_icon_failed", &err.to_string())),
+        }
+        match Icon::from_resource(ICON_RESOURCE, pixels(32.0)) {
+            Ok(icon) => winit.set_taskbar_icon(Some(icon)),
+            Err(err) => eprintln!("{}", log_line("window_icon_failed", &err.to_string())),
+        }
+    });
 }
 
 /// Un-minimizes the window and asks for focus, for a click on the tray icon when it is already
