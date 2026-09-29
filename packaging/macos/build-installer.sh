@@ -15,6 +15,12 @@
 #   ASLI_NOTARY_PROFILE  a keychain profile saved with `xcrun notarytool store-credentials`
 #     or all three of
 #   ASLI_NOTARY_KEY, ASLI_NOTARY_KEY_ID, ASLI_NOTARY_ISSUER   an App Store Connect API key
+#     or all three of
+#   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID     an Apple ID and app specific password
+#
+# The APPLE_ names are the ones electron-builder uses, so an env file already kept for another
+# project works here as sourced. APPLE_SIGNING_IDENTITY and APPLE_TEAM_ID stand in for
+# ASLI_SIGN_IDENTITY and ASLI_TEAM_ID when those are unset.
 #
 # With no ASLI_SIGN_IDENTITY it builds an unsigned image instead, named ...-unsigned.dmg so it
 # cannot be mistaken for a release, and says what was skipped. ASLI_MAC_ARCHS picks the
@@ -89,6 +95,9 @@ else
     ARCH_NAME=x86_64
 fi
 
+ASLI_SIGN_IDENTITY="${ASLI_SIGN_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}"
+ASLI_TEAM_ID="${ASLI_TEAM_ID:-${APPLE_TEAM_ID:-}}"
+
 # Signed, or not signed at all. A signed image that is not notarized still meets a Gatekeeper
 # warning on every other Mac, which is the one thing this is for, so that combination is refused
 # rather than produced.
@@ -100,8 +109,10 @@ if [ -n "${ASLI_SIGN_IDENTITY:-}" ]; then
         NOTARY_AUTH=(--keychain-profile "$ASLI_NOTARY_PROFILE")
     elif [ -n "${ASLI_NOTARY_KEY:-}" ] && [ -n "${ASLI_NOTARY_KEY_ID:-}" ] && [ -n "${ASLI_NOTARY_ISSUER:-}" ]; then
         NOTARY_AUTH=(--key "$ASLI_NOTARY_KEY" --key-id "$ASLI_NOTARY_KEY_ID" --issuer "$ASLI_NOTARY_ISSUER")
+    elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "$ASLI_TEAM_ID" ]; then
+        NOTARY_AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$ASLI_TEAM_ID")
     else
-        die "ASLI_SIGN_IDENTITY is set but no notarization credentials are. Set ASLI_NOTARY_PROFILE, or ASLI_NOTARY_KEY, ASLI_NOTARY_KEY_ID and ASLI_NOTARY_ISSUER. See packaging/macos/README.md."
+        die "a signing identity is set but no notarization credentials are. Set ASLI_NOTARY_PROFILE; or ASLI_NOTARY_KEY, ASLI_NOTARY_KEY_ID and ASLI_NOTARY_ISSUER; or APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID. See packaging/macos/README.md."
     fi
     OUT="$DIST/asli-$VERSION-macos-$ARCH_NAME.dmg"
 else
@@ -163,7 +174,7 @@ check_prerequisites() {
             ok "notarization credentials work"
         else
             need "working notarization credentials" \
-                "xcrun notarytool history ${NOTARY_AUTH[*]}   (run it to see the error; README has the setup)"
+                "xcrun notarytool history with the same credentials fails; run it by hand to see why (README has the setup)"
         fi
     fi
 

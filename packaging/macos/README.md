@@ -61,6 +61,20 @@ packaging/macos/build-installer.sh
 Or, with an API key rather than a profile, `ASLI_NOTARY_KEY` (path to the `.p8`),
 `ASLI_NOTARY_KEY_ID` and `ASLI_NOTARY_ISSUER` in place of `ASLI_NOTARY_PROFILE`.
 
+**An env file kept for electron-builder works as it is.** The script also reads the names
+electron-builder uses: `APPLE_SIGNING_IDENTITY` for the identity, `APPLE_TEAM_ID` for the team, and
+`APPLE_ID` with `APPLE_APP_SPECIFIC_PASSWORD` for notarization. So with such a file kept outside
+this repository:
+
+```sh
+source ~/path/to/env_variables.env
+packaging/macos/build-installer.sh
+```
+
+A keychain profile is still the better way to hold the password: with `APPLE_ID` and a password,
+notarytool gets the password on its command line, where other processes on the Mac can read it
+while it runs. The script never prints it.
+
 The script checks before it builds anything that the identity is in the keychain and that the
 notarization credentials log in. With `ASLI_SIGN_IDENTITY` set and no credentials it stops: a
 signed image that is not notarized still meets a Gatekeeper warning everywhere else, which is the
