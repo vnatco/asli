@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The picture on the left of the installer's first and last pages. NSIS draws it at 164 by 314
+  pixels at 100 % scale; installer-sidebar.bmp is rendered from this at one and a half times that,
+  so it stays sharp at 150 %. The mark is the one in packaging/linux/asli.svg, without its tile,
+  on the tile's own colours. Rendered by packaging/icons/render.sh.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 164 314" width="164" height="314" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#1B2436"/><stop offset="1" stop-color="#0B0E14"/></linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7FAEFF"/><stop offset="1" stop-color="#2F73F0"/></linearGradient>
+    <linearGradient id="back" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#AFCEFF"/><stop offset="1" stop-color="#6FA5FF"/></linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.3" r="0.6"><stop offset="0" stop-color="#4C8DFF" stop-opacity="0.35"/><stop offset="1" stop-color="#4C8DFF" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="164" height="314" fill="url(#bg)"/>
+  <rect width="164" height="314" fill="url(#glow)"/>
+  <g transform="translate(22 34) scale(0.47)">
+    <rect x="52" y="52" width="120" height="120" rx="32" fill="url(#back)" opacity="0.40"/>
+    <rect x="84" y="84" width="120" height="120" rx="32" fill="url(#front)"/>
+    <rect x="86.5" y="86.5" width="115" height="115" rx="29.5" stroke="#CFE1FF" stroke-opacity="0.35" stroke-width="5"/>
+  </g>
+</svg>
