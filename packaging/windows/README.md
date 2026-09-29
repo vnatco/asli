@@ -42,7 +42,10 @@ silently, and so does the installer: `asli-<version>-windows-x86_64.exe /S`.
 
 The Start menu entry and the Startup entry are both written by one piece of code in the program,
 `crates/asli-app/src/shortcut.rs`, through `WScript.Shell`, and both point at `asliw.exe` with
-`tray` and take their icon from it. The installer and `setup.ps1` call it as
+`tray`. They set no icon location, so Explorer takes the icon from `asliw.exe` itself. Setting one
+through `WScript.Shell` to a path in the user's profile makes it add an icon environment block
+naming `%USERPROFILE%`, which the check below refuses; the owner proved that on Windows 11 when the
+check stopped the first build. The installer and `setup.ps1` call it as
 `asli.exe shortcut create <path>`; it is a hidden command, not listed in `asli --help`.
 
 This replaced NSIS's own `CreateShortcut`, which on Windows 11 wrote a Start menu entry carrying an

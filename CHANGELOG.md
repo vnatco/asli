@@ -94,7 +94,6 @@ Nothing is tagged yet and there are no downloads. What exists today:
   Windows preferred to the real path and could not resolve. Every shortcut is now written by
   `asli.exe` itself, the same code as the working Startup entry, and read back and checked after
   writing, at the end of the install, and when the installer is built.
-- The Startup shortcut stored its icon location as `,0`, with no path. It names `asliw.exe` now.
 - On a dark Start menu or taskbar the Windows icon was a near black tile at small sizes. Its 16 to
   48 pixel sizes are now drawn for contrast, a bright tile with a light mark, and the running
   window uses them rather than scaling down the 256 pixel picture.

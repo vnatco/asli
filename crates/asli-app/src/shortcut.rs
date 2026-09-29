@@ -169,8 +169,10 @@ mod script {
 
     /// Creates the shortcut, pointing at the binary with the `tray` argument.
     ///
-    /// The icon location is set to the target itself, index 0, which is the Asli icon compiled
-    /// into it. Left unset, `WScript.Shell` stores `,0`: an index with no path.
+    /// No icon location is set, so Explorer takes the icon from the target, which carries the
+    /// Asli icon. Setting one through `WScript.Shell` to a path in the user's profile makes it add
+    /// an icon environment block naming `%USERPROFILE%` (seen on the owner's Windows 11: flags
+    /// `0x40FB` with it, `0xBB` without), and that is the kind of block [`super::check`] refuses.
     pub fn create(lnk: &str, target: &str, working: &str) -> String {
         format!(
             "$ErrorActionPreference = 'Stop'; \
@@ -178,13 +180,11 @@ mod script {
              $s.TargetPath = {}; \
              $s.Arguments = 'tray'; \
              $s.WorkingDirectory = {}; \
-             $s.IconLocation = {}; \
              $s.Description = 'Encrypted clipboard sync across your own machines'; \
              $s.Save()",
             ps_quote(lnk),
             ps_quote(target),
-            ps_quote(working),
-            ps_quote(&format!("{target},0"))
+            ps_quote(working)
         )
     }
 
@@ -202,7 +202,7 @@ mod script {
         use super::*;
 
         #[test]
-        fn the_shortcut_starts_the_tray_from_its_own_directory_with_its_own_icon() {
+        fn the_shortcut_starts_the_tray_from_its_own_directory() {
             let script = create(
                 r"C:\Users\v\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Asli.lnk",
                 r"C:\Users\v\AppData\Local\Programs\Asli\asliw.exe",
@@ -215,10 +215,8 @@ mod script {
                 "login should start the tray"
             );
             assert!(
-                script.contains(
-                    r"$s.IconLocation = 'C:\Users\v\AppData\Local\Programs\Asli\asliw.exe,0'"
-                ),
-                "an unset icon location is stored as ',0', with no path"
+                !script.contains("IconLocation"),
+                "WScript.Shell writes an icon location in the profile as an environment block"
             );
             assert!(script.contains("$s.Save()"));
             assert!(
@@ -235,7 +233,6 @@ mod script {
             );
             let script = create(r"C:\a'b.lnk", r"C:\o'dd\asliw.exe", r"C:\o'dd");
             assert!(script.contains(r"'C:\o''dd\asliw.exe'"));
-            assert!(script.contains(r"'C:\o''dd\asliw.exe,0'"));
             assert_eq!(script.matches("$s.Save()").count(), 1);
         }
 
