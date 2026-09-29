@@ -1,0 +1,10 @@
+# The C runtime is linked into the Windows executables rather than loaded from VCRUNTIME140.dll.
+#
+# Rust's MSVC targets link the Visual C++ runtime dynamically by default, and that DLL comes with
+# Visual Studio or its redistributable, not with Windows. A machine that has neither refuses to
+# start the program with a missing DLL dialog, which is exactly the machine an installer is for.
+# Linking it statically costs a few hundred kilobytes and removes the question.
+# packaging/windows/build-installer.ps1 checks the result and refuses to package a binary that
+# still imports the runtime, which is what happens if RUSTFLAGS is set, since it replaces this.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
