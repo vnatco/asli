@@ -35,6 +35,8 @@ pub enum Error {
     NoToken,
     /// The token was passed as a command line argument, where other users can read it.
     TokenInArgv,
+    /// A Windows shortcut could not be written, or was written wrong. The detail names the file.
+    Shortcut(String),
 }
 
 impl fmt::Display for Error {
@@ -64,6 +66,7 @@ impl fmt::Display for Error {
                  Run 'asli join' on its own and paste it when asked. Since this one has been \
                  exposed, consider running 'asli create' and re-joining your devices",
             ),
+            Self::Shortcut(detail) => write!(f, "shortcut {detail}"),
             Self::NoToken => f.write_str(
                 "no token on stdin. Run 'asli join' and paste the token when it asks, or pipe it in",
             ),

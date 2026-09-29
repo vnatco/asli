@@ -49,6 +49,7 @@ pub mod notify;
 pub mod qr;
 pub mod replay_store;
 pub mod secrets;
+pub mod shortcut;
 pub mod tray;
 pub mod window;
 

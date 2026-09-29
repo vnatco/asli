@@ -68,6 +68,14 @@ Function WelcomeShow
   SendMessage $0 ${WM_SETTEXT} 0 "STR:&Install"
 FunctionEnd
 
+; Stops the install where it is, says why, and exits with a failure code for a silent install.
+!macro FailInstall MESSAGE
+  DetailPrint "${MESSAGE}"
+  MessageBox MB_ICONSTOP|MB_OK "${MESSAGE}$\r$\n$\r$\nThe details in the installer window say why." /SD IDOK
+  SetErrorLevel 2
+  Abort
+!macroend
+
 ; A running copy holds its executable open and the single instance lock, so it stops before the
 ; files are replaced or removed. taskkill by its full path: Windows looks in the working directory
 ; before PATH for a bare name.
@@ -92,9 +100,17 @@ Section "Asli" SecMain
   File "/oname=LICENSE.txt" "${REPO}\LICENSE"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
-  ; The Start menu entry starts the windowed binary, so no console opens. Its icon is the one
-  ; compiled into asliw.exe, which is the Asli mark.
-  CreateShortcut "${STARTMENU_LINK}" "$INSTDIR\asliw.exe" "tray" "$INSTDIR\asliw.exe" 0 SW_SHOWNORMAL "" "Encrypted clipboard sync across your own machines"
+  ; The Start menu entry, written by asli.exe with the same code that writes the Startup one, so
+  ; one implementation is responsible for every shortcut. NSIS's own CreateShortcut is not used:
+  ; on Windows 11 it wrote a link whose environment variable block named the target as
+  ; %USERPROFILE%\..., which Windows could not resolve, so the entry failed to start and had no
+  ; icon. The link starts the windowed asliw.exe, so no console opens, and takes its icon from it.
+  DetailPrint "Adding the Start menu entry"
+  nsExec::ExecToLog '"$INSTDIR\asli.exe" shortcut create "${STARTMENU_LINK}"'
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FailInstall "The Start menu entry could not be written."
+  ${EndIf}
 
   ; Start at login. asli.exe writes the Startup folder shortcut itself, pointing at asliw.exe
   ; beside it, which is the same code that checks the entry every time Asli starts. The Run key
@@ -121,6 +137,20 @@ Section "Asli" SecMain
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
   ; In kilobytes, which is the unit the Apps list expects.
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "EstimatedSize" ${SIZE_KB}
+
+  ; Every shortcut this install made, read back the way Explorer will use it: no environment
+  ; variable block, and a target and icon that are on disk. A link that fails this is exactly the
+  ; kind that shipped broken once, so the install stops rather than finishing with it.
+  DetailPrint "Checking the shortcuts"
+  StrCpy $1 '"${STARTMENU_LINK}"'
+  ${If} ${FileExists} "${STARTUP_LINK}"
+    StrCpy $1 '$1 "${STARTUP_LINK}"'
+  ${EndIf}
+  nsExec::ExecToLog '"$INSTDIR\asli.exe" shortcut check $1'
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FailInstall "A shortcut this installer made would not work."
+  ${EndIf}
 
   DetailPrint "Starting Asli"
   Exec '"$INSTDIR\asliw.exe" tray'

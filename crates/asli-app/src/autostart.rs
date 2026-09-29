@@ -347,10 +347,10 @@ mod platform {
 #[cfg(target_os = "windows")]
 mod platform {
     use std::os::windows::process::CommandExt as _;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::{Command, Output};
 
-    use super::{shortcut, startup_approved};
+    use super::startup_approved;
     use crate::error::{Error, Result};
 
     /// The shortcut Explorer opens at login, in this user's Startup folder.
@@ -370,28 +370,14 @@ mod platform {
     const APPROVED_FOLDER_KEY: &str =
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder";
 
-    /// `CREATE_NO_WINDOW`. `reg.exe` and `powershell.exe` are console programs, and started from
-    /// the windowed binary without this they flash a console window on screen.
+    /// `CREATE_NO_WINDOW`. `reg.exe` is a console program, and started from the windowed binary
+    /// without this it flashes a console window on screen.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     /// Runs `reg.exe`, the same tool a person would use, so no registry library is needed.
     fn reg(args: &[&str]) -> Result<Output> {
         Command::new("reg")
             .args(args)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(Error::Io)
-    }
-
-    /// Runs a PowerShell script, which is how the shortcut is written and read.
-    ///
-    /// A `.lnk` is a COM object, not a text file, and `WScript.Shell` is the scripted way in to
-    /// the same `IShellLink` a person gets from the Explorer right click menu. Shipped with every
-    /// supported Windows, so this stays true to the rest of the module: use the tool that is
-    /// already there rather than take a dependency.
-    fn powershell(script: &str) -> Result<Output> {
-        Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(Error::Io)
@@ -408,18 +394,6 @@ mod platform {
 
     fn shortcut_path() -> Result<PathBuf> {
         Ok(startup_dir()?.join(LNK))
-    }
-
-    /// What login should start: the windowed binary when it sits beside this one, since the
-    /// console one would open a console window at every login.
-    fn launch_target() -> Result<PathBuf> {
-        let exe = std::env::current_exe().map_err(Error::Io)?;
-        Ok(windowed_sibling(&exe).unwrap_or(exe))
-    }
-
-    fn windowed_sibling(exe: &Path) -> Option<PathBuf> {
-        let sibling = exe.with_file_name("asliw.exe");
-        sibling.exists().then_some(sibling)
     }
 
     pub fn is_enabled() -> Result<bool> {
@@ -457,22 +431,9 @@ mod platform {
 
         let path = shortcut_path()?;
         if enabled {
-            let target = launch_target()?;
-            let working = target.parent().unwrap_or(&target);
-            std::fs::create_dir_all(startup_dir()?).map_err(Error::Io)?;
-            let script = shortcut::create_script(
-                &path.display().to_string(),
-                &target.display().to_string(),
-                &working.display().to_string(),
-            );
-            let output = powershell(&script)?;
-            if !output.status.success() || !path.exists() {
-                return Err(Error::ConfigDir(format!(
-                    "could not write {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
+            // The same writer as the Start menu entry, which also reads the result back and
+            // refuses a link Explorer could not follow.
+            crate::shortcut::create(&path, &crate::shortcut::windowed_target()?)?;
         } else if path.exists() {
             std::fs::remove_file(&path).map_err(Error::Io)?;
         }
@@ -485,16 +446,7 @@ mod platform {
 
     /// The program the shortcut opens, read back out of the `.lnk`.
     pub fn target() -> Result<Option<String>> {
-        let path = shortcut_path()?;
-        if !path.exists() {
-            return Ok(None);
-        }
-        let output = powershell(&shortcut::read_script(&path.display().to_string()))?;
-        if !output.status.success() {
-            return Ok(None);
-        }
-        let target = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        Ok((!target.is_empty()).then_some(target))
+        crate::shortcut::target(&shortcut_path()?)
     }
 }
 
@@ -797,91 +749,6 @@ mod startup_approved {
         fn another_entry_whose_name_starts_the_same_is_not_mistaken_for_ours() {
             let other = "\r\n    AsliOther    REG_BINARY    030000000000000000000000\r\n";
             assert!(reads_as_enabled(other, "Asli"));
-        }
-    }
-}
-
-/// The PowerShell that writes and reads the Startup folder shortcut.
-///
-/// Pure text handling, so it is compiled and tested on every platform even though only Windows
-/// uses it.
-#[cfg(any(target_os = "windows", test))]
-mod shortcut {
-    /// Quotes a path as a single quoted PowerShell string.
-    ///
-    /// Single quotes because PowerShell expands `$` and treats the backtick as an escape inside
-    /// double quotes, and a Windows path is full of neither but a user name can hold anything. In
-    /// a single quoted string the only character with a meaning is the quote itself, which is
-    /// written twice.
-    pub fn ps_quote(text: &str) -> String {
-        format!("'{}'", text.replace('\'', "''"))
-    }
-
-    /// Creates the shortcut, pointing at the binary with the `tray` argument.
-    pub fn create_script(lnk: &str, target: &str, working: &str) -> String {
-        format!(
-            "$ErrorActionPreference = 'Stop'; \
-             $s = (New-Object -ComObject WScript.Shell).CreateShortcut({}); \
-             $s.TargetPath = {}; \
-             $s.Arguments = 'tray'; \
-             $s.WorkingDirectory = {}; \
-             $s.Description = 'Encrypted clipboard sync across your own machines'; \
-             $s.Save()",
-            ps_quote(lnk),
-            ps_quote(target),
-            ps_quote(working)
-        )
-    }
-
-    /// Prints the program the shortcut opens, and nothing else.
-    pub fn read_script(lnk: &str) -> String {
-        format!(
-            "$ErrorActionPreference = 'Stop'; \
-             Write-Output (New-Object -ComObject WScript.Shell).CreateShortcut({}).TargetPath",
-            ps_quote(lnk)
-        )
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn the_shortcut_starts_the_tray_from_its_own_directory() {
-            let script = create_script(
-                r"C:\Users\v\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Asli.lnk",
-                r"C:\Users\v\AppData\Local\Programs\Asli\asliw.exe",
-                r"C:\Users\v\AppData\Local\Programs\Asli",
-            );
-            assert!(script
-                .contains(r"$s.TargetPath = 'C:\Users\v\AppData\Local\Programs\Asli\asliw.exe'"));
-            assert!(
-                script.contains("$s.Arguments = 'tray'"),
-                "login should start the tray"
-            );
-            assert!(script.contains("$s.Save()"));
-            assert!(
-                script.contains("$ErrorActionPreference = 'Stop'"),
-                "a failure must not exit zero and look like success"
-            );
-        }
-
-        #[test]
-        fn a_quote_in_a_user_name_cannot_end_the_string_early() {
-            assert_eq!(
-                ps_quote(r"C:\Users\o'brien\asliw.exe"),
-                r"'C:\Users\o''brien\asliw.exe'"
-            );
-            let script = create_script(r"C:\a'b.lnk", r"C:\o'dd\asliw.exe", r"C:\o'dd");
-            assert!(script.contains(r"'C:\o''dd\asliw.exe'"));
-            assert_eq!(script.matches("$s.Save()").count(), 1);
-        }
-
-        #[test]
-        fn reading_prints_the_target_and_nothing_else() {
-            let script = read_script(r"C:\Startup\Asli.lnk");
-            assert!(script.contains(".TargetPath"));
-            assert!(!script.contains("Save"));
         }
     }
 }

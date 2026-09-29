@@ -191,16 +191,15 @@ function Invoke-Install {
     Write-Ok 'asli.exe and asliw.exe installed'
 
     $windowed = Join-Path $InstallDir 'asliw.exe'
+    # Written by asli.exe, the same code that writes the login shortcut and that the installer
+    # uses, and read back by it before it reports success.
     if ($DryRun) {
-        Write-Host "  would create: $Shortcut"
+        Write-Host "  would run: $(Join-Path $InstallDir 'asli.exe') shortcut create $Shortcut"
     } else {
-        $shell = New-Object -ComObject WScript.Shell
-        $link = $shell.CreateShortcut($Shortcut)
-        $link.TargetPath = $windowed
-        $link.Arguments = 'tray'
-        $link.WorkingDirectory = $InstallDir
-        $link.Description = 'Encrypted clipboard sync across your own machines'
-        $link.Save()
+        & (Join-Path $InstallDir 'asli.exe') shortcut create $Shortcut
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail 'the Start menu shortcut could not be written. The output above says why.'
+        }
     }
     Write-Ok 'Start menu shortcut created'
 

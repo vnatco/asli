@@ -114,6 +114,35 @@ function Confirm-NoVcRuntime {
     Write-Ok 'asli.exe and asliw.exe carry their own C runtime; no redistributable is needed'
 }
 
+# Every shortcut the installer makes is written by `asli.exe shortcut create` and read back by
+# `asli.exe shortcut check`. This runs the same pair against the executables just built, in a
+# scratch folder rather than the real Start menu, so a link Explorer could not follow (an
+# environment variable block, a missing target or icon) stops the build instead of shipping. It
+# also refuses NSIS's own CreateShortcut in asli.nsi, which is what wrote such a link once.
+function Confirm-ShortcutWriter {
+    $nsisShortcut = Select-String -Path (Join-Path $Here 'asli.nsi') -Pattern '^\s*CreateShortcut\b'
+    if ($nsisShortcut) {
+        Write-Warn "asli.nsi line $($nsisShortcut[0].LineNumber) uses NSIS's CreateShortcut."
+        Write-Host '  It wrote a Start menu entry Windows could not follow. Use'
+        Write-Host '  "asli.exe shortcut create" as the rest of asli.nsi does.'
+        Write-Fail 'asli.nsi writes a shortcut itself'
+    }
+
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) "asli-shortcut-check-$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+    try {
+        $link = Join-Path $scratch 'Asli.lnk'
+        $asli = Join-Path $Built 'asli.exe'
+        & $asli shortcut create $link
+        if ($LASTEXITCODE -ne 0) { Write-Fail 'asli.exe could not write a test shortcut. The output above says why.' }
+        & $asli shortcut check $link
+        if ($LASTEXITCODE -ne 0) { Write-Fail 'the test shortcut would not work. The output above says why.' }
+    } finally {
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+    Write-Ok 'a shortcut written by asli.exe resolves to asliw.exe and carries no environment block'
+}
+
 # The same layout sha256sum writes and `sha256sum -c` reads: lowercase hash, two spaces, name,
 # LF line endings, no byte order mark.
 function Write-ChecksumFile {
@@ -167,6 +196,11 @@ if ($DryRun) {
     Write-Fail 'missing prerequisite: dumpbin'
 } else {
     Confirm-NoVcRuntime -Dumpbin $Dumpbin
+}
+if ($DryRun) {
+    Write-Host '  would write and check a test shortcut with asli.exe shortcut'
+} else {
+    Confirm-ShortcutWriter
 }
 
 Write-Host ''

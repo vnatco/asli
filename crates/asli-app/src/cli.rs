@@ -66,6 +66,30 @@ enum Command {
     Reset,
     /// Show the join token for the account already on this device.
     Show,
+    /// Write or check a Windows shortcut. For the installer and setup.ps1 rather than people, so
+    /// every shortcut Asli makes comes from the same code.
+    #[command(hide = true)]
+    Shortcut {
+        #[command(subcommand)]
+        action: ShortcutAction,
+    },
+}
+
+/// What `asli shortcut` does.
+#[derive(Debug, Subcommand)]
+enum ShortcutAction {
+    /// Write a shortcut at this path that starts Asli in the tray, then check it.
+    Create {
+        /// Where the `.lnk` goes, for example the Start menu's Programs folder.
+        path: std::path::PathBuf,
+    },
+    /// Check shortcuts the way Explorer will use them, failing if any carries an environment
+    /// variable block or names a target or icon that is not on disk.
+    Check {
+        /// The `.lnk` files to check.
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+    },
 }
 
 /// Parses the command line and runs it, exiting with status 1 on failure.
@@ -95,6 +119,7 @@ fn dispatch() -> Result<()> {
         Command::Status => status(&paths),
         Command::Reset => reset(&paths),
         Command::Show => show(&paths),
+        Command::Shortcut { action } => shortcut_command(&action),
     }
 }
 
@@ -263,6 +288,47 @@ fn reset(paths: &Paths) -> Result<()> {
     println!("account, so if the key leaked, run 'asli create' here and re-join your other");
     println!("devices with the new token. The old room is then abandoned.");
     Ok(())
+}
+
+/// Writes or checks Windows shortcuts, for the installer and `setup.ps1`.
+#[cfg(target_os = "windows")]
+fn shortcut_command(action: &ShortcutAction) -> Result<()> {
+    match action {
+        ShortcutAction::Create { path } => {
+            let target = crate::shortcut::windowed_target()?;
+            crate::shortcut::create(path, &target)?;
+            println!(
+                "Shortcut:      {} -> {} tray",
+                path.display(),
+                target.display()
+            );
+        }
+        ShortcutAction::Check { paths } => {
+            // Every one is checked and reported before failing, so one run names every bad link.
+            let mut first_failure = None;
+            for path in paths {
+                match crate::shortcut::check(path) {
+                    Ok(target) => println!("ok    {} -> {}", path.display(), target.display()),
+                    Err(err) => {
+                        println!("FAIL  {err}");
+                        first_failure.get_or_insert(err);
+                    }
+                }
+            }
+            if let Some(err) = first_failure {
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shortcuts are a Windows thing; everywhere else this says so rather than pretending.
+#[cfg(not(target_os = "windows"))]
+fn shortcut_command(_action: &ShortcutAction) -> Result<()> {
+    Err(Error::Shortcut(
+        "files are written only on Windows; this system uses its own launcher entries".to_owned(),
+    ))
 }
 
 /// Turns starting at login on or off, and reports what actually happened.
