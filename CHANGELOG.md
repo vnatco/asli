@@ -89,6 +89,13 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- On Windows, a window closed and opened again drew only the text in its lists: no title bar, no
+  sidebar, no card backgrounds, with the desktop showing through. The software renderer repainted
+  only what had changed, while Windows had discarded the rest. A closed window is now dropped and a
+  new one built at the next open, in the same place and size, so every open paints the whole
+  window. Close and reopen were checked under Wayland and X11, sixteen times each, with memory
+  flat; not yet on Windows or macOS.
+
 - The Windows installer's Start menu entry failed with "Windows can't find ..." and had no icon.
   NSIS wrote it with an environment variable block naming the target as `%USERPROFILE%\...`, which
   Windows preferred to the real path and could not resolve. Every shortcut is now written by

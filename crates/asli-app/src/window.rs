@@ -413,6 +413,33 @@ fn show(screen: Screen) {
     // application that dies when a menu item is clicked twice is worse than one with no window.
     // A weak handle rather than the window itself: the generated type is not `Clone`, and taking
     // a weak one is the toolkit's own way of referring to a window from outside it.
+    //
+    // A window that was closed is not shown again: it is dropped and a new one built. Hidden and
+    // shown again, its software renderer took the buffer it had drawn before as still on screen
+    // and repainted only what had changed since. Windows does not keep a hidden window's pixels,
+    // so on Windows 11 the reopened window showed the text in the history rows and nothing else:
+    // no title bar, no sidebar, no card backgrounds, the desktop showing through. A new window
+    // starts from an empty buffer and paints all of it, on every platform. The old one is
+    // already hidden, so nothing is left on screen if anything still refers to it, and it is
+    // dropped here, outside its own callbacks, which is what made dropping it at close unsafe.
+    let stale = WINDOW.with_borrow_mut(|slot| {
+        if slot
+            .as_ref()
+            .is_some_and(|window| !window.window().is_visible())
+        {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    // Where it was and how big, so the new one opens in its place rather than wherever the
+    // desktop puts a new window. Wayland reports no position and places windows itself.
+    let geometry = stale.as_ref().map(|window| {
+        let window = window.window();
+        (window.position(), window.size(), window.is_maximized())
+    });
+    drop(stale);
+
     let handle = WINDOW.with_borrow_mut(|slot| {
         if slot.is_none() {
             match build() {
@@ -429,6 +456,16 @@ fn show(screen: Screen) {
     let Some(window) = handle.and_then(|handle| handle.upgrade()) else {
         return;
     };
+    if let Some((position, size, maximized)) = geometry {
+        if !wayland_session() {
+            window.window().set_position(position);
+        }
+        if maximized {
+            window.window().set_maximized(true);
+        } else {
+            window.window().set_size(size);
+        }
+    }
 
     refresh(&window);
     // With no account there is nowhere to navigate to, so first run takes the whole window
@@ -541,9 +578,10 @@ fn ui_font() -> &'static str {
 /// Hides the window and stops everything that was running for it.
 ///
 /// The window is hidden rather than dropped. Dropping it here would mean destroying it from
-/// inside one of its own callbacks, which is how a close button turns into a crash. What matters
-/// for an idle device is that no window is built until somebody asks, and that still holds: this
-/// only runs after one has been opened.
+/// inside one of its own callbacks, which is how a close button turns into a crash. It is dropped
+/// at the next open instead, and a new one built, so that it is never shown a second time. What
+/// matters for an idle device is that no window is built until somebody asks, and that still
+/// holds: this only runs after one has been opened.
 fn hide() {
     TIMER.with_borrow_mut(|slot| {
         if let Some(timer) = slot.take() {
@@ -733,6 +771,9 @@ fn build() -> Result<AppWindow> {
 
     let window = AppWindow::new().map_err(|err| Error::ConfigDir(err.to_string()))?;
     window.set_ui_font(ui_font().into());
+    // A new window's history list is empty, whatever the last one showed, so it is drawn in full
+    // rather than skipped as already up to date.
+    HISTORY_DRAWN.set(None);
 
     let handle = window.as_weak();
     window.on_open_screen(move |screen| {
