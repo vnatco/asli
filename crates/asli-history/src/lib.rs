@@ -65,8 +65,56 @@ const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 /// Smallest a record can be and still hold anything: an id, a nonce and a tag, with no content.
 const MIN_RECORD_BYTES: usize = ID_LEN + clip::NONCE_LEN + clip::TAG_LEN;
 
-/// How many characters of text a listing carries as a preview.
+/// How many characters of text a listing carries as a preview, the ellipsis of a shortened one
+/// included.
 pub const PREVIEW_CHARS: usize = 120;
+
+/// A one line preview of a text clip, for a list row.
+///
+/// Every run of whitespace and control characters, line breaks and tabs included, becomes one
+/// space, and the ends are trimmed, so a preview never contains a line break. A list row has room
+/// for one line, and a preview that kept its newlines drew its later lines over the next row. One
+/// that is shortened ends in an ellipsis, within [`PREVIEW_CHARS`], and is never cut inside a
+/// character.
+///
+/// Reads only as far as the preview needs, since a clip can be most of a megabyte and this runs
+/// for every entry each time the list is drawn.
+#[must_use]
+pub fn preview(text: &str) -> String {
+    let mut out = String::new();
+    let mut count = 0;
+    let mut gap = false;
+    for c in text.chars() {
+        if c.is_whitespace() || c.is_control() {
+            gap = count > 0;
+            continue;
+        }
+        let needed = usize::from(gap) + 1;
+        if count + needed > PREVIEW_CHARS {
+            // Room for the ellipsis: drop what it displaces, and any space left at the end.
+            while count + 1 > PREVIEW_CHARS || out.ends_with(' ') {
+                out.pop();
+                count -= 1;
+            }
+            out.push('\u{2026}');
+            return out;
+        }
+        if gap {
+            out.push(' ');
+            gap = false;
+        }
+        out.push(c);
+        count += needed;
+    }
+    out
+}
+
+/// How many lines a text clip spans, not counting blank lines before or after it. 1 for a single
+/// line and 0 for text that is only whitespace.
+#[must_use]
+pub fn line_count(text: &str) -> usize {
+    text.trim().lines().count()
+}
 
 /// An entry id. Random, so ids do not leak ordering or count.
 pub type Id = [u8; ID_LEN];
@@ -190,8 +238,10 @@ pub struct Summary {
     pub kind: Kind,
     /// Size of the full content in bytes.
     pub bytes: usize,
-    /// First [`PREVIEW_CHARS`] characters, for text only. Empty for an image.
+    /// The text on one line, shortened to [`PREVIEW_CHARS`]: see [`preview`]. Empty for an image.
     pub preview: String,
+    /// How many lines the text spans, see [`line_count`]. 0 for an image.
+    pub lines: usize,
     /// The device the clip came from, or all zeros where that is not known, as for entries
     /// written before this was recorded.
     pub device_id: [u8; clip::DEVICE_ID_LEN],
@@ -257,9 +307,11 @@ struct Entry {
 
 impl Entry {
     fn summary(&self) -> Summary {
-        let (kind, preview) = match &self.content {
-            Content::Text(text) => (Kind::Text, text.chars().take(PREVIEW_CHARS).collect()),
-            Content::ImagePng(_) => (Kind::ImagePng, String::new()),
+        // Worked out from the stored text each time rather than stored, so entries written before
+        // a change to the preview pick it up on their next listing.
+        let (kind, preview, lines) = match &self.content {
+            Content::Text(text) => (Kind::Text, preview(text), line_count(text)),
+            Content::ImagePng(_) => (Kind::ImagePng, String::new(), 0),
         };
         Summary {
             id: self.id,
@@ -267,6 +319,7 @@ impl Entry {
             kind,
             bytes: self.content.len(),
             preview,
+            lines,
             device_id: self.device_id,
         }
     }
@@ -1156,7 +1209,53 @@ mod tests {
 
         let summary = &store.list()[0];
         assert_eq!(summary.preview.chars().count(), PREVIEW_CHARS);
+        assert!(
+            summary.preview.ends_with('\u{2026}'),
+            "a shortened preview says so"
+        );
         assert_eq!(summary.bytes, long.len());
+    }
+
+    #[test]
+    fn a_preview_is_always_one_line() {
+        let clip = "  first line\r\n\tsecond\tline\n\n\nthird line\r\n";
+        assert_eq!(preview(clip), "first line second line third line");
+        assert!(!preview(clip).contains(['\n', '\r', '\t']));
+        assert_eq!(
+            line_count(clip),
+            5,
+            "the blank lines inside count, the ones around do not"
+        );
+        assert_eq!(line_count("one line"), 1);
+        assert_eq!(line_count(" \n\t "), 0);
+        assert_eq!(preview(" \n\t "), "");
+
+        // Through the store too, which is where every listed entry comes from, and for an entry
+        // written before this, since the preview is worked out at listing time.
+        let temp = Temp::new("one-line");
+        let mut store = store(&temp);
+        store.append(text(clip), false, NOW).expect("appends");
+        let summary = &Store::open(temp.path(), &SECRET, Limits::default())
+            .expect("reopens")
+            .list()[0];
+        assert_eq!(summary.preview, "first line second line third line");
+        assert_eq!(summary.lines, 5);
+    }
+
+    #[test]
+    fn a_shortened_preview_ends_cleanly_within_the_limit() {
+        // A space falls exactly where the ellipsis goes: it must not be left before it.
+        let words = format!("{} {}", "a".repeat(PREVIEW_CHARS - 2), "b".repeat(50));
+        let shown = preview(&words);
+        assert_eq!(shown.chars().count(), PREVIEW_CHARS - 1);
+        assert!(shown.ends_with("a\u{2026}"));
+
+        // Exactly at the limit is not shortened.
+        let exact = "x".repeat(PREVIEW_CHARS);
+        assert_eq!(preview(&exact), exact);
+        let over = "x".repeat(PREVIEW_CHARS + 1);
+        assert_eq!(preview(&over).chars().count(), PREVIEW_CHARS);
+        assert!(preview(&over).ends_with('\u{2026}'));
     }
 
     #[test]

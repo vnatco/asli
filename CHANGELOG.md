@@ -89,6 +89,12 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Fixed
 
+- A clip of several lines drew past its row in History, over the next one, and pushed its time
+  and size out of view. A preview is now always one line: line breaks, tabs and other runs of
+  whitespace become single spaces, and the row says how many lines the clip has. Previews are
+  worked out from the stored text each time the list is drawn, so entries saved before this are
+  fixed too. Each row also clips what it draws, so nothing can paint outside it again.
+
 - On Windows, a window closed and opened again drew only the text in its lists: no title bar, no
   sidebar, no card backgrounds, with the desktop showing through. The software renderer repainted
   only what had changed, while Windows had discarded the rest. A closed window is now dropped and a

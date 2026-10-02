@@ -1421,6 +1421,10 @@ export component AppWindow inherits Window {
 
                                         for entry[index] in root.history: Rectangle {
                                             height: entry.has-thumb ? 74px : 62px;
+                                            // Nothing a row holds may paint over the next one,
+                                            // whatever arrives in it. The preview is already one
+                                            // line; this is the backstop.
+                                            clip: true;
                                             border-radius: 12px;
                                             border-width: 1px;
                                             background: row-touch.has-hover ? Theme.raised-2 : Theme.raised-1;

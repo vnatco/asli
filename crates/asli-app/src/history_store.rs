@@ -96,6 +96,7 @@ impl HistorySource for StoreHistory {
             .into_iter()
             .map(|summary| HistoryEntry {
                 preview: summary.preview,
+                lines: summary.lines,
                 is_image: matches!(summary.kind, Kind::ImagePng),
                 ts_ms: summary.ts_ms,
                 bytes: summary.bytes,

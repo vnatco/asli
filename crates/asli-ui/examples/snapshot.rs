@@ -252,6 +252,8 @@ fn sample(ui: &AppWindow) {
     ui.set_history(ModelRc::new(VecModel::from(vec![
         row("Replay protection now survives restarts, so sync no longer depends on the clocks agreeing.", "3 minutes ago · 120 bytes · from MacBook Pro", false, false),
         row("Image, 1440 × 900", "11 minutes ago · 284 KB · from this device", true, false),
+        // A clip of several lines, as the history shows one: on one line, saying how many.
+        row("Dear team, the release is tagged. Notes are in the changelog. Thanks all", "3 days ago · 52 bytes · 3 lines · from this device", false, false),
         row("wss://asli.vnat.dev/v1", "26 minutes ago · 21 bytes · from fedora-desk", false, true),
         row("Tests: 350 pass on Linux, and 336 pass as real Windows binaries under Wine.", "1 hour ago · 199 bytes · from fedora-desk", false, false),
     ])));

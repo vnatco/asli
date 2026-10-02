@@ -127,8 +127,10 @@ pub trait HistorySource: Send {
 /// Mirrors `asli_history::Summary`: enough to draw a list without decrypting more than necessary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
-    /// The first part of the text, or empty for an image.
+    /// The text on one line and shortened, from `asli_history::preview`, or empty for an image.
     pub preview: String,
+    /// How many lines the text spans, or 0 for an image.
+    pub lines: usize,
     /// Whether this is an image rather than text.
     pub is_image: bool,
     /// When it was captured, milliseconds since the Unix epoch.
@@ -192,9 +194,15 @@ impl MemoryHistory {
         // store, so restoring an entry or copying the same thing again does not grow the list.
         self.entries.retain(|(_, existing)| *existing != content);
 
-        let (preview, is_image, bytes) = match &content {
-            HistoryContent::Text(text) => (preview_of(text), false, text.len()),
-            HistoryContent::ImagePng(png) => (String::new(), true, png.len()),
+        // The same preview the encrypted store makes, so the two kinds of history cannot disagree.
+        let (preview, lines, is_image, bytes) = match &content {
+            HistoryContent::Text(text) => (
+                asli_history::preview(text),
+                asli_history::line_count(text),
+                false,
+                text.len(),
+            ),
+            HistoryContent::ImagePng(png) => (String::new(), 0, true, png.len()),
         };
 
         self.next_key = self.next_key.wrapping_add(1);
@@ -205,6 +213,7 @@ impl MemoryHistory {
             (
                 HistoryEntry {
                     preview,
+                    lines,
                     is_image,
                     ts_ms,
                     bytes,
@@ -272,16 +281,6 @@ impl HistorySource for MemoryHistory {
         // Enabled is part of what the screen shows, so flipping it counts as a change too.
         self.revision.wrapping_mul(2) | u64::from(self.enabled)
     }
-}
-
-/// The first line of a clip, shortened, for a list row.
-fn preview_of(text: &str) -> String {
-    let first = text.lines().next().unwrap_or("").trim();
-    let mut out: String = first.chars().take(120).collect();
-    if first.chars().count() > 120 {
-        out.push('\u{2026}');
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1191,6 +1190,10 @@ fn refresh_history(window: &AppWindow) {
                 tray::relative_time(Some(entry.ts_ms), now),
                 human_bytes(entry.bytes),
             ];
+            // A clip of several lines is shown on one, so the row says it is more than that.
+            if entry.lines > 1 {
+                meta.push(format!("{} lines", entry.lines));
+            }
             if let Some(thumbnail) = &thumbnail {
                 if thumbnail.width > 0 {
                     meta.push(format!("{} \u{d7} {}", thumbnail.width, thumbnail.height));
