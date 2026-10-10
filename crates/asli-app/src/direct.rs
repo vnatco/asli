@@ -59,6 +59,23 @@ pub fn is_local(ip: IpAddr) -> bool {
     }
 }
 
+/// A listener on a port of its own, without blocking, and the addresses that reach it from the
+/// local network. Nothing when this machine has no local address or cannot listen.
+pub(crate) fn local_listener() -> Option<(TcpListener, Vec<String>)> {
+    let ips = local_addrs();
+    if ips.is_empty() {
+        return None;
+    }
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    listener.set_nonblocking(true).ok()?;
+    let addrs = ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port).to_string())
+        .collect();
+    Some((listener, addrs))
+}
+
 /// Starts listening for the receiver of `offer_id`. Returns the addresses to name in the offer,
 /// or nothing when this machine has no local address or cannot listen.
 pub(crate) fn listen(
@@ -66,19 +83,9 @@ pub(crate) fn listen(
     offer_id: OfferId,
     key: Zeroizing<[u8; 32]>,
 ) -> Vec<String> {
-    let ips = local_addrs();
-    if ips.is_empty() {
-        return Vec::new();
-    }
-    let Ok(listener) = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+    let Some((listener, addrs)) = local_listener() else {
         return Vec::new();
     };
-    let Ok(port) = listener.local_addr().map(|a| a.port()) else {
-        return Vec::new();
-    };
-    if listener.set_nonblocking(true).is_err() {
-        return Vec::new();
-    }
     let transfers = transfers.clone();
     let spawned = std::thread::Builder::new()
         .name("asli-direct-send".to_owned())
@@ -86,9 +93,7 @@ pub(crate) fn listen(
     if spawned.is_err() {
         return Vec::new();
     }
-    ips.into_iter()
-        .map(|ip| SocketAddr::new(ip, port).to_string())
-        .collect()
+    addrs
 }
 
 /// Waits for the receiver, then sends it the file.
@@ -247,7 +252,7 @@ pub(crate) fn fetch(
 }
 
 /// Connects to whichever address answers first.
-fn reach(addrs: &[String]) -> Option<TcpStream> {
+pub(crate) fn reach(addrs: &[String]) -> Option<TcpStream> {
     let (tx, rx) = mpsc::channel();
     for addr in addrs {
         let Ok(addr) = addr.parse::<SocketAddr>() else {
@@ -270,14 +275,14 @@ fn reach(addrs: &[String]) -> Option<TcpStream> {
     rx.recv_timeout(REACH + Duration::from_millis(200)).ok()
 }
 
-fn write_frame(socket: &mut TcpStream, frame: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_frame(socket: &mut TcpStream, frame: &[u8]) -> std::io::Result<()> {
     let len = u32::try_from(frame.len()).map_err(|_| std::io::ErrorKind::InvalidInput)?;
     socket.write_all(&len.to_be_bytes())?;
     socket.write_all(frame)
 }
 
 /// Reads one frame, refusing anything longer than `max` before allocating for it.
-fn read_frame(socket: &mut TcpStream, max: usize) -> Option<Vec<u8>> {
+pub(crate) fn read_frame(socket: &mut TcpStream, max: usize) -> Option<Vec<u8>> {
     let mut len = [0u8; 4];
     socket.read_exact(&mut len).ok()?;
     let len = usize::try_from(u32::from_be_bytes(len)).ok()?;

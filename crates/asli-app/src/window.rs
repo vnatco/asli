@@ -978,6 +978,69 @@ fn finish_join(
     Ok(())
 }
 
+/// Attaches the Settings switches, which apply as soon as they are flipped.
+fn wire_switches(window: &AppWindow) {
+    // The switches apply immediately. A switch that needs a separate save does not feel like a
+    // switch, and these three are all cheap and reversible.
+    let handle = window.as_weak();
+    window.on_set_notifications(move |on| {
+        if let Some(window) = handle.upgrade() {
+            apply(&window, |config| config.notifications = on);
+            if let Some(context) = CONTEXT.get() {
+                context
+                    .controls
+                    .settings
+                    .notifications
+                    .store(on, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+
+    let handle = window.as_weak();
+    window.on_set_autostart(move |on| {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        // Reported rather than assumed: the stored preference and the actual entry disagree
+        // exactly when something went wrong, which is the moment it matters.
+        match crate::autostart::set_enabled(on) {
+            Ok(()) => {
+                apply(&window, |config| config.autostart = on);
+                window.set_autostart_detail(
+                    crate::autostart::describe_location()
+                        .unwrap_or_else(|err| err.to_string())
+                        .into(),
+                );
+            }
+            Err(err) => {
+                window.set_autostart(!on);
+                window.set_autostart_detail(format!("could not change this: {err}").into());
+            }
+        }
+    });
+
+    let handle = window.as_weak();
+    window.on_set_keep_history(move |on| {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        apply(&window, |config| config.keep_history = on);
+        with_history(|history| history.set_enabled(on));
+        refresh_history(&window);
+    });
+
+    let handle = window.as_weak();
+    window.on_set_same_network_only(move |on| {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        apply(&window, |config| config.same_network_only = on);
+        if let Some(context) = CONTEXT.get() {
+            context.controls.transfers.set_same_network_only(on);
+        }
+    });
+}
+
 /// Makes a join code and starts waiting for the device that types it.
 fn open_invite() -> Result<()> {
     let context = CONTEXT.get().ok_or(Error::NoAccount)?;
@@ -988,6 +1051,7 @@ fn open_invite() -> Result<()> {
         device: DeviceKeys::from_secret(account.device.secret()),
         account_secret: Zeroizing::new(*account.identity.secret()),
         never_exported: config.key_never_exported,
+        same_network_only: config.same_network_only,
     })?;
     WINDOW.with_borrow(|window| {
         if let Some(window) = window.as_ref() {
@@ -1032,6 +1096,7 @@ fn refresh_invite(window: &AppWindow) {
         return;
     };
     let left_s = expires_at_ms.saturating_sub(asli_net::client::now_ms()) / 1000;
+    window.set_invite_nearby_only(view.nearby_only);
     window.set_invite_remaining(format!("{}:{:02}", left_s / 60, left_s % 60).into());
     let rows: Vec<AskRow> = view
         .asking
@@ -1190,54 +1255,7 @@ fn build() -> Result<AppWindow> {
         }
     });
 
-    // The switches apply immediately. A switch that needs a separate save does not feel like a
-    // switch, and these three are all cheap and reversible.
-    let handle = window.as_weak();
-    window.on_set_notifications(move |on| {
-        if let Some(window) = handle.upgrade() {
-            apply(&window, |config| config.notifications = on);
-            if let Some(context) = CONTEXT.get() {
-                context
-                    .controls
-                    .settings
-                    .notifications
-                    .store(on, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    });
-
-    let handle = window.as_weak();
-    window.on_set_autostart(move |on| {
-        let Some(window) = handle.upgrade() else {
-            return;
-        };
-        // Reported rather than assumed: the stored preference and the actual entry disagree
-        // exactly when something went wrong, which is the moment it matters.
-        match crate::autostart::set_enabled(on) {
-            Ok(()) => {
-                apply(&window, |config| config.autostart = on);
-                window.set_autostart_detail(
-                    crate::autostart::describe_location()
-                        .unwrap_or_else(|err| err.to_string())
-                        .into(),
-                );
-            }
-            Err(err) => {
-                window.set_autostart(!on);
-                window.set_autostart_detail(format!("could not change this: {err}").into());
-            }
-        }
-    });
-
-    let handle = window.as_weak();
-    window.on_set_keep_history(move |on| {
-        let Some(window) = handle.upgrade() else {
-            return;
-        };
-        apply(&window, |config| config.keep_history = on);
-        with_history(|history| history.set_enabled(on));
-        refresh_history(&window);
-    });
+    wire_switches(&window);
 
     // Closing with the title bar button hides rather than quits, for the same reason Escape does.
     let handle = window.as_weak();
@@ -2136,6 +2154,7 @@ fn load_settings(window: &AppWindow) {
     window.set_saved_device_name(name.into());
     window.set_notifications(config.notifications);
     window.set_keep_history(config.keep_history);
+    window.set_same_network_only(config.same_network_only);
 
     let (cap_index, exact) = nearest_cap(config.max_content_bytes);
     window.set_size_cap_index(cap_index);

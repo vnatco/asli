@@ -480,6 +480,7 @@ export component AppWindow inherits Window {
     in property <image> qr;
     in property <string> invite-code: "";
     in property <string> invite-remaining: "";
+    in property <bool> invite-nearby-only: false;
     in property <InviteState> invite-state: InviteState.idle;
     in property <[AskRow]> invite-asking: [];
     in property <string> invite-message: "";
@@ -532,6 +533,7 @@ export component AppWindow inherits Window {
     in-out property <bool> notifications: true;
     in-out property <bool> autostart: false;
     in-out property <bool> keep-history: true;
+    in-out property <bool> same-network-only: false;
     in property <string> saved-relay-url: "";
     in property <string> saved-device-name: "";
     in property <int> saved-size-cap-index: 1;
@@ -592,6 +594,7 @@ export component AppWindow inherits Window {
     callback set-notifications(bool);
     callback set-autostart(bool);
     callback set-keep-history(bool);
+    callback set-same-network-only(bool);
     callback hide-window();
     // Where the pointer is, in window coordinates, so the release can be handed back.
     callback start-drag(length, length);
@@ -1280,7 +1283,9 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 spacing: 8px;
                                                 Caption {
-                                                    text: "Works once. Expires in " + root.invite-remaining + ".";
+                                                    text: "Works once. Expires in " + root.invite-remaining + "."
+                                                        + (root.invite-nearby-only ? " Only a device on this network can use it." : "");
+                                                    wrap: word-wrap;
                                                     horizontal-stretch: 1;
                                                     vertical-alignment: center;
                                                 }
@@ -2584,6 +2589,12 @@ export component AppWindow inherits Window {
                                                 mono-detail: true;
                                                 checked <=> root.autostart;
                                                 toggled(on) => { root.set-autostart(on); }
+                                            }
+                                            SettingRow {
+                                                title: "Same network only";
+                                                detail: "Approve a new device, and send or receive a file, only when the other device is on this network. Clips still sync from anywhere.";
+                                                checked <=> root.same-network-only;
+                                                toggled(on) => { root.set-same-network-only(on); }
                                             }
                                             SettingRow {
                                                 title: "Keep history";

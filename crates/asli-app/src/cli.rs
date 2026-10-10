@@ -629,11 +629,16 @@ fn add(paths: &Paths) -> Result<()> {
         device: asli_crypto::device::DeviceKeys::from_secret(account.device.secret()),
         account_secret: Zeroizing::new(*account.identity.secret()),
         never_exported: config.key_never_exported,
+        same_network_only: config.same_network_only,
     })?;
 
     println!("{}", qr::render(invitation.code())?);
     println!("  {}", invitation.code());
     println!();
+    if config.same_network_only {
+        println!("Same network only is on: only a device on this network can use this code.");
+        println!();
+    }
     println!("On the new device, choose Join an existing account (or run 'asli join') and type");
     println!("this code. It works once, for ten minutes, and only with your approval here.");
     println!();

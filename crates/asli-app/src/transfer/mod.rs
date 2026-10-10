@@ -145,6 +145,8 @@ struct State {
     receiving: HashMap<OfferId, Incoming>,
     pace: Pace,
     shelf: shelf::Shelf,
+    /// Files only on the local network, never through the relay.
+    same_network_only: bool,
     /// Bumped on every change, so a window knows to redraw.
     revision: u64,
 }
@@ -224,6 +226,13 @@ impl Transfers {
                 conn_id: None,
             });
             state.devices = devices;
+        }
+    }
+
+    /// Keeps files to the local network, or lets them go through the relay when it cannot be used.
+    pub fn set_same_network_only(&self, on: bool) {
+        if let Ok(mut state) = self.0.lock() {
+            state.same_network_only = on;
         }
     }
 
@@ -447,6 +456,11 @@ impl Transfers {
                 }
                 Direct::new(addrs, &device.box_pub, &key).ok()
             });
+        if direct.is_none() && state.same_network_only {
+            return Err(format!(
+                "{peer} can't be reached on this network, and Same network only is on."
+            ));
+        }
         let offer = Offer {
             offer_id,
             from_device_id: link.device_id,
@@ -497,7 +511,10 @@ impl Transfers {
             .lock()
             .map_err(|_| "Asli is shutting down.".to_owned())?;
         let State {
-            link, receiving, ..
+            link,
+            receiving,
+            same_network_only,
+            ..
         } = &mut *state;
         let link = link.as_ref().ok_or("Asli is not connected.")?;
         let incoming = receiving
@@ -517,6 +534,13 @@ impl Transfers {
             let key = direct.open_key(&link.keys()).ok()?;
             Some((direct.addrs.clone(), key))
         });
+        if direct.is_none() && *same_network_only {
+            drop(file);
+            let _ = fs::remove_file(&part_path);
+            return Err(
+                "It can only come through the relay, and Same network only is on.".to_owned(),
+            );
+        }
         if direct.is_none() {
             if let Err(err) = answer(link, id, true, &incoming.offer.reply_to) {
                 let _ = fs::remove_file(&part_path);
@@ -550,12 +574,24 @@ impl Transfers {
             return;
         };
         let State {
-            link, receiving, ..
+            link,
+            receiving,
+            same_network_only,
+            ..
         } = &mut *state;
         let Some(incoming) = receiving.get_mut(id) else {
             return;
         };
         if incoming.stage != Stage::Moving(0) || incoming.direct {
+            return;
+        }
+        if *same_network_only {
+            let reason = "it couldn't be reached on this network, and Same network only is on";
+            match link.as_ref() {
+                Some(link) => fail_incoming(link, incoming, reason),
+                None => give_up_incoming(incoming, reason),
+            }
+            state.revision += 1;
             return;
         }
         let sent = link
@@ -883,6 +919,16 @@ fn on_answer(state: &mut State, body: &[u8]) {
     }
     if !answer.accepted {
         outgoing.stage = Stage::Declined;
+        return;
+    }
+    if state.same_network_only {
+        outgoing.stage = Stage::Failed(
+            "it couldn't be reached on this network, and Same network only is on.".to_owned(),
+        );
+        let cancel = Cancel {
+            offer_id: answer.offer_id,
+        };
+        let _ = send_msg(link, MsgKind::FileCancel, cancel.encode(), &answer.reply_to);
         return;
     }
     outgoing.to = Some(answer.reply_to);

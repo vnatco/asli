@@ -71,6 +71,10 @@ pub struct Config {
     /// before this field is treated as possibly exposed.
     #[serde(default)]
     pub key_never_exported: bool,
+    /// Whether this device approves a new device only when it reaches this one on the local
+    /// network, and sends and receives files only on it, never through the relay.
+    #[serde(default)]
+    pub same_network_only: bool,
 }
 
 /// History is on by default, which is what every comparable tool does and what makes the feature
@@ -102,6 +106,7 @@ impl Config {
             history_entries: default_history_entries(),
             device_name: String::new(),
             key_never_exported: false,
+            same_network_only: false,
         })
     }
 

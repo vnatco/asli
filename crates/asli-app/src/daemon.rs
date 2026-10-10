@@ -761,6 +761,9 @@ pub async fn run(
         controls.devices.clone(),
     );
     controls.transfers.load_shelf(paths.dir.join("shelf.json"));
+    controls
+        .transfers
+        .set_same_network_only(config.same_network_only);
     let rekey_watch = spawn_rekey_watch(paths, controls.clone());
     let pacer = {
         let transfers = controls.transfers.clone();

@@ -203,6 +203,22 @@ fn main() {
             }),
         ),
         (
+            "05d-add-device-nearby",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Token);
+                ui.set_invite_state(InviteState::Waiting);
+                ui.set_invite_asking(ModelRc::new(VecModel::from(Vec::<AskRow>::new())));
+                ui.set_invite_nearby_only(true);
+            }),
+        ),
+        (
+            "12b-settings-same-network",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Settings);
+                ui.set_same_network_only(true);
+            }),
+        ),
+        (
             "14b-shelf-empty",
             Box::new(|ui: &AppWindow| ui.set_screen(Screen::Shelf)),
         ),

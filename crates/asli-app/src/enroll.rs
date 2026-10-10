@@ -10,10 +10,18 @@
 //! The relay keeps nothing for a room, so a request sent while the other side is between
 //! connections would be lost. The new device therefore asks again every few seconds until it is
 //! answered, and the approving device recognises a repeat by its request id.
+//!
+//! With Same network only on, the approving device also listens on its local network and says
+//! where in the meeting room. It then takes a request only when it arrives over that connection,
+//! sealed under a key only the code makes, and answers over it too: someone elsewhere with the
+//! code, even with the approval, cannot join.
 
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use asli_crypto::direct::{Side, Stream, SALT_LEN};
 
 use asli_crypto::device::DeviceKeys;
 use asli_crypto::enroll::{self, JoinCode, JoinRequest, REQUEST_ID_LEN};
@@ -35,6 +43,12 @@ const MAX_REQUESTS: usize = 8;
 
 /// Token of the answer the approving device sends, to know when the relay has read it.
 const ANSWER_TOKEN: u64 = 1;
+
+/// Largest frame either device sends over the local network: a request, or an answer.
+const NEARBY_FRAME: usize = 4096;
+
+/// An answer that came over the local network, waiting to be read.
+type NearbyAnswer = Arc<Mutex<Option<(MsgKind, Vec<u8>)>>>;
 
 // ---------------------------------------------------------------------------------------------
 // The device already on the account
@@ -73,6 +87,8 @@ pub struct InviteView {
     pub listening: bool,
     /// Devices asking, oldest first.
     pub asking: Vec<Asking>,
+    /// Whether only a device on this local network can ask.
+    pub nearby_only: bool,
     /// Set once it is over.
     pub outcome: Option<InviteOutcome>,
 }
@@ -102,6 +118,8 @@ pub struct Approver {
     pub account_secret: Zeroizing<[u8; 32]>,
     /// Whether the account key has never been shown in an old style join token.
     pub never_exported: bool,
+    /// Whether to take a request only from a device on this local network.
+    pub same_network_only: bool,
 }
 
 impl Invitation {
@@ -223,6 +241,16 @@ fn run_invitation(
     let mut session = Session::new(meeting, [0u8; 16], 0);
     let shared = Arc::new(Mutex::new(Shared::default()));
 
+    let nearby_only = approver.same_network_only;
+    let where_body = if nearby_only {
+        match listen_nearby(code, room, &shared, view, cancel, expires_at_ms) {
+            Ok(body) => Some(body),
+            Err(failed) => return failed,
+        }
+    } else {
+        None
+    };
+
     runtime.block_on(async {
         loop {
             let over = || cancel.load(Ordering::Relaxed) || client::now_ms() >= expires_at_ms;
@@ -233,10 +261,11 @@ fn run_invitation(
 
             let mut on_event = |event: ClientEvent| match event {
                 ClientEvent::Authenticated { .. } => set_listening(view, true),
+                // Over the relay, a request counts only when any device may join from anywhere.
                 ClientEvent::Message {
                     kind: MsgKind::JoinRequest,
                     body,
-                } => take_request(code, &room, &body, &shared, view),
+                } if !nearby_only => take_request(code, &room, &body, &shared, view),
                 ClientEvent::Sent { token } if token == ANSWER_TOKEN => {
                     if let Ok(mut shared) = shared.lock() {
                         shared.confirmed = true;
@@ -255,10 +284,24 @@ fn run_invitation(
                 if let Some((kind, body)) = resend {
                     let _ = local_tx.send(answer_event(kind, body)).await;
                 }
+                let mut ticks = 0u32;
                 loop {
                     let done = shared.lock().map_or(true, |s| s.confirmed);
                     if done || over() {
                         return;
+                    }
+                    // Says where to find this device on the local network, every few seconds, for
+                    // a new device that connects after this one did.
+                    if let Some(body) = where_body.as_ref() {
+                        if ticks.is_multiple_of(16) {
+                            let _ = local_tx.try_send(LocalEvent::Message {
+                                kind: MsgKind::JoinWhere,
+                                body: body.clone(),
+                                to: None,
+                                token: None,
+                            });
+                        }
+                        ticks = ticks.wrapping_add(1);
                     }
                     tokio::select! {
                         () = tokio::time::sleep(Duration::from_millis(250)) => {}
@@ -294,6 +337,128 @@ fn run_invitation(
             tokio::time::sleep(RECONNECT_AFTER).await;
         }
     })
+}
+
+/// Starts listening on the local network for the device that has the code. Returns what to say
+/// in the meeting room so it can find this one.
+fn listen_nearby(
+    code: &JoinCode,
+    room: [u8; 16],
+    shared: &Arc<Mutex<Shared>>,
+    view: &Arc<Mutex<InviteView>>,
+    cancel: &Arc<AtomicBool>,
+    expires_at_ms: u64,
+) -> Result<Vec<u8>, InviteOutcome> {
+    let failed = |why: &str| InviteOutcome::Failed(why.to_owned());
+    let (listener, addrs) = crate::direct::local_listener()
+        .ok_or_else(|| failed("this device is on no local network, and Same network only is on"))?;
+    let body = enroll::where_body(&addrs).map_err(|_| failed("too many local addresses"))?;
+    if let Ok(mut view) = view.lock() {
+        view.nearby_only = true;
+    }
+    let nearby = Nearby {
+        code: JoinCode::parse(&code.encode()).ok(),
+        room,
+        shared: Arc::clone(shared),
+        view: Arc::clone(view),
+        cancel: Arc::clone(cancel),
+        expires_at_ms,
+    };
+    std::thread::Builder::new()
+        .name("asli-invite-nearby".to_owned())
+        .spawn(move || nearby.serve(&listener))
+        .map_err(|_| failed("could not listen on the local network"))?;
+    Ok(body)
+}
+
+/// What the approving device's listener on the local network needs.
+struct Nearby {
+    code: Option<JoinCode>,
+    room: [u8; 16],
+    shared: Arc<Mutex<Shared>>,
+    view: Arc<Mutex<InviteView>>,
+    cancel: Arc<AtomicBool>,
+    expires_at_ms: u64,
+}
+
+impl Nearby {
+    fn over(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed) || client::now_ms() >= self.expires_at_ms
+    }
+
+    /// Takes connections until the invitation is over. Anyone on the network can connect; only a
+    /// device holding the code can say anything.
+    fn serve(self, listener: &std::net::TcpListener) {
+        let this = Arc::new(self);
+        while !this.over() {
+            match listener.accept() {
+                Ok((socket, _)) => {
+                    let this = Arc::clone(&this);
+                    let _ = std::thread::Builder::new()
+                        .name("asli-invite-peer".to_owned())
+                        .spawn(move || this.talk(socket));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Reads one request from a device on the network, then answers it there once the person
+    /// has decided.
+    fn talk(&self, mut socket: TcpStream) {
+        let Some(code) = self.code.as_ref() else {
+            return;
+        };
+        let ready = socket.set_nonblocking(false).is_ok()
+            && socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .is_ok()
+            && socket
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .is_ok();
+        if !ready {
+            return;
+        }
+        let mut salt = [0u8; SALT_LEN];
+        if std::io::Read::read_exact(&mut socket, &mut salt).is_err() {
+            return;
+        }
+        let mut stream = Stream::new(&code.direct_key(), &salt, &self.room, Side::Sender);
+        let Some(body) = crate::direct::read_frame(&mut socket, NEARBY_FRAME)
+            .and_then(|frame| stream.open(&frame).ok())
+        else {
+            return;
+        };
+        take_request(code, &self.room, &body, &self.shared, &self.view);
+        eprintln!(
+            "{}",
+            log_line("join_nearby", "a request arrived on the local network")
+        );
+        // Waits for the person, then answers here as well as through the relay.
+        loop {
+            if self.over() {
+                return;
+            }
+            let answer = self.shared.lock().ok().and_then(|s| {
+                s.answer
+                    .as_ref()
+                    .map(|(kind, body, _)| (*kind, body.clone()))
+            });
+            if let Some((kind, body)) = answer {
+                let mut plain = Vec::with_capacity(1 + body.len());
+                plain.push(kind.code());
+                plain.extend_from_slice(&body);
+                if let Ok(frame) = stream.seal(&plain) {
+                    let _ = crate::direct::write_frame(&mut socket, &frame);
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
 }
 
 fn answer_event(kind: MsgKind, body: Vec<u8>) -> LocalEvent {
@@ -538,9 +703,14 @@ fn run_join(
     let Ok(body) = request.encode(&joiner.device, &room) else {
         return JoinOutcome::Failed("could not sign the request".to_owned());
     };
+    let body_for_nearby = body.clone();
     let mut session = Session::new(meeting, [0u8; 16], 0);
     let gives_up_at = client::now_ms() + enroll::CODE_LIFETIME_MS;
     let outcome: Arc<Mutex<Option<JoinOutcome>>> = Arc::new(Mutex::new(None));
+    // An answer that came over the local network, read here like one from the relay.
+    let nearby_answer: NearbyAnswer = Arc::new(Mutex::new(None));
+    let reaching = Arc::new(AtomicBool::new(false));
+    let judge = |kind: MsgKind, body: &[u8]| judge(code, &room, joiner, request, kind, body);
 
     runtime.block_on(async {
         loop {
@@ -552,20 +722,16 @@ fn run_join(
 
             let mut on_event = |event: ClientEvent| {
                 let found = match event {
+                    // The approving device takes requests only on its local network: ask there.
                     ClientEvent::Message {
-                        kind: MsgKind::JoinGrant,
+                        kind: MsgKind::JoinWhere,
                         body,
-                    } => enroll::open_grant(code, &room, &joiner.device, &request.request_id, &body)
-                        .ok()
-                        .map(|granted| JoinOutcome::Granted {
-                            secret: granted.secret,
-                            never_exported: granted.never_exported,
-                        }),
-                    ClientEvent::Message {
-                        kind: MsgKind::JoinDecline,
-                        body,
-                    } => enroll::is_decline_for(code, &room, &request.request_id, &body)
-                        .then_some(JoinOutcome::Declined),
+                    } => {
+                        let found = (&reaching, &nearby_answer);
+                        ask_nearby(code, &room, &body_for_nearby, &body, found, gives_up_at);
+                        None
+                    }
+                    ClientEvent::Message { kind, body } => judge(kind, &body),
                     _ => None,
                 };
                 if let Some(found) = found {
@@ -579,6 +745,7 @@ fn run_join(
             // one, or reconnect, and the relay keeps nothing for it.
             let asker = async {
                 loop {
+                    take_nearby_answer(&nearby_answer, &outcome, &judge);
                     let answered = outcome.lock().map_or(true, |slot| slot.is_some());
                     if answered || over() {
                         return;
@@ -598,6 +765,7 @@ fn run_join(
                         }
                     }
                     for _ in 0..(ASK_EVERY.as_millis() / 250) {
+                        take_nearby_answer(&nearby_answer, &outcome, &judge);
                         let answered = outcome.lock().map_or(true, |slot| slot.is_some());
                         if answered || over() {
                             return;
@@ -623,4 +791,107 @@ fn run_join(
             tokio::time::sleep(RECONNECT_AFTER).await;
         }
     })
+}
+
+/// What an answer means for this request, from whichever way it came.
+fn judge(
+    code: &JoinCode,
+    room: &[u8; 16],
+    joiner: &Joiner,
+    request: &JoinRequest,
+    kind: MsgKind,
+    body: &[u8],
+) -> Option<JoinOutcome> {
+    match kind {
+        MsgKind::JoinGrant => {
+            enroll::open_grant(code, room, &joiner.device, &request.request_id, body)
+                .ok()
+                .map(|granted| JoinOutcome::Granted {
+                    secret: granted.secret,
+                    never_exported: granted.never_exported,
+                })
+        }
+        MsgKind::JoinDecline => enroll::is_decline_for(code, room, &request.request_id, body)
+            .then_some(JoinOutcome::Declined),
+        _ => None,
+    }
+}
+
+/// Moves an answer that came over the local network into the outcome, if it is one.
+fn take_nearby_answer(
+    slot: &NearbyAnswer,
+    outcome: &Arc<Mutex<Option<JoinOutcome>>>,
+    judge: &impl Fn(MsgKind, &[u8]) -> Option<JoinOutcome>,
+) {
+    let Some((kind, body)) = slot.lock().ok().and_then(|mut s| s.take()) else {
+        return;
+    };
+    if let Some(found) = judge(kind, &body) {
+        if let Ok(mut outcome) = outcome.lock() {
+            outcome.get_or_insert(found);
+        }
+    }
+}
+
+/// Reaches the approving device on the local network, sends the request there, and waits for the
+/// answer on a thread of its own. One attempt at a time.
+fn ask_nearby(
+    code: &JoinCode,
+    room: &[u8; 16],
+    request: &[u8],
+    where_body: &[u8],
+    (reaching, answer): (&Arc<AtomicBool>, &NearbyAnswer),
+    gives_up_at: u64,
+) {
+    let Ok(addrs) = enroll::read_where(where_body) else {
+        return;
+    };
+    if reaching.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let key = code.direct_key();
+    let room = *room;
+    let request = request.to_vec();
+    let busy = Arc::clone(reaching);
+    let answer = Arc::clone(answer);
+    let spawned = std::thread::Builder::new()
+        .name("asli-join-nearby".to_owned())
+        .spawn(move || {
+            if let Some(found) = reach_and_ask(&key, &room, &request, &addrs, gives_up_at) {
+                if let Ok(mut slot) = answer.lock() {
+                    *slot = Some(found);
+                }
+            }
+            busy.store(false, Ordering::Relaxed);
+        });
+    if spawned.is_err() {
+        reaching.store(false, Ordering::Relaxed);
+    }
+}
+
+fn reach_and_ask(
+    key: &[u8; 32],
+    room: &[u8; 16],
+    request: &[u8],
+    addrs: &[String],
+    gives_up_at: u64,
+) -> Option<(MsgKind, Vec<u8>)> {
+    let mut socket = crate::direct::reach(addrs)?;
+    let salt = asli_crypto::random::bytes::<SALT_LEN>().ok()?;
+    let mut stream = Stream::new(key, &salt, room, Side::Receiver);
+    socket
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    std::io::Write::write_all(&mut socket, &salt).ok()?;
+    let frame = stream.seal(request).ok()?;
+    crate::direct::write_frame(&mut socket, &frame).ok()?;
+    eprintln!("{}", log_line("join_nearby", "asked on the local network"));
+    let wait = gives_up_at.saturating_sub(client::now_ms()).max(1000);
+    socket
+        .set_read_timeout(Some(Duration::from_millis(wait)))
+        .ok()?;
+    let opened = crate::direct::read_frame(&mut socket, NEARBY_FRAME)
+        .and_then(|frame| stream.open(&frame).ok())?;
+    let (&kind, body) = opened.split_first()?;
+    Some((MsgKind::from_code(kind), body.to_vec()))
 }
