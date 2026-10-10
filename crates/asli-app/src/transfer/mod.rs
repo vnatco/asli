@@ -29,6 +29,9 @@ use zeroize::Zeroizing;
 use crate::clipboard_io::log_line;
 use crate::devices::DevicesHandle;
 
+mod shelf;
+pub use shelf::{Shelved, KEEP_FOR_MS};
+
 /// Largest file offered or accepted.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -141,6 +144,7 @@ struct State {
     sending: HashMap<OfferId, Outgoing>,
     receiving: HashMap<OfferId, Incoming>,
     pace: Pace,
+    shelf: shelf::Shelf,
     /// Bumped on every change, so a window knows to redraw.
     revision: u64,
 }
@@ -233,6 +237,8 @@ impl Transfers {
             link.conn_id = Some(conn_id.to_owned());
         }
         fail_all_live(&mut state, "the connection dropped. Try again.");
+        // Tells the others what is on this shelf, and asks what is on theirs.
+        shelf::announce(&state, true, None);
     }
 
     /// Carries on any transfer the pace held back, and gives up on any that stopped moving.
@@ -242,6 +248,7 @@ impl Transfers {
             return;
         };
         let state = &mut *guard;
+        shelf::expire(state);
         let now = Instant::now();
         let mut gave_up = false;
         for outgoing in state.sending.values_mut() {
@@ -352,6 +359,12 @@ impl Transfers {
     /// Returns a sentence for the person when the file cannot be read, is too large, or the device
     /// is not connected.
     pub fn send(&self, path: &Path, to: [u8; 16]) -> Result<(), String> {
+        self.send_as(path, to, None)
+    }
+
+    /// [`Transfers::send`], under an offer id the receiver chose, for an item it asked for from
+    /// this device's shelf.
+    fn send_as(&self, path: &Path, to: [u8; 16], id: Option<OfferId>) -> Result<(), String> {
         let metadata =
             fs::metadata(path).map_err(|err| format!("Couldn't read the file: {err}"))?;
         if !metadata.is_file() {
@@ -388,9 +401,8 @@ impl Transfers {
         std::thread::Builder::new()
             .name("asli-hash".to_owned())
             .spawn(move || {
-                let outcome = hash_file(&path).and_then(|(size, sha256)| {
-                    this.offer(path.clone(), to, &conn, &peer, size, sha256)
-                });
+                let outcome = hash_file(&path)
+                    .and_then(|hashed| this.offer(path.clone(), to, &conn, &peer, hashed, id));
                 if let Err(err) = outcome {
                     eprintln!("{}", log_line("file_offer_failed", &err));
                     crate::notify::file_failed(&display_name(&path), &err);
@@ -406,8 +418,8 @@ impl Transfers {
         to: [u8; 16],
         conn: &str,
         peer: &str,
-        size: u64,
-        sha256: [u8; 32],
+        (size, sha256): (u64, [u8; 32]),
+        id: Option<OfferId>,
     ) -> Result<(), String> {
         let mut state = self
             .0
@@ -415,7 +427,11 @@ impl Transfers {
             .map_err(|_| "Asli is shutting down.".to_owned())?;
         let link = state.link.as_ref().ok_or("Asli is not connected.")?;
         let reply_to = link.conn_id.clone().ok_or("Asli is not connected.")?;
-        let offer_id: OfferId = asli_crypto::random::bytes().map_err(|e| e.to_string())?;
+        let offer_id: OfferId = match id {
+            Some(id) if !state.sending.contains_key(&id) => id,
+            Some(_) => return Err("that file is already on its way".to_owned()),
+            None => asli_crypto::random::bytes().map_err(|e| e.to_string())?,
+        };
         // Listening starts now, so the address can go in the offer. The listener waits on this
         // lock, so it sees the transfer only once it is recorded below.
         let direct = state
@@ -743,32 +759,57 @@ impl Transfers {
         let Ok(mut state) = self.0.lock() else {
             return None;
         };
-        let offered = match kind {
-            MsgKind::FileOffer => on_offer(&mut state, body),
-            MsgKind::FileAnswer => {
-                on_answer(&mut state, body);
-                None
+        let mut ask = None;
+        let mut then = Then::Nothing;
+        match kind {
+            MsgKind::FileOffer => match on_offer(&mut state, body) {
+                Some(Offered::Ask(peer, name, size)) => ask = Some((peer, name, size)),
+                Some(Offered::Wanted(id)) => then = Then::Accept(id),
+                None => {}
+            },
+            MsgKind::FileAnswer => on_answer(&mut state, body),
+            MsgKind::FileChunk => on_chunk(&mut state, body),
+            MsgKind::FileAck => on_ack(&mut state, body),
+            MsgKind::FileCancel => on_cancel(&mut state, body),
+            MsgKind::ShelfList => shelf::on_list(&mut state, body),
+            MsgKind::ShelfRequest => {
+                if let Some((path, to, id)) = shelf::on_request(&mut state, body) {
+                    then = Then::Send(path, to, id);
+                }
             }
-            MsgKind::FileChunk => {
-                on_chunk(&mut state, body);
-                None
-            }
-            MsgKind::FileAck => {
-                on_ack(&mut state, body);
-                None
-            }
-            MsgKind::FileCancel => {
-                on_cancel(&mut state, body);
-                None
-            }
-            _ => None,
-        };
+            _ => {}
+        }
         state.revision += 1;
-        offered
+        drop(state);
+
+        let outcome = match then {
+            Then::Nothing => Ok(()),
+            Then::Accept(id) => self.accept(&id, &default_folder()),
+            Then::Send(path, to, id) => self.send_as(&path, to, Some(id)),
+        };
+        if let Err(why) = outcome {
+            eprintln!("{}", log_line("shelf_transfer_failed", &why));
+        }
+        ask
     }
 }
 
-fn on_offer(state: &mut State, body: &[u8]) -> Option<(String, String, u64)> {
+/// What a new offer calls for.
+enum Offered {
+    /// Ask the person: the sender's name, the file's name, and its size.
+    Ask(String, String, u64),
+    /// Take it: this device asked for it from that device's shelf.
+    Wanted(OfferId),
+}
+
+/// What to do once the lock is let go.
+enum Then {
+    Nothing,
+    Accept(OfferId),
+    Send(PathBuf, [u8; 16], OfferId),
+}
+
+fn on_offer(state: &mut State, body: &[u8]) -> Option<Offered> {
     let link = state.link.as_ref()?;
     // Believed only when signed by the key its claimed sender pinned. The name shown is the one
     // that device's card gave, not anything the offer says.
@@ -788,6 +829,8 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<(String, String, u64)> {
     let peer = pinned.name.clone();
     let name = safe_name(&offer.name);
     let size = offer.size;
+    let offer_id = offer.offer_id;
+    let wanted = shelf::was_wanted(state, &offer_id, &from);
     eprintln!(
         "{}",
         log_line("file_offered_here", &format!("{size} bytes from {peer}"))
@@ -806,7 +849,11 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<(String, String, u64)> {
             direct: false,
         },
     );
-    Some((peer, name, size))
+    Some(if wanted {
+        Offered::Wanted(offer_id)
+    } else {
+        Offered::Ask(peer, name, size)
+    })
 }
 
 fn on_answer(state: &mut State, body: &[u8]) {

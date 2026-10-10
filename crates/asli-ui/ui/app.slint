@@ -24,6 +24,14 @@ export enum Screen {
     History,
     Settings,
     Status,
+    Shelf,
+}
+
+// One file on a shelf, flattened for drawing.
+export struct ShelfRow {
+    name: string,
+    // The device it is on, its size, and how long it stays.
+    detail: string,
 }
 
 // One history entry, flattened for drawing. The identifier stays on the Rust side and is looked
@@ -494,6 +502,8 @@ export component AppWindow inherits Window {
     in property <string> drop-name: "";
     in property <[string]> drop-targets: [];
     in property <bool> drop-hover: false;
+    in property <[ShelfRow]> shelf-mine: [];
+    in property <[ShelfRow]> shelf-theirs: [];
 
     // First run.
     in property <bool> creating: false;
@@ -564,6 +574,11 @@ export component AppWindow inherits Window {
     callback clear-files();
     callback send-dropped(int);
     callback cancel-drop();
+    callback shelve-dropped();
+    callback add-to-shelf();
+    callback unshelve(int);
+    callback take-shelved(int);
+    callback remove-shelved(int);
     callback restore-entry(int);
     callback copy-entry(int);
     callback forget-entry(int);
@@ -639,8 +654,9 @@ export component AppWindow inherits Window {
             if (event.modifiers.control && root.chrome) {
                 if (event.text == "1") { root.open-screen(Screen.Status); return accept; }
                 if (event.text == "2") { root.open-screen(Screen.History); return accept; }
-                if (event.text == "3") { root.open-screen(Screen.Token); return accept; }
-                if (event.text == "4") { root.open-screen(Screen.Settings); return accept; }
+                if (event.text == "3") { root.open-screen(Screen.Shelf); return accept; }
+                if (event.text == "4") { root.open-screen(Screen.Token); return accept; }
+                if (event.text == "5") { root.open-screen(Screen.Settings); return accept; }
             }
             return reject;
         }
@@ -786,6 +802,12 @@ export component AppWindow inherits Window {
                                     icon: Icons.history;
                                     selected: root.screen == Screen.History;
                                     clicked => { root.open-screen(Screen.History); }
+                                }
+                                NavItem {
+                                    text: "Shelf";
+                                    icon: Icons.shelf;
+                                    selected: root.screen == Screen.Shelf;
+                                    clicked => { root.open-screen(Screen.Shelf); }
                                 }
                                 NavItem {
                                     text: "Add a device";
@@ -1861,7 +1883,9 @@ export component AppWindow inherits Window {
                                                 padding-right: 16px;
                                                 spacing: 0px;
                                                 Text {
-                                                    text: "Send " + root.drop-name + " to";
+                                                    text: root.drop-targets.length > 0
+                                                        ? "Send " + root.drop-name + " to"
+                                                        : "Put " + root.drop-name + " on the shelf?";
                                                     color: Theme.text;
                                                     font-size: 13.5px;
                                                     font-weight: 600;
@@ -1877,6 +1901,12 @@ export component AppWindow inherits Window {
                                                         icon: Icons.send;
                                                         show-icon: true;
                                                         clicked => { root.send-dropped(t); }
+                                                    }
+                                                    Button {
+                                                        text: "Put on the shelf";
+                                                        icon: Icons.shelf;
+                                                        show-icon: true;
+                                                        clicked => { root.shelve-dropped(); }
                                                     }
                                                     Button {
                                                         text: "Cancel";
@@ -2294,6 +2324,163 @@ export component AppWindow inherits Window {
                         }
 
                         // ─────────────────────────── Settings ────────────────────────────
+                        if root.screen == Screen.Shelf: ScreenFrame {
+                            Scroller {
+                                content-height: shelf-screen.preferred-height;
+
+                                shelf-screen := VerticalLayout {
+                                    padding-top: 20px;
+                                    padding-bottom: 24px;
+                                    padding-left: 24px;
+                                    padding-right: 24px;
+                                    spacing: 0px;
+                                    alignment: start;
+
+                                    HorizontalLayout {
+                                        spacing: 16px;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 4px;
+                                            Title { text: "Shelf"; }
+                                            Subtitle {
+                                                text: "Files kept on offer to your other devices for a day. They stay where they are; taking one off the shelf never deletes it.";
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Add a file";
+                                                icon: Icons.plus;
+                                                show-icon: true;
+                                                kind: ButtonKind.primary;
+                                                clicked => { root.add-to-shelf(); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 16px; }
+
+                                    Overline { text: "ON THIS DEVICE"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: mine-list.preferred-height;
+                                        mine-list := VerticalLayout {
+                                            if root.shelf-mine.length == 0: HorizontalLayout {
+                                                padding: 14px;
+                                                Caption {
+                                                    text: "Nothing yet. Add a file, or drop one on this window.";
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                            for item[m] in root.shelf-mine: Rectangle {
+                                                height: mine-row.preferred-height;
+                                                mine-row := HorizontalLayout {
+                                                    padding-top: 10px;
+                                                    padding-bottom: 10px;
+                                                    padding-left: 14px;
+                                                    padding-right: 14px;
+                                                    spacing: 11px;
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        min-width: 0px;
+                                                        alignment: center;
+                                                        spacing: 3px;
+                                                        Text {
+                                                            text: item.name;
+                                                            color: Theme.text;
+                                                            font-size: 13px;
+                                                            overflow: elide;
+                                                        }
+                                                        Text {
+                                                            text: item.detail;
+                                                            color: Theme.text-3;
+                                                            font-size: 11.5px;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+                                                    Button {
+                                                        text: "Remove";
+                                                        small: true;
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.unshelve(m); }
+                                                    }
+                                                }
+                                                if m < root.shelf-mine.length - 1: Rectangle {
+                                                    y: parent.height - 1px;
+                                                    height: 1px;
+                                                    background: Theme.border-subtle;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 18px; }
+
+                                    Overline { text: "ON YOUR OTHER DEVICES"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: theirs-list.preferred-height;
+                                        theirs-list := VerticalLayout {
+                                            if root.shelf-theirs.length == 0: HorizontalLayout {
+                                                padding: 14px;
+                                                Caption {
+                                                    text: "Nothing on their shelves. A device shows its shelf while it is on.";
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                            for item[t] in root.shelf-theirs: Rectangle {
+                                                height: theirs-row.preferred-height;
+                                                theirs-row := HorizontalLayout {
+                                                    padding-top: 10px;
+                                                    padding-bottom: 10px;
+                                                    padding-left: 14px;
+                                                    padding-right: 14px;
+                                                    spacing: 8px;
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        min-width: 0px;
+                                                        alignment: center;
+                                                        spacing: 3px;
+                                                        Text {
+                                                            text: item.name;
+                                                            color: Theme.text;
+                                                            font-size: 13px;
+                                                            overflow: elide;
+                                                        }
+                                                        Text {
+                                                            text: item.detail;
+                                                            color: Theme.text-3;
+                                                            font-size: 11.5px;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+                                                    Button {
+                                                        text: "Get";
+                                                        small: true;
+                                                        icon: Icons.download;
+                                                        show-icon: true;
+                                                        kind: ButtonKind.primary;
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.take-shelved(t); }
+                                                    }
+                                                    Button {
+                                                        text: "Remove";
+                                                        small: true;
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.remove-shelved(t); }
+                                                    }
+                                                }
+                                                if t < root.shelf-theirs.length - 1: Rectangle {
+                                                    y: parent.height - 1px;
+                                                    height: 1px;
+                                                    background: Theme.border-subtle;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if root.screen == Screen.Settings: ScreenFrame {
                             Scroller {
                                 content-height: settings-screen.preferred-height;

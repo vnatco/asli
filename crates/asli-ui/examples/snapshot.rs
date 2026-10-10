@@ -11,7 +11,8 @@
 use std::rc::Rc;
 
 use asli_ui::{
-    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
+    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, ShelfRow, SyncState,
+    TokenCheck,
 };
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
@@ -172,6 +173,38 @@ fn main() {
                     SharedString::from("DESKTOP-7Q"),
                 ])));
             }),
+        ),
+        (
+            "08g-status-drop-nobody",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_drop_name("holiday-photos.zip".into());
+            }),
+        ),
+        (
+            "14-shelf",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Shelf);
+                let row = |name: &str, detail: &str| ShelfRow {
+                    name: name.into(),
+                    detail: detail.into(),
+                };
+                ui.set_shelf_mine(ModelRc::new(VecModel::from(vec![
+                    row(
+                        "asli-0.2.0-windows-x64-setup.exe",
+                        "6.1 MB  ·  23 hours left",
+                    ),
+                    row("Quarterly report final.pdf", "3.4 MB  ·  2 hours left"),
+                ])));
+                ui.set_shelf_theirs(ModelRc::new(VecModel::from(vec![row(
+                    "IMG_2041.HEIC",
+                    "MacBook Pro  ·  2.8 MB  ·  under an hour left",
+                )])));
+            }),
+        ),
+        (
+            "14b-shelf-empty",
+            Box::new(|ui: &AppWindow| ui.set_screen(Screen::Shelf)),
         ),
         (
             "08f-status-drop-hover",

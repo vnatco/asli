@@ -14,7 +14,7 @@
 //! # What is in here
 //!
 //! Markup and nothing else. There is no logic in this crate: `ui/design.slint` holds the controls,
-//! built from primitives rather than a widget library, and `ui/app.slint` holds the six screens.
+//! built from primitives rather than a widget library, and `ui/app.slint` holds the seven screens.
 //! Everything they do is a callback the application implements in `asli-app`.
 
 // The generated code is not ours to document or lint, and the toolkit already sets most of these

@@ -49,6 +49,7 @@ mod id {
     pub const SHOW_TOKEN: &str = "asli.show_token";
     pub const JOIN: &str = "asli.join";
     pub const HISTORY: &str = "asli.history";
+    pub const SHELF: &str = "asli.shelf";
     pub const STATUS: &str = "asli.status";
     pub const SETTINGS: &str = "asli.settings";
     pub const DIAGNOSTICS: &str = "asli.diagnostics";
@@ -73,6 +74,8 @@ pub enum Command {
     Join,
     /// Show what was copied recently, so any of it can be put back.
     History,
+    /// Show the files on the shelves.
+    Shelf,
     /// Show the connection in detail.
     Status,
     /// Open settings.
@@ -218,6 +221,7 @@ impl Tray {
         // terminal command, which is no onboarding story at all for a tray application.
         let join_item = MenuItem::with_id(id::JOIN, "Join Another Account", true, None);
         let history_item = MenuItem::with_id(id::HISTORY, "History", true, None);
+        let shelf_item = MenuItem::with_id(id::SHELF, "Shelf", true, None);
         let open_status_item = MenuItem::with_id(id::STATUS, "Status", true, None);
         let settings_item = MenuItem::with_id(id::SETTINGS, "Settings", true, None);
         let diagnostics_item = MenuItem::with_id(id::DIAGNOSTICS, "Copy Diagnostics", true, None);
@@ -231,6 +235,7 @@ impl Tray {
             &retained_item,
             &PredefinedMenuItem::separator(),
             &history_item,
+            &shelf_item,
             &open_status_item,
             &PredefinedMenuItem::separator(),
             &show_token_item,
@@ -317,6 +322,7 @@ impl Tray {
             id::SHOW_TOKEN => Some(Command::ShowToken),
             id::JOIN => Some(Command::Join),
             id::HISTORY => Some(Command::History),
+            id::SHELF => Some(Command::Shelf),
             id::STATUS => Some(Command::Status),
             id::SETTINGS => Some(Command::Settings),
             id::DIAGNOSTICS => Some(Command::Diagnostics),
