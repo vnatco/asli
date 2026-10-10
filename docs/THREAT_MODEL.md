@@ -185,7 +185,10 @@ better, and we treat it as legitimate rather than something to work around.
 **Gains.** A free, anonymous, unauthenticated, encrypted blob relay: a covert channel, a command and
 control transport, or a small file drop.
 
-**Mitigations.** A per room daily byte quota (50 MiB default), a small retention cap
+**Mitigations.** A per room daily byte quota (50 MiB default) for clips, and a separate budget for
+device to device messages, which carry files: 8 MiB a second per connection, 4 GiB a day per room
+and 32 GiB a day for the whole relay, so a busy room slows down before it can starve the shared box.
+Files are forwarded and never stored. A small retention cap
 (`RETAIN_MAX_BYTES` 64 KiB) so the relay cannot be used as a file host at all, a 24 hour TTL,
 per IP and per room connection caps plus a global cap, memory only storage so there is nothing to
 seize, a published abuse contact and transparency statement, and a kill switch that can block a
@@ -194,6 +197,28 @@ specific room id or stop new room creation without a redeploy.
 **Honest tension.** Every one of those limits constrains a legitimate user too. The self hosted path
 exists so that anyone who needs higher limits can raise them, which is what makes tight defaults on
 the public instance defensible.
+
+### 4.8 A file from another device
+
+**Capabilities.** Any device on the account can offer a file to any other. So can anyone holding the
+account key, who can seal frames the relay forwards.
+
+**Gains.** A file on the receiving machine, if a person accepts it. A file's name is the classic
+route: `../../.config/autostart/x.desktop`, a reserved Windows name, a leading dot to hide it, or a
+right to left override that makes `gpj.exe` read as `exe.jpg`.
+
+**Mitigations.** Nothing is written until a person on the receiving device accepts, and the prompt
+names the device whose pinned signing key signed the offer, not a name the offer claims; an offer
+from a device that is not pinned is ignored, so the room key alone cannot produce one. The receiver
+makes its own name: the last path component only, with control characters, direction overrides,
+zero width characters and reserved characters replaced, reserved device names and a leading dot
+prefixed, and a number added rather than overwriting anything. The file is written under a temporary
+name and kept only once its size and SHA-256 match the signed offer. It is marked as downloaded
+(Mark of the Web on Windows, the quarantine attribute on macOS, mode 0644 on Linux) so the system
+treats it as from the internet, and Asli never opens or runs it.
+
+**Residual.** A person can still accept a harmful file from a device of theirs that was compromised,
+and the content is never inspected. The prompt says to accept only files that are expected.
 
 ## 5. Accepted risks, not mitigated in v1
 

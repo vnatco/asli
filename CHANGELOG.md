@@ -61,6 +61,13 @@ Nothing is tagged yet and there are no downloads. What exists today:
   version, which may still be in a screenshot. Status offers it; `asli rekey` does it from a
   terminal.
 - `asli devices` lists the devices on the account.
+- Sending a file to another device. Drop it on the window and pick the device, or press **Send
+  file** beside it on Status; `asli send <device> <file>` does the same from a terminal. The other
+  device shows who it is from, by that device's own key, and asks before anything is written
+  (`asli accept` and `asli decline` from a terminal). It moves through the relay in sealed pieces,
+  is never stored there, is checked against the hash the sender signed, and is saved under a name
+  the receiver makes safe, marked as downloaded. Up to 4 GiB a file. Dropping files is not available
+  on Wayland yet. See protocol section 18.8.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,

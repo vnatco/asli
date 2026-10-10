@@ -48,6 +48,9 @@ locally, which `--with-server` sets up.
    through a relay server to your other machines, which decrypt it and put it on their clipboard.
 4. To take a machine off the account, remove it on Status. Every other machine gets a new key, and
    the removed one can read nothing sent after.
+5. To send a file, drop it on the window, or use **Send file** beside a device on Status (`asli send
+   <device> <file>` in a terminal). The other machine asks before taking it, and it goes through the
+   relay encrypted like everything else, without being stored there.
 
 The relay only ever sees ciphertext. It cannot read your clipboard, and it does not know who you
 are. It keeps at most your most recent clip, briefly, so a machine that was switched off can catch
@@ -99,6 +102,9 @@ either way, is read your clipboard.
 | Linux, Wayland (Hyprland, Sway, KDE Plasma 6.4+, COSMIC, niri) | Target for v1 |
 | Linux, GNOME Wayland | Works through an XWayland compatibility path, because GNOME declines to support clipboard managers |
 | Linux, river | Not supportable: it implements no clipboard manager protocol |
+
+Dropping a file on the window works on Windows, macOS and X11. Wayland gives the windowing library
+Asli uses no drop events yet, so there it is **Send file** on Status instead.
 
 Details and the reasoning are in [docs/PLATFORM_NOTES.md](docs/PLATFORM_NOTES.md).
 

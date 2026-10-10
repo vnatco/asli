@@ -751,9 +751,9 @@ without a disconnect:
 ### 7.13 `msg`
 
 Client to server, then server to the rest of the room, or to one connection. A sealed message
-between devices: a device card, a join request or its answer, a new account key. What kind it is
-lives inside the ciphertext (section 18.2), so the relay sees one opaque type for all of them, and a
-kind added later needs no relay change.
+between devices: a device card, a join request or its answer, a new account key, or a file and its
+replies (section 18.8). What kind it is lives inside the ciphertext (section 18.2), so the relay sees
+one opaque type for all of them, and a kind added later needs no relay change.
 
 | Field | Type | Encoding | Required | Meaning |
 |---|---|---|---|---|
@@ -1116,12 +1116,21 @@ byte tag is 720912 bytes of ciphertext, which base64 encodes to 961216 character
 | Per connection, messages | burst 10, refill 2 per second | `error` `RATE_LIMITED`, then close 4007 on repetition. Strikes are forgotten after a minute without one |
 | Per connection, bytes | burst 2 MiB, refill 256 KiB per second | `error` `RATE_LIMITED`, then close 4007 on repetition. Strikes are forgotten after a minute without one |
 | Per room, daily bytes | 50 MiB per rolling 24 hours | close 4008 |
+| Per connection, `msg` frames | burst 128, refill 64 per second | as for messages above |
+| Per connection, `msg` bytes | burst 16 MiB, refill 8 MiB per second | as for bytes above |
+| Per room, daily `msg` bytes | 4 GiB per rolling 24 hours | `error` `QUOTA_EXCEEDED`, the connection stays open |
+| Global, daily `msg` bytes | 32 GiB per rolling 24 hours | `error` `QUOTA_EXCEEDED`, the connection stays open |
 | Per IP, concurrent connections | 20 | reject at upgrade, close 4009 |
 | Per IP, new connections | burst 10, refill 1 per 5 seconds | reject at upgrade |
 | Per room, concurrent connections | 16 | close 4009 |
 | Global connections | configurable | reject at upgrade |
 
 A self hosted relay MAY set any of these higher and MUST announce the values it uses in `challenge`.
+
+`msg` frames (section 7.13) carry file transfers, so they are counted in their own buckets and do not
+use up the allowance for clips. The relay tells them apart before parsing by finding `"type":"msg"`
+within the first 48 bytes of the frame. A client MUST therefore write `type` first in a `msg` frame. A
+frame that matches the test but turns out not to be a `msg` is closed with 4005.
 
 ### 11.5 Backpressure
 
@@ -1412,7 +1421,12 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 3 | Join grant | A meeting room |
 | 4 | Join decline | A meeting room |
 | 5 | Rekey | The account room |
-| 6 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
+| 16 | File offer | The account room, to one connection (section 18.8) |
+| 17 | File answer | The account room, to one connection |
+| 18 | File chunk | The account room, to one connection |
+| 19 | File acknowledgement | The account room, to one connection |
+| 20 | File cancel | The account room, to one connection |
+| 6 to 15, 21 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
 
 Every signature in this section is Ed25519 over `label || room_id_bytes || body_without_signature`,
 so a signed body can be replayed neither as another kind nor into another room. Text fields are a
@@ -1529,4 +1543,52 @@ Everything here travels in `msg` frames and is invisible to a client that predat
 syncing clips with clients that have it. A rekey leaves such a client behind on the old key. Clients
 with device keys refuse the section 5 token, so adding a device to an account needs a client with
 device keys on both ends.
+
+### 18.8 Sending a file
+
+One device offers a file to another; a person on the receiving device accepts or declines it; the
+file then moves in pieces, each a `msg` frame addressed to one connection. Nothing is sent before it
+is accepted, and nothing is retained by the relay.
+
+```
+offer   = u8(1) || offer_id[16] || from_device_id[16] || to_device_id[16] || u64be(size)
+          || sha256[32] || u32be(chunk_bytes) || u64be(ts_ms) || text(reply_to)
+          || u16be(name_len) || name || signature, label "asli/v2/file-offer"
+answer  = u8(1) || offer_id[16] || from_device_id[16] || u8(accepted) || text(reply_to)
+          || signature, label "asli/v2/file-answer"
+chunk   = u8(1) || offer_id[16] || u32be(index) || u32be(len) || bytes
+ack     = u8(1) || offer_id[16] || u32be(received) || u8(state)
+cancel  = u8(1) || offer_id[16]
+```
+
+- **Offer.** Sent to the connection of the device named by `to_device_id`. `reply_to` is the
+  sender's connection id. A receiver MUST check the signature against the signing key pinned for
+  `from_device_id` (section 18.3) and MUST ignore an offer from a device it has not pinned, or one
+  not addressed to its own device id. `chunk_bytes` is 262144. `name` is at most 255 bytes and is
+  untrusted.
+- **Answer.** Signed by the receiving device and sent to `reply_to`. The sender MUST accept it only
+  from the device the offer named, checked against that device's pinned key. `reply_to` in the
+  answer is the receiver's connection, which the pieces are addressed to.
+- **Chunk.** Piece `index` of `ceil(size / chunk_bytes)`; every piece but the last is
+  `chunk_bytes` long. Pieces are not signed one by one: they are sealed under the room key like
+  every frame, and the whole file is checked against `sha256` at the end. A receiver MUST accept
+  pieces only in order and only for an offer it accepted.
+- **Ack.** Sent after each piece. `received` is how many pieces have arrived. `state` is 0 while
+  receiving, 1 once the file matched its hash and was kept, 2 if it did not match and was thrown
+  away. A sender keeps at most 6 pieces beyond the last acknowledgement in flight.
+- **Cancel.** Either side may send it at any time; the other side stops and discards what it has.
+
+A sender MUST pace its pieces under the relay's `msg` byte rate (section 11.4): a piece the relay
+drops for rate leaves the receiver waiting for it, since pieces are accepted only in order. The
+reference client sends at most 5 MiB of file a second. A transfer that makes no progress for 60
+seconds is given up on by either side, and a transfer under way does not survive a reconnection: the
+connection ids it was addressed to are gone.
+
+The receiver writes the file under a temporary name next to its destination, checks its size and
+hash, and only then gives it its name. It makes its own name from `name`: the last path component
+only, with control characters, direction overrides, zero width characters and characters reserved on
+any of the three systems replaced, trailing dots and spaces removed, a leading dot and reserved
+device names (`CON`, `COM1` and the like) prefixed with `_`, and a number added if the name is taken.
+It marks the kept file as downloaded the way the system expects (Mark of the Web on Windows, the
+quarantine attribute on macOS) and never opens or runs it.
 
