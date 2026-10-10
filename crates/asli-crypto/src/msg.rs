@@ -52,6 +52,10 @@ pub enum Kind {
     FileAck,
     /// Either side calling a transfer off.
     FileCancel,
+    /// What is on a device's shelf. See [`crate::shelf`].
+    ShelfList,
+    /// A request for an item on another device's shelf.
+    ShelfRequest,
     /// A kind this version does not know. Ignored, so later kinds can be added.
     Other(u8),
 }
@@ -71,6 +75,8 @@ impl Kind {
             Self::FileChunk => 18,
             Self::FileAck => 19,
             Self::FileCancel => 20,
+            Self::ShelfList => 21,
+            Self::ShelfRequest => 22,
             Self::Other(code) => code,
         }
     }
@@ -89,6 +95,8 @@ impl Kind {
             18 => Self::FileChunk,
             19 => Self::FileAck,
             20 => Self::FileCancel,
+            21 => Self::ShelfList,
+            22 => Self::ShelfRequest,
             other => Self::Other(other),
         }
     }

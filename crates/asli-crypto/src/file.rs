@@ -463,14 +463,19 @@ impl Cancel {
     }
 }
 
-fn version(r: &mut Reader<'_>) -> Result<()> {
+pub(crate) fn version(r: &mut Reader<'_>) -> Result<()> {
     match r.u8()? {
         1 => Ok(()),
         other => Err(Error::InnerVersion(other)),
     }
 }
 
-fn sign(keys: &DeviceKeys, label: &[u8], room: &[u8; ROOM_ID_LEN], mut body: Writer) -> Vec<u8> {
+pub(crate) fn sign(
+    keys: &DeviceKeys,
+    label: &[u8],
+    room: &[u8; ROOM_ID_LEN],
+    mut body: Writer,
+) -> Vec<u8> {
     let mut covered = Vec::with_capacity(label.len() + ROOM_ID_LEN + body.as_slice().len());
     covered.extend_from_slice(label);
     covered.extend_from_slice(room);
@@ -480,7 +485,7 @@ fn sign(keys: &DeviceKeys, label: &[u8], room: &[u8; ROOM_ID_LEN], mut body: Wri
     body.finish()
 }
 
-fn verify(
+pub(crate) fn verify(
     label: &[u8],
     room: &[u8; ROOM_ID_LEN],
     body: &[u8],

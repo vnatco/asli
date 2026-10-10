@@ -74,6 +74,7 @@ pub mod kdf;
 pub mod msg;
 pub mod random;
 pub mod rekey;
+pub mod shelf;
 pub mod token;
 
 pub use error::{Error, Result};
