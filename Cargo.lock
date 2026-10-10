@@ -289,6 +289,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -315,6 +316,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "zeroize",
 ]
 
 [[package]]
@@ -6452,6 +6454,18 @@ name = "x11rb-protocol"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
+]
 
 [[package]]
 name = "xattr"

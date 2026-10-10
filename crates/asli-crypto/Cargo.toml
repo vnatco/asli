@@ -16,6 +16,10 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "f
 getrandom = "0.4"
 hkdf = "0.13"
 sha2 = { version = "0.11", default-features = false }
+# Per device key agreement, so a secret can be sealed to one device and read by no other: the new
+# account key in a join grant, and the replacement key when a device is removed. From the same
+# project as ed25519-dalek, and built on the same curve25519-dalek, so it adds one crate.
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

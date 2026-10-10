@@ -64,10 +64,14 @@ pub mod auth;
 pub mod base32;
 pub mod chunk;
 pub mod clip;
+pub mod device;
+pub mod enroll;
 pub mod error;
 pub mod identity;
 pub mod kdf;
+pub mod msg;
 pub mod random;
+pub mod rekey;
 pub mod token;
 
 pub use error::{Error, Result};
