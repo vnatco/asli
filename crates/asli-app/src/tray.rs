@@ -213,7 +213,7 @@ impl Tray {
         let pause_item = MenuItem::with_id(id::PAUSE, "Pause Sync", true, None);
         let retained_item =
             MenuItem::with_id(id::PASTE_RETAINED, "Paste Last Synced Clip", true, None);
-        let show_token_item = MenuItem::with_id(id::SHOW_TOKEN, "Show Join String", true, None);
+        let show_token_item = MenuItem::with_id(id::SHOW_TOKEN, "Add a Device", true, None);
         // The other half of onboarding. Without this the only way onto an existing account is a
         // terminal command, which is no onboarding story at all for a tray application.
         let join_item = MenuItem::with_id(id::JOIN, "Join Another Account", true, None);

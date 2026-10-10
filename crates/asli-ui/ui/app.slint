@@ -46,6 +46,27 @@ export struct DeviceRow {
     seen: string,
     online: bool,
     this-device: bool,
+    // Whether it can be removed from here: another device, which has sent a signed card, so the
+    // new account key can be sealed to the ones that stay.
+    removable: bool,
+}
+
+// A device asking to join, on the device that approves it.
+export struct AskRow {
+    name: string,
+    os: string,
+    // The six digits the asking device shows, for a person to compare.
+    comparison: string,
+}
+
+// Where adding a device has got to, on the device already on the account.
+export enum InviteState {
+    // No code made yet.
+    idle,
+    // A code is showing and requests can arrive.
+    waiting,
+    // Over: approved, turned down, expired or failed. invite-message says which.
+    finished,
 }
 
 // How the join field feels about what has been typed into it so far.
@@ -430,8 +451,22 @@ export component AppWindow inherits Window {
     in property <string> clipboard-backend: "";
 
     // Join String screen.
+    // Adding a device: the join code, its QR, how long it has left, and who is asking.
     in property <image> qr;
-    in property <string> token: "";
+    in property <string> invite-code: "";
+    in property <string> invite-remaining: "";
+    in property <InviteState> invite-state: InviteState.idle;
+    in property <[AskRow]> invite-asking: [];
+    in property <string> invite-message: "";
+    in property <bool> invite-good: true;
+    // Account security, on Status: whether the key was ever shown as an old style join string,
+    // whether a key change is under way, and a question waiting for an answer.
+    in property <bool> key-exposed: false;
+    in property <bool> rekey-busy: false;
+    in property <string> rekey-note: "";
+    in property <string> confirm-title: "";
+    in property <string> confirm-body: "";
+    in property <string> confirm-action: "";
 
     // First run.
     in property <bool> creating: false;
@@ -442,6 +477,9 @@ export component AppWindow inherits Window {
     in property <TokenCheck> join-check: { valid: false, invalid: false, message: "" };
     in property <bool> join-busy: false;
     in property <string> join-error: "";
+    // Waiting for the other device to approve this one, and the digits to compare meanwhile.
+    in property <bool> join-waiting: false;
+    in property <string> join-comparison: "";
 
     // History screen.
     in property <[HistoryRow]> history: [];
@@ -475,11 +513,6 @@ export component AppWindow inherits Window {
     property <string> toast-text;
     property <bool> toast-good: true;
     property <bool> toast-shown: false;
-    property <bool> token-copied: false;
-    // The join string is the account key in full, so it is not drawn until asked for. Leaving the
-    // Join String screen hides it again, so that a window left open on it is not a standing
-    // display of the key.
-    property <bool> token-revealed: false;
     property <bool> confirm-clear: false;
     property <bool> confirm-join-other: false;
 
@@ -487,7 +520,15 @@ export component AppWindow inherits Window {
     callback create-account();
     callback join-account(string);
     callback check-token(string);
-    callback copy-token();
+    callback cancel-join();
+    callback open-invite();
+    callback close-invite();
+    callback approve-request(int);
+    callback decline-request(int);
+    callback ask-remove(int);
+    callback ask-replace-key();
+    callback confirm-yes();
+    callback confirm-no();
     callback restore-entry(int);
     callback copy-entry(int);
     callback forget-entry(int);
@@ -523,16 +564,6 @@ export component AppWindow inherits Window {
         saved-timer.running = true;
     }
 
-    // Flips the Copy join string button to Copied for 1.6 seconds.
-    public function token-was-copied() {
-        root.token-copied = true;
-        copied-timer.running = false;
-        copied-timer.running = true;
-    }
-
-    changed screen => {
-        root.token-revealed = false;
-    }
 
     toast-timer := Timer {
         interval: 2400ms;
@@ -550,14 +581,7 @@ export component AppWindow inherits Window {
             self.running = false;
         }
     }
-    copied-timer := Timer {
-        interval: 1600ms;
-        running: false;
-        triggered => {
-            root.token-copied = false;
-            self.running = false;
-        }
-    }
+
     clear-timer := Timer {
         interval: 4000ms;
         running: root.confirm-clear;
@@ -729,7 +753,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.open-screen(Screen.History); }
                                 }
                                 NavItem {
-                                    text: "Join String";
+                                    text: "Add a device";
                                     icon: Icons.key;
                                     selected: root.screen == Screen.Token;
                                     clicked => { root.open-screen(Screen.Token); }
@@ -957,18 +981,55 @@ export component AppWindow inherits Window {
                                             width: min(440px, parent.width);
                                             spacing: 0px;
 
-                                            Title { text: "Join an existing account"; }
+                                            Title { text: root.join-waiting ? "Approve this device" : "Join an existing account"; }
                                             Rectangle { height: 5px; }
-                                            StyledText {
-                                                text: @markdown("Open <font color=\"#E9EDF6\">Join String</font> on a device that is already set up, then paste the string here.");
+                                            if !root.join-waiting: StyledText {
+                                                text: @markdown("On a device that is already set up, open <font color=\"#E9EDF6\">Add a device</font> and make a join code, then type it here.");
                                                 default-color: Theme.text-2;
                                                 default-font-size: 13px;
                                             }
-                                            Rectangle { height: 20px; }
-                                            Label { text: "Join string"; }
-                                            Rectangle { height: 6px; }
+                                            if root.join-waiting: VerticalLayout {
+                                                spacing: 0px;
+                                                Caption {
+                                                    text: "Your other device is asking whether to let this one in. Approve it there only if it shows the same six digits as here.";
+                                                    color: Theme.text-2;
+                                                    font-size: 13px;
+                                                    wrap: word-wrap;
+                                                }
+                                                Rectangle { height: 22px; }
+                                                Overline { text: "THIS DEVICE SHOWS"; }
+                                                Rectangle { height: 8px; }
+                                                Text {
+                                                    text: root.join-comparison;
+                                                    color: Theme.text;
+                                                    font-size: 34px;
+                                                    font-weight: 600;
+                                                    font-family: Theme.mono;
+                                                    letter-spacing: 2px;
+                                                }
+                                                Rectangle { height: 18px; }
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    Text {
+                                                        text: "Waiting for approval…";
+                                                        color: Theme.text-3;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                    Button {
+                                                        text: "Cancel";
+                                                        clicked => { root.cancel-join(); }
+                                                    }
+                                                }
+                                            }
+                                            if !root.join-waiting: Rectangle { height: 20px; }
+                                            if !root.join-waiting: Label { text: "Join code"; }
+                                            if !root.join-waiting: Rectangle { height: 6px; }
                                             join-field := JoinArea {
-                                                placeholder: "asli1_…";
+                                                visible: !root.join-waiting;
+                                                height: root.join-waiting ? 0px : self.preferred-height;
+                                                placeholder: "asli2_…";
                                                 text <=> root.join-input;
                                                 invalid: root.join-check.invalid;
                                                 read-only: root.join-busy;
@@ -983,7 +1044,7 @@ export component AppWindow inherits Window {
                                             // The verdict names the specific mistake: a wrong prefix,
                                             // a bad checksum and a truncated string are different
                                             // problems and only one means "the wrong string".
-                                            if root.join-check.invalid: HorizontalLayout {
+                                            if root.join-check.invalid && !root.join-waiting: HorizontalLayout {
                                                 padding-top: 7px;
                                                 spacing: 6px;
                                                 VerticalLayout {
@@ -1001,12 +1062,12 @@ export component AppWindow inherits Window {
                                                     horizontal-stretch: 1;
                                                 }
                                             }
-                                            if !root.join-check.invalid: VerticalLayout {
+                                            if !root.join-check.invalid && !root.join-waiting: VerticalLayout {
                                                 padding-top: 7px;
                                                 Caption {
                                                     text: root.has-account
                                                         ? "Joining replaces the account on this device."
-                                                        : "Keys stay on this device. The relay only ever sees sealed bytes.";
+                                                        : "A code works once, for ten minutes, and only when the other device approves this one.";
                                                 }
                                             }
 
@@ -1020,7 +1081,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
 
-                                            HorizontalLayout {
+                                            if !root.join-waiting: HorizontalLayout {
                                                 spacing: 8px;
                                                 Button {
                                                     text: root.join-busy ? "Joining…" : "Join account";
@@ -1044,12 +1105,12 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // ─────────────────────────── Join String ─────────────────────────
+                        // ─────────────────────────── Add a device ────────────────────────
                         if root.screen == Screen.Token: ScreenFrame {
                             Scroller {
-                                content-height: token-screen.preferred-height;
+                                content-height: invite-screen.preferred-height;
 
-                                token-screen := VerticalLayout {
+                                invite-screen := VerticalLayout {
                                     padding-top: 20px;
                                     padding-bottom: 24px;
                                     padding-left: 24px;
@@ -1057,12 +1118,44 @@ export component AppWindow inherits Window {
                                     spacing: 0px;
                                     alignment: start;
 
-                                    Title { text: "Join String"; }
+                                    Title { text: "Add a device"; }
                                     Rectangle { height: 4px; }
-                                    Subtitle { text: "Scan or paste this on the device you want to add."; }
+                                    Subtitle {
+                                        text: "Make a join code here, type it on the new device, then approve it here.";
+                                        wrap: word-wrap;
+                                    }
                                     Rectangle { height: 18px; }
 
-                                    HorizontalLayout {
+                                    if root.invite-state == InviteState.idle: VerticalLayout {
+                                        spacing: 0px;
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Create a join code";
+                                                kind: ButtonKind.primary;
+                                                pad-x: 14px;
+                                                clicked => { root.open-invite(); }
+                                            }
+                                        }
+                                        Rectangle { height: 14px; }
+                                        HorizontalLayout {
+                                            spacing: 7px;
+                                            Icon {
+                                                source: Icons.shield;
+                                                size: 13px;
+                                                tint: Theme.text-3;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+                                            Caption {
+                                                text: "A code works once, for ten minutes, and lets nobody in until you approve them here. It does not contain your account key.";
+                                                horizontal-stretch: 1;
+                                                wrap: word-wrap;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    if root.invite-state == InviteState.waiting: HorizontalLayout {
                                         spacing: 20px;
                                         alignment: start;
 
@@ -1071,8 +1164,8 @@ export component AppWindow inherits Window {
                                         VerticalLayout {
                                             alignment: start;
                                             Rectangle {
-                                                width: 199px;
-                                                height: 199px;
+                                                width: 171px;
+                                                height: 171px;
                                                 SoftShadow {
                                                     radius: 14px;
                                                     offset-y: 12px;
@@ -1081,31 +1174,19 @@ export component AppWindow inherits Window {
                                                     strength: 0.6;
                                                     steps: 14;
                                                 }
-                                              Rectangle {
-                                                border-radius: 14px;
-                                                background: #FFFFFF;
-
-                                                if root.token-revealed: Image {
-                                                    x: 12px;
-                                                    y: 12px;
-                                                    width: 175px;
-                                                    height: 175px;
-                                                    source: root.qr;
-                                                    image-rendering: pixelated;
-                                                }
-                                                if !root.token-revealed: Text {
-                                                    x: 16px;
-                                                    y: 16px;
-                                                    width: parent.width - 32px;
-                                                    height: parent.height - 32px;
-                                                    text: "Hidden";
-                                                    color: #8A8A8A;
-                                                    font-size: 13px;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
+                                                Rectangle {
+                                                    border-radius: 14px;
+                                                    background: #FFFFFF;
+                                                    Image {
+                                                        x: 12px;
+                                                        y: 12px;
+                                                        width: 147px;
+                                                        height: 147px;
+                                                        source: root.qr;
+                                                        image-rendering: pixelated;
+                                                    }
                                                 }
                                             }
-                                              }
                                         }
 
                                         VerticalLayout {
@@ -1113,72 +1194,123 @@ export component AppWindow inherits Window {
                                             alignment: start;
                                             spacing: 0px;
 
-                                            Overline { text: "JOIN STRING"; }
+                                            Overline { text: "JOIN CODE"; }
                                             Rectangle { height: 8px; }
                                             Rectangle {
                                                 border-radius: 10px;
                                                 border-width: 1px;
                                                 background: Theme.input;
                                                 border-color: Theme.border;
-                                                height: token-text.preferred-height + 22px;
+                                                height: code-text.preferred-height + 22px;
 
-                                                token-text := TextInput {
+                                                code-text := TextInput {
                                                     x: 12px;
                                                     y: 11px;
                                                     width: parent.width - 24px;
-                                                    text: root.token-revealed ? root.token : "asli1_**********************************************************";
+                                                    text: root.invite-code;
                                                     read-only: true;
                                                     color: Theme.text;
-                                                    font-size: 12px;
+                                                    font-size: 14px;
                                                     font-family: Theme.mono;
-                                                    letter-spacing: 0.2px;
+                                                    letter-spacing: 0.4px;
                                                     wrap: char-wrap;
                                                     single-line: false;
                                                     selection-background-color: #4C8DFF66;
                                                     selection-foreground-color: Theme.text;
                                                 }
                                             }
-                                            Rectangle { height: 10px; }
+                                            Rectangle { height: 8px; }
                                             HorizontalLayout {
                                                 spacing: 8px;
-                                                alignment: start;
-                                                if !root.token-revealed: Button {
-                                                    text: "Reveal join string";
-                                                    show-icon: false;
-                                                    pad-x: 14px;
-                                                    kind: ButtonKind.primary;
-                                                    clicked => { root.token-revealed = true; }
-                                                }
-                                                if root.token-revealed: Button {
-                                                    text: root.token-copied ? "Copied" : "Copy join string";
-                                                    icon: root.token-copied ? Icons.check : Icons.copy;
-                                                    show-icon: true;
-                                                    pad-x: 14px;
-                                                    kind: ButtonKind.primary;
-                                                    latched: root.token-copied;
-                                                    clicked => { root.copy-token(); }
-                                                }
-                                            }
-                                            Rectangle { height: 14px; }
-                                            Banner {
-                                                kind: BannerKind.warning;
-                                                title: "Anyone with this string has your clipboard";
-                                                body: "Don't send it over chat or email. Scanning the QR is safest. Copying marks the clip so history and cloud sync skip it, and clears it after 90 seconds, but software that ignores those markers can still read it.";
-                                            }
-                                            Rectangle { height: 12px; }
-                                            HorizontalLayout {
-                                                spacing: 7px;
-                                                Icon {
-                                                    source: Icons.shield;
-                                                    size: 13px;
-                                                    tint: Theme.text-3;
-                                                    y: (parent.height - self.height) / 2;
-                                                }
                                                 Caption {
-                                                    text: "Valid until you create a new account. Every device that has it stays joined.";
+                                                    text: "Works once. Expires in " + root.invite-remaining + ".";
                                                     horizontal-stretch: 1;
                                                     vertical-alignment: center;
                                                 }
+                                                Button {
+                                                    text: "Cancel";
+                                                    small: true;
+                                                    clicked => { root.close-invite(); }
+                                                }
+                                            }
+                                            Rectangle { height: 16px; }
+
+                                            if root.invite-asking.length == 0: Caption {
+                                                text: "On the new device, choose Join an existing account and type this code. Its request appears here.";
+                                                wrap: word-wrap;
+                                            }
+
+                                            for ask[i] in root.invite-asking: VerticalLayout {
+                                                padding-bottom: 10px;
+                                                Card {
+                                                    height: ask-body.preferred-height;
+                                                    ask-body := VerticalLayout {
+                                                        padding-top: 14px;
+                                                        padding-bottom: 14px;
+                                                        padding-left: 16px;
+                                                        padding-right: 16px;
+                                                        spacing: 0px;
+                                                        Text {
+                                                            text: ask.name + " wants to join";
+                                                            color: Theme.text;
+                                                            font-size: 13.5px;
+                                                            font-weight: 600;
+                                                            overflow: elide;
+                                                        }
+                                                        if ask.os != "": Text {
+                                                            text: ask.os;
+                                                            color: Theme.text-3;
+                                                            font-size: 11.5px;
+                                                        }
+                                                        Rectangle { height: 10px; }
+                                                        Caption {
+                                                            text: "Approve only if the new device shows:";
+                                                        }
+                                                        Rectangle { height: 4px; }
+                                                        Text {
+                                                            text: ask.comparison;
+                                                            color: Theme.text;
+                                                            font-size: 26px;
+                                                            font-weight: 600;
+                                                            font-family: Theme.mono;
+                                                            letter-spacing: 2px;
+                                                        }
+                                                        Rectangle { height: 12px; }
+                                                        HorizontalLayout {
+                                                            spacing: 8px;
+                                                            alignment: start;
+                                                            Button {
+                                                                text: "Approve";
+                                                                kind: ButtonKind.primary;
+                                                                icon: Icons.check;
+                                                                show-icon: true;
+                                                                clicked => { root.approve-request(i); }
+                                                            }
+                                                            Button {
+                                                                text: "Decline";
+                                                                clicked => { root.decline-request(i); }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if root.invite-state == InviteState.finished: VerticalLayout {
+                                        spacing: 0px;
+                                        Banner {
+                                            kind: root.invite-good ? BannerKind.info : BannerKind.warning;
+                                            icon: root.invite-good ? Icons.check : Icons.alert;
+                                            title: root.invite-message;
+                                        }
+                                        Rectangle { height: 14px; }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Add another device";
+                                                pad-x: 14px;
+                                                clicked => { root.open-invite(); }
                                             }
                                         }
                                     }
@@ -1555,6 +1687,79 @@ export component AppWindow inherits Window {
                                     Title { text: "Status"; }
                                     Rectangle { height: 14px; }
 
+                                    // A question about the account waiting for an answer: removing a
+                                    // device, or replacing the key.
+                                    if root.confirm-title != "": VerticalLayout {
+                                        padding-bottom: 14px;
+                                        Card {
+                                            height: confirm-body-layout.preferred-height;
+                                            confirm-body-layout := VerticalLayout {
+                                                padding-top: 14px;
+                                                padding-bottom: 14px;
+                                                padding-left: 16px;
+                                                padding-right: 16px;
+                                                spacing: 0px;
+                                                Text {
+                                                    text: root.confirm-title;
+                                                    color: Theme.text;
+                                                    font-size: 13.5px;
+                                                    font-weight: 600;
+                                                    wrap: word-wrap;
+                                                }
+                                                Rectangle { height: 6px; }
+                                                Caption {
+                                                    text: root.confirm-body;
+                                                    color: Theme.text-2;
+                                                    wrap: word-wrap;
+                                                }
+                                                Rectangle { height: 12px; }
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    alignment: start;
+                                                    Button {
+                                                        text: root.confirm-action;
+                                                        kind: ButtonKind.danger;
+                                                        busy: root.rekey-busy;
+                                                        clicked => { root.confirm-yes(); }
+                                                    }
+                                                    Button {
+                                                        text: "Cancel";
+                                                        enabled: !root.rekey-busy;
+                                                        clicked => { root.confirm-no(); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if root.rekey-note != "": VerticalLayout {
+                                        padding-bottom: 14px;
+                                        Banner {
+                                            kind: BannerKind.error;
+                                            title: root.rekey-note;
+                                        }
+                                    }
+
+                                    // An account whose key was once shown as an old style join
+                                    // string, which carried the key itself, offers to replace it.
+                                    if root.key-exposed && root.confirm-title == "": VerticalLayout {
+                                        padding-bottom: 14px;
+                                        spacing: 8px;
+                                        Banner {
+                                            kind: BannerKind.warning;
+                                            title: "Replace this account's key";
+                                            body: "An earlier version showed it as a join string, which may still be in a screenshot or a chat. A new key leaves any old copy useless. Devices that are offline when you do it will need to join again.";
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Replace the key";
+                                                busy: root.rekey-busy;
+                                                clicked => { root.ask-replace-key(); }
+                                            }
+                                        }
+                                    }
+
                                     // The hero: what is happening, and the one thing to do about it.
                                     Rectangle {
                                       height: hero.preferred-height;
@@ -1801,6 +2006,13 @@ export component AppWindow inherits Window {
                                                             font-size: 11.5px;
                                                             vertical-alignment: center;
                                                         }
+                                                    }
+                                                    if device.removable: Button {
+                                                        text: "Remove";
+                                                        small: true;
+                                                        enabled: !root.rekey-busy;
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.ask-remove(i); }
                                                     }
                                                 }
 

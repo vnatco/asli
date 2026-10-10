@@ -10,7 +10,9 @@
 
 use std::rc::Rc;
 
-use asli_ui::{AppWindow, DeviceRow, HistoryRow, Screen, SyncState, TokenCheck};
+use asli_ui::{
+    AppWindow, AskRow, DeviceRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
+};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
 };
@@ -89,8 +91,33 @@ fn main() {
             }),
         ),
         (
-            "05-token",
+            "04b-join-waiting",
+            Box::new(|ui: &AppWindow| {
+                ui.set_has_account(false);
+                ui.set_screen(Screen::Join);
+                ui.set_join_waiting(true);
+                ui.set_join_comparison("482 913".into());
+            }),
+        ),
+        (
+            "05-add-device-idle",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Token);
+                ui.set_invite_state(InviteState::Idle);
+            }),
+        ),
+        (
+            "05b-add-device-asked",
             Box::new(|ui: &AppWindow| ui.set_screen(Screen::Token)),
+        ),
+        (
+            "05c-add-device-done",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Token);
+                ui.set_invite_state(InviteState::Finished);
+                ui.set_invite_good(true);
+                ui.set_invite_message("DESKTOP-7Q is joining now.".into());
+            }),
         ),
         (
             "06-history",
@@ -106,6 +133,22 @@ fn main() {
         (
             "08-status",
             Box::new(|ui: &AppWindow| ui.set_screen(Screen::Status)),
+        ),
+        (
+            "08b-status-key-exposed",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_key_exposed(true);
+            }),
+        ),
+        (
+            "08c-status-confirm-remove",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_confirm_title("Remove fedora-desk?".into());
+                ui.set_confirm_body("It stops receiving anything from this account at once. Your other devices get a new account key, so nothing it kept will work again. fedora-desk will need to join again: offline now, or running an older Asli.".into());
+                ui.set_confirm_action("Remove".into());
+            }),
         ),
         (
             "09-status-connecting",
@@ -200,7 +243,7 @@ fn write_png(path: &str, pixels: &[PremultipliedRgbaColor]) {
     writer.write_image_data(&bytes).expect("png data");
 }
 
-const SAMPLE_TOKEN: &str = "asli1_04SJTBY11JG60WFJWN0SA9X57WPR8E637CXZVRSWMB64WE76APM8BEYXDM";
+const SAMPLE_TOKEN: &str = "asli2_04SJTBY11JG60WFJWN0SA9X57WPR8E63";
 
 fn sample(ui: &AppWindow) {
     ui.set_has_account(true);
@@ -214,7 +257,14 @@ fn sample(ui: &AppWindow) {
     ui.set_room_id("QR8RDM70ZKES".into());
     ui.set_device_id("1695e3615162".into());
     ui.set_clipboard_backend("Wayland, wlr data control".into());
-    ui.set_token(SAMPLE_TOKEN.into());
+    ui.set_invite_code(SAMPLE_TOKEN.into());
+    ui.set_invite_remaining("9:41".into());
+    ui.set_invite_state(InviteState::Waiting);
+    ui.set_invite_asking(ModelRc::new(VecModel::from(vec![AskRow {
+        name: "DESKTOP-7Q".into(),
+        os: "Windows 11".into(),
+        comparison: "482 913".into(),
+    }])));
     ui.set_devices(ModelRc::new(VecModel::from(vec![
         DeviceRow {
             name: "ThinkPad X1".into(),
@@ -223,6 +273,7 @@ fn sample(ui: &AppWindow) {
             seen: "now".into(),
             online: true,
             this_device: true,
+            removable: false,
         },
         DeviceRow {
             name: "MacBook Pro".into(),
@@ -231,6 +282,7 @@ fn sample(ui: &AppWindow) {
             seen: "now".into(),
             online: true,
             this_device: false,
+            removable: true,
         },
         DeviceRow {
             name: "fedora-desk".into(),
@@ -239,6 +291,7 @@ fn sample(ui: &AppWindow) {
             seen: "2 days ago".into(),
             online: false,
             this_device: false,
+            removable: true,
         },
     ])));
     let row = |preview: &str, meta: &str, image: bool, mono: bool| HistoryRow {

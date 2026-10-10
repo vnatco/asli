@@ -1,4 +1,9 @@
-//! Where the account key lives.
+//! Where the account key lives, and this device's own key beside it.
+//!
+//! Both are kept in one keychain entry, the account key followed by the device key, so a device
+//! asks the keychain once and macOS shows one prompt rather than two. An install from before
+//! device keys holds the account key alone; [`load`] reads either, and the caller adds a device key
+//! the first time it finds none.
 //!
 //! The key belongs in the operating system keychain. On Linux that is the Secret Service, and the
 //! honest problem is that a bare Hyprland or Sway session frequently has no Secret Service
@@ -63,16 +68,73 @@ impl Store {
     }
 }
 
-/// Stores the account key, preferring the keychain.
+/// What this device keeps secret.
+pub struct Keys {
+    /// The account key, which every device on the account shares.
+    pub account: Zeroizing<[u8; 32]>,
+    /// This device's own key. `None` for an install from before device keys existed.
+    pub device: Option<Zeroizing<[u8; 32]>>,
+    /// Where they are kept.
+    pub store: Store,
+}
+
+/// The account on this device, ready to use.
+pub struct Account {
+    /// The account identity, from the account key.
+    pub identity: asli_crypto::Identity,
+    /// This device's own keys.
+    pub device: asli_crypto::device::DeviceKeys,
+    /// Where the keys are kept.
+    pub store: Store,
+}
+
+/// Loads the account, giving an install from before device keys a device key of its own the
+/// first time, stored beside the account key so it is the same key at every start after.
 ///
-/// The key is written as Crockford base32 rather than raw bytes, because the string API is the
-/// one every keychain backend supports identically.
+/// # Errors
+///
+/// Returns an error if the keys cannot be read, or a new device key cannot be stored. The second
+/// is an error rather than a warning: a device key that changed at every start would be refused by
+/// every other device, which pinned the first.
+pub fn load_account(paths: &Paths) -> Result<Option<Account>> {
+    let Some(keys) = load(paths)? else {
+        return Ok(None);
+    };
+    let identity = asli_crypto::Identity::from_secret(&keys.account);
+    let (device, store) = if let Some(secret) = keys.device {
+        (
+            asli_crypto::device::DeviceKeys::from_secret(&secret),
+            keys.store,
+        )
+    } else {
+        let device = asli_crypto::device::DeviceKeys::generate()?;
+        let store = store(paths, &keys.account, device.secret())?;
+        eprintln!(
+            "{}",
+            crate::clipboard_io::log_line("device_key_created", "kept beside the account key")
+        );
+        (device, store)
+    };
+    Ok(Some(Account {
+        identity,
+        device,
+        store,
+    }))
+}
+
+/// Stores the account key and this device's key together, preferring the keychain.
+///
+/// Written as Crockford base32 rather than raw bytes, because the string API is the one every
+/// keychain backend supports identically.
 ///
 /// # Errors
 ///
 /// Returns [`Error::SecretStore`] only if both the keychain and the file fallback fail.
-pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
-    let encoded = Zeroizing::new(asli_crypto::base32::encode(secret));
+pub fn store(paths: &Paths, account: &[u8; 32], device: &[u8; 32]) -> Result<Store> {
+    let mut both = Zeroizing::new([0u8; 64]);
+    both[..32].copy_from_slice(account);
+    both[32..].copy_from_slice(device);
+    let encoded = Zeroizing::new(asli_crypto::base32::encode(both.as_ref()));
 
     if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
         match entry.set_password(&encoded) {
@@ -96,18 +158,23 @@ pub fn store(paths: &Paths, secret: &[u8; 32]) -> Result<Store> {
     Ok(Store::File)
 }
 
-/// Loads the account key, if this device has one.
+/// Loads the keys, if this device has an account.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Parse`] if a stored value exists but is not a valid key.
-pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
+pub fn load(paths: &Paths) -> Result<Option<Keys>> {
     let mut locked = None;
     if let Ok(entry) = keyring::Entry::new(&service_name(), ACCOUNT) {
         match entry.get_password() {
             Ok(encoded) => {
-                let secret = decode(&encoded)?;
-                return Ok(Some((secret, Store::Keychain)));
+                let encoded = Zeroizing::new(encoded);
+                let (account, device) = decode(&encoded)?;
+                return Ok(Some(Keys {
+                    account,
+                    device,
+                    store: Store::Keychain,
+                }));
             }
             // Locked, or a prompt dismissed or denied. There may be a key in there.
             Err(keyring::Error::NoStorageAccess(err)) => locked = Some(err.to_string()),
@@ -119,8 +186,12 @@ pub fn load(paths: &Paths) -> Result<Option<(Zeroizing<[u8; 32]>, Store)>> {
     let path = paths.secret_file();
     if path.exists() {
         let encoded = Zeroizing::new(fs::read_to_string(&path)?);
-        let secret = decode(encoded.trim())?;
-        return Ok(Some((secret, Store::File)));
+        let (account, device) = decode(encoded.trim())?;
+        return Ok(Some(Keys {
+            account,
+            device,
+            store: Store::File,
+        }));
     }
 
     match locked {
@@ -185,16 +256,26 @@ pub fn available_store() -> Store {
     }
 }
 
-fn decode(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
+/// The account key, and the device key when one is stored after it.
+type Decoded = (Zeroizing<[u8; 32]>, Option<Zeroizing<[u8; 32]>>);
+
+fn decode(encoded: &str) -> Result<Decoded> {
     let bytes = Zeroizing::new(
         asli_crypto::base32::decode(encoded)
             .map_err(|_| Error::Parse("the stored account key is not valid".to_owned()))?,
     );
-    let array: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::Parse("the stored account key is the wrong length".to_owned()))?;
-    Ok(Zeroizing::new(array))
+    let half = |range: std::ops::Range<usize>| {
+        let mut out = Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&bytes[range]);
+        out
+    };
+    match bytes.len() {
+        32 => Ok((half(0..32), None)),
+        64 => Ok((half(0..32), Some(half(32..64)))),
+        _ => Err(Error::Parse(
+            "the stored account key is the wrong length".to_owned(),
+        )),
+    }
 }
 
 fn write_secret_file(paths: &Paths, encoded: &str) -> Result<()> {
@@ -274,8 +355,12 @@ mod tests {
 
         write_secret_file(&paths, &asli_crypto::base32::encode(&secret)).expect("writes");
         let file = fs::read_to_string(paths.secret_file()).expect("reads");
-        let decoded = decode(file.trim()).expect("decodes");
+        let (decoded, device) = decode(file.trim()).expect("decodes");
         assert_eq!(*decoded, secret);
+        assert!(
+            device.is_none(),
+            "an install from before device keys has none"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -297,6 +382,16 @@ mod tests {
             "the key file must not be readable by others"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_account_and_device_keys_are_stored_together_and_read_back_apart() {
+        let mut both = [0u8; 64];
+        both[..32].copy_from_slice(&[1u8; 32]);
+        both[32..].copy_from_slice(&[2u8; 32]);
+        let (account, device) = decode(&asli_crypto::base32::encode(&both)).expect("decodes");
+        assert_eq!(*account, [1u8; 32]);
+        assert_eq!(device.as_deref(), Some(&[2u8; 32]));
     }
 
     #[test]

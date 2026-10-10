@@ -32,7 +32,10 @@ use slint::{
     ComponentHandle as _, Image, Model as _, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 
+use asli_crypto::device::DeviceKeys;
+use asli_crypto::enroll::JoinCode;
 use asli_crypto::{token, Identity};
+use zeroize::Zeroizing;
 
 use crate::clipboard_io::{log_line, ClipboardIo};
 use crate::config::{Config, Paths};
@@ -46,13 +49,11 @@ use crate::{notify, qr, secrets, tray};
 // `allow(unsafe_code)`, and this crate's `#![forbid(unsafe_code)]` would overrule it and fail the
 // build. Keeping the generated code at arm's length is what lets every hand written crate in this
 // project keep the stronger annotation.
-pub use asli_ui::{AppWindow, DeviceRow, HistoryRow, Screen, SyncState, TokenCheck};
+pub use asli_ui::{
+    AppWindow, AskRow, DeviceRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
+};
 
-/// How long the join string stays on the clipboard before it clears itself.
-///
-/// Long enough to paste into another machine, short enough that it is not still sitting there an
-/// hour later.
-const TOKEN_CLEAR_AFTER: Duration = Duration::from_secs(90);
+use crate::enroll::{Invitation, InviteOutcome, JoinAttempt, JoinOutcome};
 
 /// How often the visible window refreshes its status.
 const REFRESH: Duration = Duration::from_millis(900);
@@ -120,6 +121,10 @@ pub trait HistorySource: Send {
     /// and without something to compare, a copy made or received while the list was open only
     /// appeared after navigating away and back.
     fn revision(&self) -> u64;
+
+    /// Re-encrypts what is kept under a new account key, when the account moves to one. A history
+    /// that is not kept on disk has nothing to do.
+    fn rekey(&mut self, _secret: &[u8; 32]) {}
 }
 
 /// One row, with no content attached.
@@ -315,6 +320,33 @@ thread_local! {
 
     /// The refresh timer, which only ticks while a window exists.
     static TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+
+    /// The join code on show in Add a device, and the conversation behind it. Main thread only.
+    static INVITE: RefCell<Option<Invitation>> = const { RefCell::new(None) };
+
+    /// This device asking to join, and the device key it will keep if approved. Main thread only.
+    static JOINING: RefCell<Option<Joining>> = const { RefCell::new(None) };
+
+    /// The device behind each row of the device list, in the order shown.
+    static DEVICE_ROWS: RefCell<Vec<crate::devices::Listed>> = const { RefCell::new(Vec::new()) };
+
+    /// A question on Status waiting for an answer.
+    static CONFIRM: RefCell<Option<Confirm>> = const { RefCell::new(None) };
+
+    /// Why the last key change did not happen, shown until the next attempt.
+    static REKEY_NOTE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// This device asking to join: the attempt, and the device key and id it keeps if approved.
+type Joining = (JoinAttempt, Zeroizing<[u8; 32]>, [u8; 16]);
+
+/// What a confirmation on Status is asking about.
+#[derive(Debug, Clone)]
+enum Confirm {
+    /// Removing one device, by id.
+    Remove { id: [u8; 16] },
+    /// Replacing the key and keeping everyone.
+    ReplaceKey,
 }
 
 /// The Wayland application id, which must match the desktop entry's basename exactly.
@@ -606,6 +638,8 @@ fn start_timer() {
                 if let Some(window) = window.as_ref() {
                     refresh_status(window);
                     refresh_history_if_stale(window);
+                    refresh_invite(window);
+                    refresh_join(window);
                     track_maximized(window);
                 }
             });
@@ -668,26 +702,338 @@ fn wire_account(window: &AppWindow) {
             return;
         };
         window.set_join_error(String::new().into());
-        window.set_join_busy(true);
-        let handle = window.as_weak();
-        slint::Timer::single_shot(Duration::from_millis(60), move || {
-            let Some(window) = handle.upgrade() else {
-                return;
-            };
-            match join_account(raw.as_str()) {
-                Ok(room_id) => {
-                    eprintln!("{}", log_line("joined", &format!("room {room_id}")));
-                    restart_self(Welcome::Joined);
-                }
-                Err(err) => {
-                    window.set_join_busy(false);
-                    let reason = err.to_string();
-                    eprintln!("{}", log_line("join_failed", &reason));
-                    window.set_join_error(format!("Couldn't join: {reason}").into());
-                }
+        match start_join(raw.as_str()) {
+            Ok(comparison) => {
+                window.set_join_comparison(comparison.into());
+                window.set_join_waiting(true);
             }
-        });
+            Err(err) => {
+                let reason = err.to_string();
+                eprintln!("{}", log_line("join_failed", &reason));
+                window.set_join_error(format!("Couldn't join: {reason}").into());
+            }
+        }
     });
+
+    let handle = window.as_weak();
+    window.on_cancel_join(move || {
+        JOINING.with_borrow_mut(Option::take);
+        if let Some(window) = handle.upgrade() {
+            window.set_join_waiting(false);
+        }
+    });
+
+    wire_invite(window);
+    wire_removal(window);
+}
+
+/// Attaches the callbacks of Add a device: making a join code, and answering who asks.
+fn wire_invite(window: &AppWindow) {
+    let handle = window.as_weak();
+    window.on_open_invite(move || {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        match open_invite() {
+            Ok(()) => refresh_invite(&window),
+            Err(err) => {
+                eprintln!("{}", log_line("invite_failed", &err.to_string()));
+                window.set_invite_state(InviteState::Finished);
+                window.set_invite_good(false);
+                window.set_invite_message(format!("Couldn't make a join code: {err}").into());
+            }
+        }
+    });
+
+    let handle = window.as_weak();
+    window.on_close_invite(move || {
+        INVITE.with_borrow_mut(Option::take);
+        if let Some(window) = handle.upgrade() {
+            window.set_invite_state(InviteState::Idle);
+        }
+    });
+
+    window.on_approve_request(|index| answer_request(index, true));
+    window.on_decline_request(|index| answer_request(index, false));
+}
+
+/// Attaches the callbacks on Status that change the account key: removing a device, and retiring
+/// a key that was once shown as an old style join string.
+fn wire_removal(window: &AppWindow) {
+    let handle = window.as_weak();
+    window.on_ask_remove(move |index| {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        let device = DEVICE_ROWS.with_borrow(|rows| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| rows.get(index).cloned())
+        });
+        let Some(device) = device else {
+            return;
+        };
+        let Some(id) = crate::devices::id_bytes(&device.id) else {
+            return;
+        };
+        let stranded = stranded_names(&[id]);
+        window.set_confirm_title(format!("Remove {}?", device.name).into());
+        window.set_confirm_body(
+            format!(
+                "It stops receiving anything from this account at once. Your other devices get a new account key, so nothing it kept will work again.{stranded}"
+            )
+            .into(),
+        );
+        window.set_confirm_action("Remove".into());
+        CONFIRM.with_borrow_mut(|slot| *slot = Some(Confirm::Remove { id }));
+    });
+
+    let handle = window.as_weak();
+    window.on_ask_replace_key(move || {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        let stranded = stranded_names(&[]);
+        window.set_confirm_title("Replace the account key?".into());
+        window.set_confirm_body(
+            format!(
+                "Every device that is online now moves to a new key, and any copy of the old one, in an old join string or anywhere else, stops working.{stranded}"
+            )
+            .into(),
+        );
+        window.set_confirm_action("Replace the key".into());
+        CONFIRM.with_borrow_mut(|slot| *slot = Some(Confirm::ReplaceKey));
+    });
+
+    let handle = window.as_weak();
+    window.on_confirm_no(move || {
+        CONFIRM.with_borrow_mut(Option::take);
+        if let Some(window) = handle.upgrade() {
+            window.set_confirm_title(String::new().into());
+        }
+    });
+
+    let handle = window.as_weak();
+    window.on_confirm_yes(move || {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        let Some(confirm) = CONFIRM.with_borrow(Clone::clone) else {
+            return;
+        };
+        let Some(context) = CONTEXT.get() else {
+            return;
+        };
+        let removing = match confirm {
+            Confirm::Remove { id } => vec![id],
+            Confirm::ReplaceKey => Vec::new(),
+        };
+        let keep = context.controls.devices.keyed_except(&removing);
+        REKEY_NOTE.with_borrow_mut(String::clear);
+        if let Err(note) = context.controls.outbox.replace_key(keep, removing) {
+            REKEY_NOTE.with_borrow_mut(|slot| *slot = note);
+            CONFIRM.with_borrow_mut(Option::take);
+            window.set_confirm_title(String::new().into());
+        }
+        refresh_status(&window);
+    });
+}
+
+/// Names the devices a new key would leave behind, for the confirmation: those offline now, which
+/// will miss it, and those that have never sent a signed card, which run an older Asli and cannot
+/// be given it. Empty when there are none.
+fn stranded_names(removing: &[[u8; 16]]) -> String {
+    let rows = DEVICE_ROWS.with_borrow(Clone::clone);
+    let names: Vec<String> = rows
+        .iter()
+        .filter(|device| !device.this_device)
+        .filter(|device| {
+            crate::devices::id_bytes(&device.id).is_none_or(|id| !removing.contains(&id))
+        })
+        .filter(|device| !device.online || !device.keyed)
+        .map(|device| device.name.clone())
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {} will need to join again: offline now, or running an older Asli.",
+            names.join(", ")
+        )
+    }
+}
+
+/// Starts asking to join with a typed code, returning the digits to show.
+fn start_join(raw: &str) -> Result<String> {
+    let context = CONTEXT.get().ok_or(Error::NoAccount)?;
+    if raw
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with(token::TOKEN_PREFIX)
+    {
+        return Err(Error::RetiredToken);
+    }
+    let code = JoinCode::parse(raw)?;
+    let config = context.paths.load_config()?;
+    let device = DeviceKeys::generate()?;
+    let device_secret = Zeroizing::new(*device.secret());
+    // A new membership is a new identity: new keys, and a new id to go with them. See `cli::join`.
+    let device_id: [u8; 16] = asli_crypto::random::bytes()?;
+    let attempt = JoinAttempt::start(
+        code,
+        crate::enroll::Joiner {
+            relay_url: config.relay_url.clone(),
+            device,
+            device_id,
+            name: crate::devices::display_name(&config.device_name),
+            os: crate::devices::this_os(),
+        },
+    )?;
+    let comparison = attempt.comparison().to_owned();
+    JOINING.with_borrow_mut(|slot| *slot = Some((attempt, device_secret, device_id)));
+    Ok(comparison)
+}
+
+/// Acts on how asking to join ended, once it has.
+fn refresh_join(window: &AppWindow) {
+    let outcome = JOINING.with_borrow(|slot| {
+        slot.as_ref()
+            .and_then(|(attempt, _, _)| attempt.take_outcome())
+    });
+    let Some(outcome) = outcome else {
+        return;
+    };
+    let Some((_, device_secret, device_id)) = JOINING.with_borrow_mut(Option::take) else {
+        return;
+    };
+    window.set_join_waiting(false);
+    let message = match outcome {
+        JoinOutcome::Granted {
+            secret,
+            never_exported,
+        } => match finish_join(&secret, &device_secret, &device_id, never_exported) {
+            Ok(()) => {
+                restart_self(Welcome::Joined);
+                return;
+            }
+            Err(err) => format!("Approved, but the key could not be saved: {err}"),
+        },
+        JoinOutcome::Declined => "The other device turned this one down.".to_owned(),
+        JoinOutcome::Expired => {
+            "No answer within ten minutes. Make a new code on the other device and try again."
+                .to_owned()
+        }
+        JoinOutcome::Failed(why) => format!("Couldn't join: {why}"),
+    };
+    window.set_join_error(message.into());
+}
+
+/// Stores the account key the other device handed over, beside this device's own key.
+fn finish_join(
+    secret: &[u8; 32],
+    device_secret: &[u8; 32],
+    device_id: &[u8; 16],
+    never_exported: bool,
+) -> Result<()> {
+    let context = CONTEXT.get().ok_or(Error::NoAccount)?;
+    secrets::store(&context.paths, secret, device_secret)?;
+    let mut config = context.paths.load_config()?;
+    config.key_never_exported = never_exported;
+    config.device_id = crate::config::hex(device_id);
+    context.paths.save_config(&config)?;
+    // The devices of the account this one is leaving mean nothing in the new one.
+    context.controls.devices.clear();
+    eprintln!(
+        "{}",
+        log_line(
+            "joined",
+            &format!("room {}", Identity::from_secret(secret).room_id())
+        )
+    );
+    Ok(())
+}
+
+/// Makes a join code and starts waiting for the device that types it.
+fn open_invite() -> Result<()> {
+    let context = CONTEXT.get().ok_or(Error::NoAccount)?;
+    let account = secrets::load_account(&context.paths)?.ok_or(Error::NoAccount)?;
+    let config = context.paths.load_config()?;
+    let invitation = Invitation::open(crate::enroll::Approver {
+        relay_url: config.relay_url.clone(),
+        device: DeviceKeys::from_secret(account.device.secret()),
+        account_secret: Zeroizing::new(*account.identity.secret()),
+        never_exported: config.key_never_exported,
+    })?;
+    WINDOW.with_borrow(|window| {
+        if let Some(window) = window.as_ref() {
+            window.set_invite_code(invitation.code().into());
+            match qr_image(invitation.code()) {
+                Ok(image) => window.set_qr(image),
+                Err(err) => eprintln!("{}", log_line("qr_failed", &err.to_string())),
+            }
+            window.set_invite_state(InviteState::Waiting);
+        }
+    });
+    INVITE.with_borrow_mut(|slot| *slot = Some(invitation));
+    Ok(())
+}
+
+/// Approves or turns down the request on row `index`.
+fn answer_request(index: i32, approve: bool) {
+    INVITE.with_borrow(|slot| {
+        let Some(invitation) = slot.as_ref() else {
+            return;
+        };
+        let view = invitation.view();
+        let Some(asking) = usize::try_from(index).ok().and_then(|i| view.asking.get(i)) else {
+            return;
+        };
+        if approve {
+            invitation.approve(asking.request_id);
+        } else {
+            invitation.decline(asking.request_id);
+        }
+    });
+}
+
+/// Shows where adding a device has got to: who is asking, how long the code has left, how it
+/// ended.
+fn refresh_invite(window: &AppWindow) {
+    let snapshot = INVITE.with_borrow(|slot| {
+        slot.as_ref()
+            .map(|invitation| (invitation.view(), invitation.expires_at_ms()))
+    });
+    let Some((view, expires_at_ms)) = snapshot else {
+        return;
+    };
+    let left_s = expires_at_ms.saturating_sub(asli_net::client::now_ms()) / 1000;
+    window.set_invite_remaining(format!("{}:{:02}", left_s / 60, left_s % 60).into());
+    let rows: Vec<AskRow> = view
+        .asking
+        .iter()
+        .map(|asking| AskRow {
+            name: asking.name.clone().into(),
+            os: asking.os.clone().into(),
+            comparison: asking.comparison.clone().into(),
+        })
+        .collect();
+    set_rows(&window.get_invite_asking(), rows, |model| {
+        window.set_invite_asking(model);
+    });
+
+    let Some(outcome) = view.outcome else {
+        return;
+    };
+    let (message, good) = match outcome {
+        InviteOutcome::Approved(name) => (format!("{name} is joining now."), true),
+        InviteOutcome::Declined => ("Turned down. That code no longer works.".to_owned(), true),
+        InviteOutcome::Expired => ("The code expired before anyone used it.".to_owned(), false),
+        InviteOutcome::Failed(why) => (format!("Something went wrong: {why}"), false),
+    };
+    window.set_invite_message(message.into());
+    window.set_invite_good(good);
+    window.set_invite_state(InviteState::Finished);
+    INVITE.with_borrow_mut(Option::take);
 }
 
 /// Attaches the title bar's controls. The window has no frame from the desktop, so moving,
@@ -793,7 +1139,6 @@ fn build() -> Result<AppWindow> {
     wire_account(&window);
     wire_frame(&window);
 
-    window.on_copy_token(copy_token);
     window.on_restore_entry(restore_entry);
     window.on_copy_entry(copy_entry);
     window.on_forget_entry(forget_entry);
@@ -891,18 +1236,10 @@ fn refresh(window: &AppWindow) {
     let account = secrets::load(&context.paths).ok().flatten();
     window.set_has_account(account.is_some());
 
-    if let Some((secret, _)) = &account {
-        let identity = Identity::from_secret(secret);
+    if let Some(keys) = &account {
+        let identity = Identity::from_secret(&keys.account);
         window.set_room_id(short(&identity.room_id()).into());
-
-        let token = token::encode(secret);
-        window.set_token(token.as_str().into());
-        match qr_image(token.as_str()) {
-            Ok(image) => window.set_qr(image),
-            Err(err) => eprintln!("{}", log_line("qr_failed", &err.to_string())),
-        }
     } else {
-        window.set_token(String::new().into());
         window.set_room_id(String::new().into());
     }
 
@@ -1049,13 +1386,23 @@ fn refresh_status(window: &AppWindow) {
         last_seen_ms: None,
         online: connected,
         this_device: true,
+        keyed: true,
     };
-    let rows: Vec<DeviceRow> = context
-        .controls
-        .devices
-        .list(&this)
+    let listed = context.controls.devices.list(&this);
+    DEVICE_ROWS.with_borrow_mut(|rows| rows.clone_from(&listed));
+    window.set_key_exposed(!config.key_never_exported);
+    window.set_rekey_busy(context.controls.outbox.rekey_pending());
+    if let Some(note) = context.controls.outbox.take_note() {
+        REKEY_NOTE.with_borrow_mut(|slot| *slot = note);
+        // The question was answered and the change failed: the note says why, the question goes.
+        CONFIRM.with_borrow_mut(Option::take);
+        window.set_confirm_title(String::new().into());
+    }
+    window.set_rekey_note(REKEY_NOTE.with_borrow(Clone::clone).into());
+    let rows: Vec<DeviceRow> = listed
         .into_iter()
         .map(|device| DeviceRow {
+            removable: !device.this_device && device.keyed,
             name: device.name.into(),
             os: device.os.into(),
             id: short(&device.id).into(),
@@ -1534,23 +1881,17 @@ fn create_account() -> Result<()> {
         return Err(Error::AccountExists);
     }
     let identity = Identity::generate()?;
-    secrets::store(&context.paths, identity.secret())?;
+    let device = DeviceKeys::generate()?;
+    secrets::store(&context.paths, identity.secret(), device.secret())?;
+    // Made here and never shown: there is no old style token to replace.
+    let mut config = context.paths.load_config()?;
+    config.key_never_exported = true;
+    context.paths.save_config(&config)?;
     eprintln!(
         "{}",
         log_line("created", &format!("room {}", identity.room_id()))
     );
     Ok(())
-}
-
-/// Stores the account behind a join string, returning the room it belongs to.
-fn join_account(raw: &str) -> Result<String> {
-    let context = CONTEXT.get().ok_or(Error::NoAccount)?;
-    let secret = token::parse(raw.trim())?;
-    let identity = Identity::from_secret(&secret);
-    secrets::store(&context.paths, identity.secret())?;
-    // The devices of the account this one is leaving mean nothing in the new one.
-    context.controls.devices.clear();
-    Ok(identity.room_id())
 }
 
 /// What the join field says about what has been typed so far.
@@ -1568,11 +1909,21 @@ fn check_token(raw: &str) -> TokenCheck {
         };
     }
 
-    match token::parse(trimmed) {
+    if trimmed
+        .to_ascii_lowercase()
+        .starts_with(token::TOKEN_PREFIX)
+    {
+        return TokenCheck {
+            valid: false,
+            invalid: true,
+            message: "This is an old style join string, which carried the account key itself and is no longer accepted. On the other device, open Add a device and make a join code.".into(),
+        };
+    }
+    match JoinCode::parse(trimmed) {
         Ok(_) => TokenCheck {
             valid: true,
             invalid: false,
-            message: "This is a valid join string.".into(),
+            message: "This is a valid join code.".into(),
         },
         Err(err) => TokenCheck {
             valid: false,
@@ -1586,61 +1937,24 @@ fn check_token(raw: &str) -> TokenCheck {
 fn explain(err: &asli_crypto::Error) -> String {
     match err {
         asli_crypto::Error::TokenPrefix => {
-            "This does not look like an Asli join string. It should start with asli1_.".to_owned()
+            "This does not look like an Asli join code. It should start with asli2_.".to_owned()
         }
         asli_crypto::Error::TokenLength => {
             "This looks cut off. Copy the whole string, including the end.".to_owned()
         }
         asli_crypto::Error::TokenAlphabet => {
-            "There are characters here that cannot appear in a join string. Copy it again rather \
-             than typing it."
+            "There are characters here that cannot appear in a join code. Check for letters that look \
+             alike, or copy it rather than typing it."
                 .to_owned()
         }
         asli_crypto::Error::TokenChecksum => {
             "This is mistyped or incomplete. One character somewhere is wrong.".to_owned()
         }
         asli_crypto::Error::TokenVersion(version) => format!(
-            "This join string is format version {version}, which this version of Asli does not \
+            "This join code is format version {version}, which this version of Asli does not \
              understand. Update Asli on both devices."
         ),
         other => other.to_string(),
-    }
-}
-
-/// Copies the join string, marked so clipboard history and cloud sync leave it alone.
-fn copy_token() {
-    let Some(context) = CONTEXT.get() else {
-        return;
-    };
-    let Ok(Some((secret, _))) = secrets::load(&context.paths) else {
-        toast("No account on this device yet", false);
-        return;
-    };
-
-    let token = token::encode(&secret);
-    match context
-        .io
-        .write_text_concealed(token.as_str(), TOKEN_CLEAR_AFTER)
-    {
-        Ok(()) => {
-            eprintln!(
-                "{}",
-                log_line("token_copied", "marked as concealed, clears in 90 seconds")
-            );
-            WINDOW.with_borrow(|window| {
-                if let Some(window) = window.as_ref() {
-                    window.invoke_token_was_copied();
-                }
-            });
-            toast(
-                "Copied. It clears itself from the clipboard in 90 seconds.",
-                true,
-            );
-        }
-        Err(err) => {
-            eprintln!("{}", log_line("token_copy_failed", &err.to_string()));
-            toast(&format!("Couldn't copy: {err}"), false);
-        }
     }
 }
 
@@ -1823,10 +2137,19 @@ fn copy_diagnostics() {
 }
 
 /// Why the process restarted itself, so the new one can open the window and say so.
-#[derive(Debug, Clone, Copy)]
-enum Welcome {
+/// What a restart onto another account key says when the window opens again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Welcome {
+    /// An account was just created here.
     Created,
+    /// This device just joined an account.
     Joined,
+    /// This device replaced the account key, removing a device or retiring an old one.
+    Rekeyed,
+    /// Another device replaced the account key and handed this one the new key.
+    KeyChangedElsewhere,
+    /// Another device removed this one from the account.
+    Removed,
 }
 
 /// Set on the restarted process, naming what just happened. Read once at startup.
@@ -1840,14 +2163,37 @@ pub fn welcome_after_restart() {
     };
     // Not passed on to anything this process starts later.
     std::env::remove_var(WELCOME_ENV);
-    let text = match reason.to_str() {
-        Some("created") => "Account created. Add your other devices with the join string.",
-        Some("joined") => "Joined. Syncing starts as soon as the relay answers.",
+    let (screen, text, good) = match reason.to_str() {
+        Some("created") => (
+            Screen::Status,
+            "Account created. Add your other devices from Add a device.",
+            true,
+        ),
+        Some("joined") => (
+            Screen::Status,
+            "Joined. Syncing starts as soon as the relay answers.",
+            true,
+        ),
+        Some("rekeyed") => (
+            Screen::Status,
+            "Done. The account has a new key, and the devices you kept have it.",
+            true,
+        ),
+        Some("key_changed_elsewhere") => (
+            Screen::Status,
+            "Another device gave the account a new key. Syncing carries on.",
+            true,
+        ),
+        Some("removed") => (
+            Screen::FirstRun,
+            "This device was removed from the account. Join again if that was a mistake.",
+            false,
+        ),
         _ => return,
     };
     let _ = slint::invoke_from_event_loop(move || {
-        show(Screen::Status);
-        toast(text, true);
+        show(screen);
+        toast(text, good);
     });
 }
 
@@ -1914,7 +2260,20 @@ impl Welcome {
         match self {
             Self::Created => "created",
             Self::Joined => "joined",
+            Self::Rekeyed => "rekeyed",
+            Self::KeyChangedElsewhere => "key_changed_elsewhere",
+            Self::Removed => "removed",
         }
+    }
+}
+
+/// Restarts onto the account key now stored, from any thread.
+///
+/// Through the window's event loop when there is one, which on Windows is the only thread that
+/// may take the tray down; directly when this is the headless daemon and there is none.
+pub fn restart_for(welcome: Welcome) {
+    if slint::invoke_from_event_loop(move || restart_self(welcome)).is_err() {
+        restart_self(welcome);
     }
 }
 
@@ -1999,12 +2358,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_valid_token_reads_as_valid() {
-        let secret = [7u8; 32];
-        let token = token::encode(&secret);
-        let check = check_token(token.as_str());
-        assert!(check.valid, "a token we just encoded must parse");
+    fn a_valid_code_reads_as_valid() {
+        let approver = DeviceKeys::from_secret(&[1u8; 32]);
+        let code = JoinCode::generate(&approver).expect("generates").encode();
+        let check = check_token(code.as_str());
+        assert!(check.valid, "a code we just made must parse");
         assert!(!check.invalid);
+    }
+
+    #[test]
+    fn an_old_style_join_string_is_refused_with_the_reason() {
+        let check = check_token(token::encode(&[7u8; 32]).as_str());
+        assert!(check.invalid && !check.valid);
+        assert!(check.message.contains("old style"), "got {}", check.message);
+        assert!(
+            check.message.contains("Add a device"),
+            "got {}",
+            check.message
+        );
     }
 
     #[test]
@@ -2022,11 +2393,11 @@ mod tests {
         // The whole reason for inline validation: these are four different problems and only one
         // of them means the string was never an Asli token.
         let prefix = check_token("hello there");
-        let cut = check_token("asli1_ABC");
+        let cut = check_token("asli2_ABC");
 
         assert!(prefix.invalid && cut.invalid);
         assert!(
-            prefix.message.contains("asli1_"),
+            prefix.message.contains("asli2_"),
             "a wrong prefix should say what the prefix is, got {}",
             prefix.message
         );

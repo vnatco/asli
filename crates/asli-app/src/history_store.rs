@@ -90,6 +90,12 @@ impl HistorySource for StoreHistory {
         self.enabled
     }
 
+    fn rekey(&mut self, secret: &[u8; 32]) {
+        if let Err(err) = self.store.rekey(secret) {
+            eprintln!("{}", log_line("history_rekey_failed", &err.to_string()));
+        }
+    }
+
     fn entries(&self) -> Vec<HistoryEntry> {
         self.store
             .list()

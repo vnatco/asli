@@ -32,6 +32,10 @@ pub const DEFAULT_MAX_CONTENT_BYTES: usize = 700 * 1024;
 /// Settings, as stored in `config.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+// Four switches, each its own setting with its own default and its own line in the file, which is
+// what a configuration is. Folding them into an enum or bit set would make the file harder to read
+// and edit by hand.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Relay to connect to. Self-hosters change this.
     pub relay_url: String,
@@ -59,6 +63,14 @@ pub struct Config {
     /// own name.
     #[serde(default)]
     pub device_name: String,
+    /// Whether this account's key has never been shown in an old style join token.
+    ///
+    /// Tokens from before join codes carried the key itself, and one may survive in a screenshot
+    /// or a chat. An account whose key was ever shown that way offers to replace it; one created or
+    /// rekeyed since has nothing to replace. Defaulted to false, so every account that existed
+    /// before this field is treated as possibly exposed.
+    #[serde(default)]
+    pub key_never_exported: bool,
 }
 
 /// History is on by default, which is what every comparable tool does and what makes the feature
@@ -89,6 +101,7 @@ impl Config {
             keep_history: default_keep_history(),
             history_entries: default_history_entries(),
             device_name: String::new(),
+            key_never_exported: false,
         })
     }
 

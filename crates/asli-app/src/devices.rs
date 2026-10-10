@@ -36,9 +36,34 @@ const FILE: &str = "devices.json";
 /// same, so a hostile member of the room cannot grow the file without bound.
 const MAX_DEVICES: usize = 64;
 
+/// Reads a fixed length value written by [`hex`].
+fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The bytes of a device id as [`Listed::id`] spells it.
+#[must_use]
+pub fn id_bytes(id: &str) -> Option<[u8; 16]> {
+    unhex(id)
+}
+
 /// One device, as last announced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
+    /// The key the device signs its card with, in hex, once a signed card has been seen. Pinned:
+    /// a card naming another key for this device is refused by the session.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sign_pub: String,
+    /// The key a new account key is sealed to for this device, in hex.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub box_pub: String,
     /// The device's name, as it calls itself.
     pub name: String,
     /// Its operating system, as it describes itself.
@@ -71,6 +96,8 @@ pub struct Listed {
     pub online: bool,
     /// Whether it is this device.
     pub this_device: bool,
+    /// Whether it has sent a signed card, so a new account key can be sealed to it.
+    pub keyed: bool,
 }
 
 /// The shared list: the daemon writes it, the window reads it.
@@ -113,7 +140,16 @@ impl DevicesHandle {
             return;
         };
         let id = hex(device_id);
+        // An unsigned announcement never clears keys a signed card pinned.
+        let (sign_pub, box_pub) = registry
+            .stored
+            .devices
+            .get(&id)
+            .map(|known| (known.sign_pub.clone(), known.box_pub.clone()))
+            .unwrap_or_default();
         let device = Device {
+            sign_pub,
+            box_pub,
             name: name.to_owned(),
             os: os.to_owned(),
             last_seen_ms: now_ms,
@@ -128,6 +164,87 @@ impl DevicesHandle {
         // Written when something a person would notice changed, not on every repeat of the same
         // announcement, which happens every time anyone in the room connects.
         if changed {
+            registry.save();
+        }
+    }
+
+    /// Records a signed card: the name and system, and the keys it pinned.
+    pub fn heard_card(&self, card: &asli_net::session::KnownDevice, now_ms: u64) {
+        let Ok(mut registry) = self.0.lock() else {
+            return;
+        };
+        let id = hex(&card.device_id);
+        let device = Device {
+            sign_pub: hex(&card.sign_pub),
+            box_pub: hex(&card.box_pub),
+            name: card.name.clone(),
+            os: card.os.clone(),
+            last_seen_ms: now_ms,
+        };
+        let changed = registry.stored.devices.get(&id)
+            != Some(&Device {
+                last_seen_ms: registry
+                    .stored
+                    .devices
+                    .get(&id)
+                    .map_or(0, |d| d.last_seen_ms),
+                ..device.clone()
+            });
+        registry.stored.devices.insert(id, device);
+        registry.evict();
+        if changed {
+            registry.save();
+        }
+    }
+
+    /// Every device with keys pinned, for the session to check cards against after a restart.
+    #[must_use]
+    pub fn pinned(&self) -> Vec<asli_net::session::KnownDevice> {
+        let Ok(registry) = self.0.lock() else {
+            return Vec::new();
+        };
+        registry
+            .stored
+            .devices
+            .iter()
+            .filter_map(|(id, device)| {
+                Some(asli_net::session::KnownDevice {
+                    device_id: unhex(id)?,
+                    sign_pub: unhex(&device.sign_pub)?,
+                    box_pub: unhex(&device.box_pub)?,
+                    conn_id: None,
+                    name: device.name.clone(),
+                    os: device.os.clone(),
+                    ts_ms: 0,
+                })
+            })
+            .collect()
+    }
+
+    /// Ids of every device with keys pinned, apart from the ones named: who a new account key
+    /// goes to.
+    #[must_use]
+    pub fn keyed_except(&self, except: &[[u8; 16]]) -> Vec<[u8; 16]> {
+        self.pinned()
+            .into_iter()
+            .map(|device| device.device_id)
+            .filter(|id| !except.contains(id))
+            .collect()
+    }
+
+    /// Carries the list over to the room a new account key names, so the devices and their
+    /// pinned keys are still known after the move.
+    pub fn move_to_room(&self, room: &str) {
+        if let Ok(mut registry) = self.0.lock() {
+            room.clone_into(&mut registry.stored.room);
+            registry.save();
+        }
+    }
+
+    /// Forgets one device, after it has been removed from the account.
+    pub fn forget(&self, device_id: &[u8; 16]) {
+        if let Ok(mut registry) = self.0.lock() {
+            registry.stored.devices.remove(&hex(device_id));
             registry.save();
         }
     }
@@ -202,6 +319,7 @@ impl DevicesHandle {
                 last_seen_ms: Some(device.last_seen_ms),
                 online: registry.connected && device.last_seen_ms >= registry.last_departure_ms,
                 this_device: false,
+                keyed: !device.box_pub.is_empty(),
             })
             .collect();
         others.sort_by(|a, b| {
@@ -409,6 +527,7 @@ mod tests {
             last_seen_ms: None,
             online: true,
             this_device: true,
+            keyed: true,
         }
     }
 

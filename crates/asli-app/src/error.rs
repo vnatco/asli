@@ -37,6 +37,10 @@ pub enum Error {
     TokenInArgv,
     /// A Windows shortcut could not be written, or was written wrong. The detail names the file.
     Shortcut(String),
+    /// An old style join token was given where a join code is expected.
+    RetiredToken,
+    /// Joining did not complete. The detail says how it ended.
+    Join(String),
 }
 
 impl fmt::Display for Error {
@@ -67,6 +71,12 @@ impl fmt::Display for Error {
                  exposed, consider running 'asli create' and re-joining your devices",
             ),
             Self::Shortcut(detail) => write!(f, "shortcut {detail}"),
+            Self::RetiredToken => f.write_str(
+                "this is an old style join string, which carried the account key itself and is no \
+                 longer accepted. On a device already on the account, choose Add a device (or run \
+                 'asli add') and type the code it shows",
+            ),
+            Self::Join(detail) => write!(f, "could not join: {detail}"),
             Self::NoToken => f.write_str(
                 "no token on stdin. Run 'asli join' and paste the token when it asks, or pipe it in",
             ),

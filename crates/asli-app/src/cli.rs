@@ -35,15 +35,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new account on this device and show the join token.
+    /// Create a new account on this device. Add other devices with `asli add`.
     Create {
         /// Replace an existing account instead of refusing.
         #[arg(long)]
         force: bool,
     },
-    /// Join an account that already exists. Reads the token from stdin, never from the command
-    /// line: `/proc/<pid>/cmdline` is world readable, so an argument would hand the account key
-    /// to any other local user, and shells record it in their history besides.
+    /// Join an account that already exists, with the code `asli add` (or Add a device in the
+    /// window) shows on a device already on it. Reads the code from stdin, never from the command
+    /// line, and waits for that device to approve this one.
     Join {
         /// Accepted only so that the old form can be refused with an explanation rather than a
         /// bare parser error. Never used. Clap would otherwise print the rejected argument, and
@@ -64,8 +64,20 @@ enum Command {
     Status,
     /// Forget the account on this device.
     Reset,
-    /// Show the join token for the account already on this device.
-    Show,
+    /// Add another device: show a join code for it, and approve it when it asks.
+    #[command(alias = "show")]
+    Add,
+    /// List the devices on this account.
+    Devices,
+    /// Remove a device from this account: the others move to a new account key without it.
+    /// Asks the running Asli to do it.
+    Remove {
+        /// The device's name, or the start of its id as `asli devices` shows it.
+        device: String,
+    },
+    /// Replace the account key and keep every device, so an old copy of the key stops working.
+    /// Asks the running Asli to do it.
+    Rekey,
     /// Write or check a Windows shortcut. For the installer and setup.ps1 rather than people, so
     /// every shortcut Asli makes comes from the same code.
     #[command(hide = true)]
@@ -118,7 +130,10 @@ fn dispatch() -> Result<()> {
         Command::Autostart { state } => autostart_command(&paths, state.as_deref()),
         Command::Status => status(&paths),
         Command::Reset => reset(&paths),
-        Command::Show => show(&paths),
+        Command::Add => add(&paths),
+        Command::Devices => devices(&paths),
+        Command::Remove { device } => remove(&paths, &device),
+        Command::Rekey => request_rekey(&paths, &[]),
         Command::Shortcut { action } => shortcut_command(&action),
     }
 }
@@ -129,34 +144,34 @@ fn create(paths: &Paths, force: bool) -> Result<()> {
     }
 
     let identity = Identity::generate()?;
-    let store = secrets::store(paths, identity.secret())?;
-    let config = paths.load_config()?;
+    let device = asli_crypto::device::DeviceKeys::generate()?;
+    let store = secrets::store(paths, identity.secret(), device.secret())?;
+    let mut config = paths.load_config()?;
+    // Made here and never shown to anyone: there is nothing in an old style token to replace.
+    config.key_never_exported = true;
+    paths.save_config(&config)?;
 
     println!("Account created.");
     println!("Key stored in: {}", store.describe());
     println!("Room id:       {}", identity.room_id());
-    println!();
-    present_token(identity.secret())?;
     println!("Relay:         {}", config.relay_url);
+    println!();
+    println!("To add another device, run 'asli add' here, or choose Add a device in the window,");
+    println!("and type the code it shows on the new device.");
     Ok(())
 }
 
-/// Reads the join token from stdin.
+/// Reads a line from stdin, prompting when it is a terminal.
 ///
-/// Never from `argv`. On Linux `/proc/<pid>/cmdline` is world readable, so a token passed as an
-/// argument is readable by every other user on the machine for as long as the process lives, and
-/// the shell writes it to its history file besides. The token is the account key in full: those
-/// two are not acceptable places for it.
-///
-/// Typing is not hidden. The threat being closed here is a token at rest in a history file or
-/// visible in a process list, not someone reading the screen, and the token is already on display
-/// on the device that produced it. Hiding it would only make a mistyped character invisible.
-fn read_token() -> Result<Zeroizing<String>> {
+/// Never from `argv`. On Linux `/proc/<pid>/cmdline` is world readable, so a code passed as an
+/// argument is readable by every other user on the machine while the process lives, and the shell
+/// writes it to its history file besides. A join code is short lived, but it is still the way in.
+fn read_line(prompt: &str) -> Result<Zeroizing<String>> {
     use std::io::{BufRead, IsTerminal, Write};
 
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        print!("Paste the join token (starts with 'asli1_'): ");
+        print!("{prompt}");
         std::io::stdout().flush()?;
     }
 
@@ -171,40 +186,218 @@ fn join(paths: &Paths, token_in_argv: bool) -> Result<()> {
     if token_in_argv {
         return Err(Error::TokenInArgv);
     }
-    let raw = read_token()?;
-    let secret = token::parse(&raw)?;
-    let identity = Identity::from_secret(&secret);
-    let store = secrets::store(paths, identity.secret())?;
-    let config = paths.load_config()?;
-    // Kept for people who prefer a shell. The window is the path that does not require one.
+    let raw = read_line("Type the join code from the other device (starts with 'asli2_'): ")?;
+    if raw
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with(token::TOKEN_PREFIX)
+    {
+        return Err(Error::RetiredToken);
+    }
+    let code = asli_crypto::enroll::JoinCode::parse(&raw)?;
+    let mut config = paths.load_config()?;
+    let device = asli_crypto::device::DeviceKeys::generate()?;
+    let device_secret = Zeroizing::new(*device.secret());
+    // A new membership is a new identity: new keys, and a new id to go with them. Reusing the id
+    // would clash with the keys the other devices pinned for it the last time it was on the
+    // account, and they would rightly refuse it.
+    let device_id: [u8; 16] = asli_crypto::random::bytes()?;
+    let attempt = crate::enroll::JoinAttempt::start(
+        code,
+        crate::enroll::Joiner {
+            relay_url: config.relay_url.clone(),
+            device,
+            device_id,
+            name: crate::devices::display_name(&config.device_name),
+            os: crate::devices::this_os(),
+        },
+    )?;
 
+    println!();
+    println!("This device shows:  {}", attempt.comparison());
+    println!();
+    println!("Approve it on the other device, after checking it shows the same six digits.");
+    println!("Waiting for up to ten minutes. Ctrl+C gives up.");
+
+    let outcome = loop {
+        if let Some(outcome) = attempt.take_outcome() {
+            break outcome;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
+    let crate::enroll::JoinOutcome::Granted {
+        secret,
+        never_exported,
+    } = outcome
+    else {
+        return Err(Error::Join(join_outcome_text(&outcome).to_owned()));
+    };
+
+    let identity = Identity::from_secret(&secret);
+    let store = secrets::store(paths, identity.secret(), &device_secret)?;
+    config.key_never_exported = never_exported;
+    config.device_id = crate::config::hex(&device_id);
+    paths.save_config(&config)?;
+
+    println!();
     println!("Joined.");
     println!("Key stored in: {}", store.describe());
     println!("Room id:       {}", identity.room_id());
-    println!("Relay:         {}", config.relay_url);
     println!();
-    println!("Run 'asli tray' here and on your other devices.");
+    println!("Run 'asli tray' here, or restart Asli if it is already running.");
     Ok(())
 }
 
-fn show(paths: &Paths) -> Result<()> {
-    let (secret, _store) = secrets::load(paths)?.ok_or(Error::NoAccount)?;
-    present_token(&secret)
+/// What a join that did not end in approval says.
+const fn join_outcome_text(outcome: &crate::enroll::JoinOutcome) -> &'static str {
+    match outcome {
+        crate::enroll::JoinOutcome::Granted { .. } => "approved",
+        crate::enroll::JoinOutcome::Declined => "the other device turned this one down",
+        crate::enroll::JoinOutcome::Expired => {
+            "no answer within ten minutes. Make a new code on the other device and try again"
+        }
+        crate::enroll::JoinOutcome::Failed(_) => "something went wrong; see the log above",
+    }
 }
 
-/// Prints the QR first and the token second, with the warning that matters.
-fn present_token(secret: &[u8; 32]) -> Result<()> {
-    let token = token::encode(secret);
+/// The devices on this account, as this device knows them.
+fn known_devices(paths: &Paths) -> Result<Vec<crate::devices::Listed>> {
+    let keys = secrets::load(paths)?.ok_or(Error::NoAccount)?;
+    let room = Identity::from_secret(&keys.account).room_id();
+    let config = paths.load_config()?;
+    let handle = crate::devices::DevicesHandle::default();
+    handle.load(paths, &room);
+    Ok(handle.list(&crate::devices::Listed {
+        id: config.device_id.clone(),
+        name: crate::devices::display_name(&config.device_name),
+        os: crate::devices::this_os(),
+        last_seen_ms: None,
+        online: false,
+        this_device: true,
+        keyed: keys.device.is_some(),
+    }))
+}
 
-    println!("{}", qr::render(&token)?);
-    println!("  {}", token.as_str());
-    println!();
-    println!("Scan this on your other devices, or run 'asli join' there and paste it when asked.");
-    println!("Anyone who has it has your clipboard. Do not send it over chat or email.");
-    println!("Scanning the QR is safest. Copying it from the window marks it so clipboard");
-    println!("history and cloud sync skip it, and clears it after 90 seconds, but any");
-    println!("software that ignores those markers can still read it.");
+fn devices(paths: &Paths) -> Result<()> {
+    let now = asli_net::client::now_ms();
+    for device in known_devices(paths)? {
+        let seen = if device.this_device {
+            "this device".to_owned()
+        } else {
+            tray::relative_time(device.last_seen_ms, now)
+        };
+        let note = if device.keyed {
+            ""
+        } else {
+            "  (older Asli, no device key)"
+        };
+        println!(
+            "{}  {:<24} {:<18} {seen}{note}",
+            &device.id[..12.min(device.id.len())],
+            device.name,
+            device.os
+        );
+    }
     Ok(())
+}
+
+fn remove(paths: &Paths, query: &str) -> Result<()> {
+    let query = query.trim();
+    let matches: Vec<crate::devices::Listed> = known_devices(paths)?
+        .into_iter()
+        .filter(|device| !device.this_device)
+        .filter(|device| {
+            device.name.eq_ignore_ascii_case(query)
+                || (query.len() >= 4 && device.id.starts_with(&query.to_ascii_lowercase()))
+        })
+        .collect();
+    match matches.as_slice() {
+        [device] => {
+            request_rekey(paths, std::slice::from_ref(&device.id))?;
+            println!("Asked Asli to remove {}.", device.name);
+            Ok(())
+        }
+        [] => Err(Error::Parse(format!(
+            "no other device is called '{query}' or has an id starting with it. 'asli devices' lists them"
+        ))),
+        _ => Err(Error::Parse(format!(
+            "more than one device matches '{query}'. Use more of its id, from 'asli devices'"
+        ))),
+    }
+}
+
+/// Leaves a key change for the running Asli to make.
+fn request_rekey(paths: &Paths, remove: &[String]) -> Result<()> {
+    if !instance::is_running(paths) {
+        return Err(Error::Join(
+            "Asli is not running here. Start it with 'asli tray', then try again".to_owned(),
+        ));
+    }
+    let request = daemon::RekeyRequest {
+        remove: remove.to_vec(),
+    };
+    let bytes = serde_json::to_vec(&request).map_err(|err| Error::Parse(err.to_string()))?;
+    crate::config::write_atomically(&daemon::rekey_request_path(paths), &bytes, 0o600)?;
+    if remove.is_empty() {
+        println!("Asked Asli to replace the account key.");
+    }
+    println!("It moves to the new key once the relay confirms the other devices have it, and");
+    println!("restarts. Devices that are offline now will need to join again.");
+    Ok(())
+}
+
+/// Shows a join code for another device and approves it, in the terminal.
+fn add(paths: &Paths) -> Result<()> {
+    let account = secrets::load_account(paths)?.ok_or(Error::NoAccount)?;
+    let config = paths.load_config()?;
+    let invitation = crate::enroll::Invitation::open(crate::enroll::Approver {
+        relay_url: config.relay_url.clone(),
+        device: asli_crypto::device::DeviceKeys::from_secret(account.device.secret()),
+        account_secret: Zeroizing::new(*account.identity.secret()),
+        never_exported: config.key_never_exported,
+    })?;
+
+    println!("{}", qr::render(invitation.code())?);
+    println!("  {}", invitation.code());
+    println!();
+    println!("On the new device, choose Join an existing account (or run 'asli join') and type");
+    println!("this code. It works once, for ten minutes, and only with your approval here.");
+    println!();
+
+    let mut shown = 0;
+    loop {
+        let view = invitation.view();
+        if let Some(outcome) = view.outcome {
+            match outcome {
+                crate::enroll::InviteOutcome::Approved(name) => {
+                    println!("Approved. {name} is joining now.");
+                    return Ok(());
+                }
+                crate::enroll::InviteOutcome::Declined => {
+                    println!("Turned down. The code no longer works.");
+                    return Ok(());
+                }
+                crate::enroll::InviteOutcome::Expired => {
+                    println!("The code expired. Run 'asli add' again for a new one.");
+                    return Ok(());
+                }
+                crate::enroll::InviteOutcome::Failed(why) => return Err(Error::Join(why)),
+            }
+        }
+        if let Some(asking) = view.asking.get(shown) {
+            shown += 1;
+            println!("{} ({}) asks to join.", asking.name, asking.os);
+            println!("It should show:  {}", asking.comparison);
+            let answer = read_line("Approve it? Only if the digits match. [y/N] ")?;
+            if answer.trim().eq_ignore_ascii_case("y") {
+                invitation.approve(asking.request_id);
+            } else {
+                invitation.decline(asking.request_id);
+            }
+            continue;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 fn status(paths: &Paths) -> Result<()> {
@@ -221,11 +414,25 @@ fn status(paths: &Paths) -> Result<()> {
     );
     println!("Next sequence: {}", paths.load_state()?.seq);
 
-    if let Some((secret, store)) = &account {
-        let identity = Identity::from_secret(secret);
+    if let Some(keys) = &account {
+        let identity = Identity::from_secret(&keys.account);
         println!("Account:       yes");
         println!("Room id:       {}", identity.room_id());
-        println!("Key stored in: {}", store.describe());
+        println!("Key stored in: {}", keys.store.describe());
+        println!(
+            "Device key:    {}",
+            if keys.device.is_some() {
+                "yes"
+            } else {
+                "not yet, made at the next start"
+            }
+        );
+        if !config.key_never_exported {
+            println!(
+                "               this account's key was shown as an old style join string, and"
+            );
+            println!("               may still be in a screenshot. Replace it from Status in the window.");
+        }
     } else {
         println!("Account:       none yet. Run 'asli create' or 'asli join'");
         println!("Key store:     {}", secrets::available_store().describe());
@@ -430,22 +637,19 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
             return Err(Error::NoAccount);
         }
 
-        if let Some((_, store)) = &account {
-            eprintln!("{}", log_line("key_store", store.describe()));
-        }
-
         // The encrypted store when there is an account key to seal it with, and a list that lives
         // only as long as the process when there is not. First run has no key yet, and a history
         // written now that nothing could decrypt later is worse than no history at all.
-        let history = open_history(paths, &config, account.as_ref().map(|(secret, _)| secret));
+        let history = open_history(
+            paths,
+            &config,
+            account.as_ref().map(|account| account.identity.secret()),
+        );
 
-        let identity = account.map(|(secret, _)| Identity::from_secret(&secret));
-        if let Some(identity) = &identity {
-            eprintln!(
-                "{}",
-                log_line("starting", &format!("room {}", identity.room_id()))
-            );
+        if let Some(account) = &account {
+            log_account(account);
         }
+        let identity = account;
 
         #[cfg(target_os = "macos")]
         if !with_tray {
@@ -521,7 +725,7 @@ fn run(paths: &Paths, with_tray: bool) -> Result<()> {
 fn run_headless_on_macos(
     paths: &Paths,
     config: &Config,
-    identity: Identity,
+    identity: secrets::Account,
     io: Arc<dyn crate::clipboard_io::ClipboardIo>,
     observed: std::sync::mpsc::Receiver<crate::clipboard_io::Observed>,
     controls: Controls,
@@ -556,7 +760,7 @@ fn run_headless_on_macos(
 fn headless_daemon(
     paths: &Paths,
     config: &Config,
-    identity: Identity,
+    identity: secrets::Account,
     io: Arc<dyn crate::clipboard_io::ClipboardIo>,
     observed: std::sync::mpsc::Receiver<crate::clipboard_io::Observed>,
     controls: &Controls,
@@ -591,20 +795,27 @@ fn start_pump(mut pump: crate::clipboard_io::MacPump) {
     std::mem::forget(timer);
 }
 
+/// Says where the keys are kept and which room this device is in, at startup.
+fn log_account(account: &secrets::Account) {
+    eprintln!("{}", log_line("key_store", account.store.describe()));
+    eprintln!(
+        "{}",
+        log_line("starting", &format!("room {}", account.identity.room_id()))
+    );
+}
+
 /// Loads the account key, waiting a while for a keychain that is still locked.
 ///
 /// At login the keychain is often unlocked a few seconds after the applications that start with
 /// the session, and on an automatic login it may stay locked until the person unlocks it. Treating
 /// that as "no account" showed first run and offered to create a new account over the real one.
-fn load_account_patiently(
-    paths: &Paths,
-) -> Result<Option<(zeroize::Zeroizing<[u8; 32]>, secrets::Store)>> {
+fn load_account_patiently(paths: &Paths) -> Result<Option<secrets::Account>> {
     const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
     const STEP: std::time::Duration = std::time::Duration::from_secs(3);
 
     let started = std::time::Instant::now();
     loop {
-        match secrets::load(paths) {
+        match secrets::load_account(paths) {
             Err(Error::KeychainLocked(detail)) if started.elapsed() < PATIENCE => {
                 if started.elapsed() < STEP {
                     eprintln!(
@@ -626,7 +837,7 @@ fn load_account_patiently(
 fn open_history(
     paths: &Paths,
     config: &Config,
-    secret: Option<&zeroize::Zeroizing<[u8; 32]>>,
+    secret: Option<&[u8; 32]>,
 ) -> crate::window::SharedHistory {
     let in_memory = || -> crate::window::SharedHistory {
         Arc::new(std::sync::Mutex::new(crate::window::MemoryHistory::new(
@@ -653,7 +864,7 @@ fn open_history(
 fn start_daemon(
     paths: &Paths,
     config: &Config,
-    identity: Identity,
+    identity: secrets::Account,
     io: &Arc<dyn crate::clipboard_io::ClipboardIo>,
     observed: std::sync::mpsc::Receiver<crate::clipboard_io::Observed>,
     controls: &Controls,

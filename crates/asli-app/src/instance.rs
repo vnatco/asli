@@ -101,6 +101,27 @@ pub fn claim(paths: &Paths) -> Result<Claim> {
     Ok(Claim::Acquired(Guard { _file: file }))
 }
 
+/// Whether another process holds the lock: an instance of Asli is running with this
+/// configuration. Takes the lock for a moment to find out and gives it straight back.
+///
+/// # Errors
+///
+/// None: anything that stops the check counts as not running.
+#[must_use]
+pub fn is_running(paths: &Paths) -> bool {
+    let Ok(file) = open_owner_only(&paths.dir.join("asli.lock")) else {
+        return false;
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(TryLockError::WouldBlock) => true,
+        Err(TryLockError::Error(_)) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,8 +136,13 @@ mod tests {
     #[test]
     fn a_second_claim_is_refused_while_the_first_is_held() {
         let paths = temp_paths("held");
+        assert!(!is_running(&paths));
         let first = claim(&paths).expect("first claim");
         assert!(matches!(first, Claim::Acquired(_)));
+        assert!(
+            is_running(&paths),
+            "a held lock means an instance is running"
+        );
         assert!(matches!(
             claim(&paths).expect("second claim"),
             Claim::AlreadyRunning

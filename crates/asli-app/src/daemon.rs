@@ -19,13 +19,14 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use asli_crypto::Identity;
 use asli_net::client::{self, ClientEvent, Disconnect};
 use asli_net::session::Action;
 use asli_net::{Backoff, DeviceInfo, LocalEvent, Session};
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 
 use crate::clipboard_io::{log_line, ClipboardIo, Observed};
 use crate::config::{Config, Paths, State};
@@ -62,6 +63,151 @@ pub struct Controls {
     pub settings: LiveSettings,
     /// The other devices on this account, as their announcements describe them.
     pub devices: DevicesHandle,
+    /// What the window sends to the other devices through the live connection.
+    pub outbox: Outbox,
+}
+
+/// The window's way into the live connection, for what it asks to send to the other devices.
+///
+/// For now that is a new account key, which removes a device or retires a key that once appeared
+/// in an old style join token. The new key is kept here, and only stored once the relay confirms
+/// it has passed the key on, so a key that never reached anyone is never the one this device
+/// moves to.
+#[derive(Debug, Clone, Default)]
+pub struct Outbox(Arc<Mutex<OutboxState>>);
+
+#[derive(Default)]
+struct OutboxState {
+    tx: Option<mpsc::Sender<LocalEvent>>,
+    rekey: Option<PendingRekey>,
+    note: Option<String>,
+    next_token: u64,
+}
+
+impl std::fmt::Debug for OutboxState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboxState")
+            .field("connected", &self.tx.is_some())
+            .field("rekey_pending", &self.rekey.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A new account key on its way to the other devices.
+struct PendingRekey {
+    token: u64,
+    secret: Zeroizing<[u8; 32]>,
+    /// The devices the new key is sealed to.
+    keep: Vec<[u8; 16]>,
+    /// The devices left out, which are forgotten once the move is done.
+    removing: Vec<[u8; 16]>,
+}
+
+impl PendingRekey {
+    fn event(&self) -> LocalEvent {
+        LocalEvent::Rekey {
+            keep: self.keep.clone(),
+            secret: asli_net::client::HandedSecret(self.secret.clone()),
+            token: self.token,
+        }
+    }
+}
+
+impl Outbox {
+    fn attach(&self, tx: mpsc::Sender<LocalEvent>) {
+        if let Ok(mut state) = self.0.lock() {
+            state.tx = Some(tx);
+        }
+    }
+
+    /// Replaces the account key, sealing the new one to the devices in `keep` and leaving every
+    /// other device out. This device moves to the new key once the relay has passed it on.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sentence for the window when another replacement is under way, the daemon is not
+    /// running, or randomness fails.
+    pub fn replace_key(
+        &self,
+        keep: Vec<[u8; 16]>,
+        removing: Vec<[u8; 16]>,
+    ) -> std::result::Result<(), String> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| "Asli is shutting down.".to_owned())?;
+        if state.rekey.is_some() {
+            return Err("A key change is already under way.".to_owned());
+        }
+        let tx = state
+            .tx
+            .clone()
+            .ok_or_else(|| "Asli is not connected yet.".to_owned())?;
+        let secret =
+            Zeroizing::new(asli_crypto::random::bytes::<32>().map_err(|err| err.to_string())?);
+        state.next_token += 1;
+        let pending = PendingRekey {
+            token: state.next_token,
+            secret,
+            keep,
+            removing,
+        };
+        tx.try_send(pending.event())
+            .map_err(|_| "Asli is busy. Try again in a moment.".to_owned())?;
+        state.rekey = Some(pending);
+        state.note = None;
+        Ok(())
+    }
+
+    /// Whether a key change is waiting for the relay.
+    #[must_use]
+    pub fn rekey_pending(&self) -> bool {
+        self.0.lock().is_ok_and(|state| state.rekey.is_some())
+    }
+
+    /// Why the last key change did not happen, once.
+    #[must_use]
+    pub fn take_note(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|mut state| state.note.take())
+    }
+
+    fn take_rekey(&self, token: u64) -> Option<PendingRekey> {
+        let mut state = self.0.lock().ok()?;
+        if state
+            .rekey
+            .as_ref()
+            .is_some_and(|pending| pending.token == token)
+        {
+            state.rekey.take()
+        } else {
+            None
+        }
+    }
+
+    fn fail_rekey(&self, token: u64, reason: &str) {
+        if let Ok(mut state) = self.0.lock() {
+            if state
+                .rekey
+                .as_ref()
+                .is_some_and(|pending| pending.token == token)
+            {
+                state.rekey = None;
+                state.note = Some(format!("The key was not changed: {reason}."));
+            }
+        }
+    }
+
+    /// A new connection is up: a key change the last one sent without the relay confirming it is
+    /// sent again. Never dropped: the relay may already have passed it on, and the devices that
+    /// got it have moved, so this device must follow them, not stay behind on the old key. The
+    /// devices that have moved are no longer in the old room to see it twice.
+    fn resend_pending(&self) {
+        if let Ok(state) = self.0.lock() {
+            if let (Some(pending), Some(tx)) = (&state.rekey, &state.tx) {
+                let _ = tx.try_send(pending.event());
+            }
+        }
+    }
 }
 
 /// The settings that take effect at once, shared between the window and the daemon.
@@ -360,6 +506,7 @@ fn track_devices(event: &ClientEvent, devices: &DevicesHandle, now_ms: u64) {
     match event {
         ClientEvent::Authenticated { peers, .. } => devices.set_connected(true, *peers, now_ms),
         ClientEvent::Presence { peers } => devices.presence(*peers, now_ms),
+        ClientEvent::Device(device) => devices.heard_card(device, now_ms),
         ClientEvent::Peer(peer) => {
             eprintln!(
                 "{}",
@@ -557,7 +704,7 @@ pub fn raise_reservation(paths: &Paths, ceiling: u64) -> Result<()> {
 pub async fn run(
     paths: &Paths,
     config: &Config,
-    identity: Identity,
+    account: crate::secrets::Account,
     io: Arc<dyn ClipboardIo>,
     observed: Receiver<Observed>,
     controls: Controls,
@@ -565,14 +712,25 @@ pub async fn run(
 ) -> Result<()> {
     let device_id = config.device_id_bytes()?;
     let seq = reserve_sequence(paths)?;
+    let identity = account.identity;
     let room = identity.room_id();
+    let keys = KeyContext {
+        paths: paths.clone(),
+        device_secret: Zeroizing::new(*account.device.secret()),
+    };
     let mut session = Session::new(identity, device_id, seq);
+    // This device's own keys: it signs its card with them, and a new account key is sealed to
+    // them when another device removes someone.
+    session.set_device_keys(account.device);
     // Who this device is, as the others will list it. Sent sealed after every handshake.
     session.set_device_info(DeviceInfo {
         name: crate::devices::display_name(&config.device_name),
         os: crate::devices::this_os(),
     });
     controls.devices.load(paths, &room);
+    // The keys every device was pinned to in earlier runs, so a card naming another key for one of
+    // them is refused from the first rather than after this run has seen the real one.
+    session.restore_known(controls.devices.pinned());
     // The clipboard layer already recognises our own writes. See the method for why this matters.
     session.leave_echoes_to_caller();
 
@@ -590,6 +748,8 @@ pub async fn run(
 
     // The watcher thread is blocking, so it gets its own bridge into the async side.
     let (local_tx, mut local_rx) = mpsc::channel::<LocalEvent>(16);
+    controls.outbox.attach(local_tx.clone());
+    let rekey_watch = spawn_rekey_watch(paths, controls.clone());
     // The bridge consumes its sender, and the retained pump needs one of its own.
     let local_tx_for_retained = local_tx.clone();
     spawn_clipboard_bridge(
@@ -605,7 +765,7 @@ pub async fn run(
         },
     )?;
 
-    run_connection_loop(
+    let result = run_connection_loop(
         paths,
         config,
         session,
@@ -615,9 +775,170 @@ pub async fn run(
             rx: &mut local_rx,
             tx_for_retained: local_tx_for_retained,
         },
-        Sinks { history, replay },
+        Sinks {
+            history,
+            replay,
+            keys,
+        },
     )
-    .await
+    .await;
+    rekey_watch.abort();
+    result
+}
+
+/// Where a key change asked for from the command line waits for the running daemon.
+#[must_use]
+pub fn rekey_request_path(paths: &Paths) -> std::path::PathBuf {
+    paths.dir.join("rekey-request.json")
+}
+
+/// A key change asked for from the command line: the devices to remove, by id in hex. Empty means
+/// replace the key and keep everyone.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct RekeyRequest {
+    /// Devices to leave out of the new key.
+    pub remove: Vec<String>,
+}
+
+/// Picks up a key change asked for from the command line and makes it, exactly as the window's
+/// confirm button does.
+fn spawn_rekey_watch(paths: &Paths, controls: Controls) -> tokio::task::JoinHandle<()> {
+    let path = rekey_request_path(paths);
+    // One left over from before this run is stale: nobody is waiting on it any more.
+    let _ = std::fs::remove_file(&path);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let _ = std::fs::remove_file(&path);
+            let Ok(request) = serde_json::from_slice::<RekeyRequest>(&bytes) else {
+                eprintln!("{}", log_line("rekey_request_invalid", "ignored"));
+                continue;
+            };
+            let removing: Vec<[u8; 16]> = request
+                .remove
+                .iter()
+                .filter_map(|id| crate::devices::id_bytes(id))
+                .collect();
+            let keep = controls.devices.keyed_except(&removing);
+            match controls.outbox.replace_key(keep, removing) {
+                Ok(()) => eprintln!("{}", log_line("rekey_requested", "from the command line")),
+                Err(note) => eprintln!("{}", log_line("rekey_refused", &note)),
+            }
+        }
+    })
+}
+
+/// What the daemon needs to move this device to a new account key.
+struct KeyContext {
+    paths: Paths,
+    /// This device's own key, stored again beside the new account key.
+    device_secret: Zeroizing<[u8; 32]>,
+}
+
+/// Acts on what concerns the account itself rather than the clipboard: a new account key, from
+/// this device or another, and being removed.
+fn on_account_event(
+    event: &ClientEvent,
+    keys: &KeyContext,
+    controls: &Controls,
+    history: &SharedHistory,
+) {
+    match event {
+        ClientEvent::Connected { .. } => controls.outbox.resend_pending(),
+        ClientEvent::Sent { token } => {
+            if let Some(pending) = controls.outbox.take_rekey(*token) {
+                move_to_new_key(
+                    keys,
+                    &pending.secret,
+                    controls,
+                    history,
+                    &pending.removing,
+                    crate::window::Welcome::Rekeyed,
+                );
+            }
+        }
+        ClientEvent::NotSent {
+            token: Some(token),
+            reason,
+        } => controls.outbox.fail_rekey(*token, reason),
+        ClientEvent::Rekeyed { secret, by, kept } => {
+            let who = controls
+                .devices
+                .name_of(by)
+                .unwrap_or_else(|| "another device".to_owned());
+            eprintln!("{}", log_line("key_replaced_by", &who));
+            // Whoever the new key did not go to was left out of the account, apart from the
+            // device that made it.
+            let left_out: Vec<[u8; 16]> = controls
+                .devices
+                .keyed_except(kept)
+                .into_iter()
+                .filter(|device| device != by)
+                .collect();
+            move_to_new_key(
+                keys,
+                &secret.0,
+                controls,
+                history,
+                &left_out,
+                crate::window::Welcome::KeyChangedElsewhere,
+            );
+        }
+        ClientEvent::RemovedBy { by } => {
+            let who = controls
+                .devices
+                .name_of(by)
+                .unwrap_or_else(|| "another device".to_owned());
+            eprintln!("{}", log_line("removed_by", &who));
+            if let Err(err) = crate::secrets::wipe(&keys.paths) {
+                eprintln!("{}", log_line("wipe_failed", &err.to_string()));
+            }
+            controls.devices.clear();
+            notify::action_failed(
+                "This device was removed from your Asli account",
+                &format!("{who} removed it. Join again with a code if that was a mistake."),
+            );
+            crate::window::restart_for(crate::window::Welcome::Removed);
+        }
+        _ => {}
+    }
+}
+
+/// Stores a new account key beside this device's own key, carries the device list and the
+/// history over to it, and restarts onto it.
+fn move_to_new_key(
+    keys: &KeyContext,
+    new_secret: &[u8; 32],
+    controls: &Controls,
+    history: &SharedHistory,
+    forget: &[[u8; 16]],
+    welcome: crate::window::Welcome,
+) {
+    if let Err(err) = crate::secrets::store(&keys.paths, new_secret, &keys.device_secret) {
+        eprintln!("{}", log_line("key_store_failed", &err.to_string()));
+        notify::action_failed("Asli could not save the new account key", &err.to_string());
+        return;
+    }
+    // A key made by a device and handed over sealed has never been in an old style token.
+    if let Ok(mut config) = keys.paths.load_config() {
+        config.key_never_exported = true;
+        if let Err(err) = keys.paths.save_config(&config) {
+            eprintln!("{}", log_line("config_save_failed", &err.to_string()));
+        }
+    }
+    for device in forget {
+        controls.devices.forget(device);
+    }
+    let room = Identity::from_secret(new_secret).room_id();
+    controls.devices.move_to_room(&room);
+    if let Ok(mut history) = history.lock() {
+        history.rekey(new_secret);
+    }
+    eprintln!("{}", log_line("key_replaced", &format!("room {room}")));
+    crate::window::restart_for(welcome);
 }
 
 /// Saves the replay memory whenever the session has learned something new.
@@ -847,6 +1168,8 @@ struct Sinks {
     history: SharedHistory,
     /// Where what has been accepted is saved, so replay protection survives a restart.
     replay: ReplaySaver,
+    /// What moving to a new account key needs.
+    keys: KeyContext,
 }
 
 /// Watches for a retained fetch raised by the tray and puts it on the local queue.
@@ -961,6 +1284,7 @@ async fn run_connection_loop(
     let Sinks {
         history,
         mut replay,
+        keys,
     } = sinks;
     let mut backoff = Backoff::new();
     let mut status = Status {
@@ -1024,6 +1348,7 @@ async fn run_connection_loop(
                 authenticated_at.set(Some(client::now_ms()));
                 status.attempt = 0;
             }
+            on_account_event(&event, &keys, &controls, &history);
             on_live_event(
                 &event,
                 io.as_ref(),
