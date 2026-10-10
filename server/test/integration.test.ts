@@ -420,3 +420,98 @@ test('an announcement before the handshake is refused', async () => {
     assert.equal(await closed, 4005);
   });
 });
+
+function msgFrame(msgId: Buffer, to?: string): Json {
+  const frame: Json = {
+    v: 1,
+    type: 'msg',
+    room: ROOM,
+    epoch: 0,
+    msg_id: msgId.toString('base64'),
+    n: Buffer.alloc(24, 0x43).toString('base64'),
+    ct: Buffer.alloc(512, 0x66).toString('base64'),
+  };
+  if (to !== undefined) frame['to'] = to;
+  return frame;
+}
+
+test('a msg reaches every other device in the room, once, and is never retained', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    const b = await TestClient.open(port);
+    const c = await TestClient.open(port);
+    await a.handshake();
+    await b.handshake();
+    await c.handshake();
+
+    const msgId = randomBytes(16);
+    a.send(msgFrame(msgId));
+    for (const peer of [b, c]) {
+      const got = await peer.nextOfType('msg');
+      assert.equal(got['msg_id'], msgId.toString('base64'));
+    }
+
+    // A repeat of the same id goes nowhere, and the sender never hears its own.
+    a.send(msgFrame(msgId));
+    a.send({ v: 1, type: 'ping', t: 1 });
+    await a.nextOfType('pong');
+    b.send({ v: 1, type: 'ping', t: 2 });
+    assert.equal((await b.nextOfType('pong'))['t'], 2);
+
+    const late = await TestClient.open(port);
+    assert.equal((await late.handshake())['has_retained'], false);
+    for (const client of [a, b, c, late]) client.close();
+  });
+});
+
+test('a msg addressed to one connection reaches that one alone', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    const b = await TestClient.open(port);
+    const c = await TestClient.open(port);
+    await a.handshake();
+    const bOk = await b.handshake();
+    await c.handshake();
+
+    const msgId = randomBytes(16);
+    a.send(msgFrame(msgId, bOk['conn_id'] as string));
+    const got = await b.nextOfType('msg');
+    assert.equal(got['msg_id'], msgId.toString('base64'));
+
+    // c got nothing: the next thing it hears is the answer to its own ping.
+    c.send({ v: 1, type: 'ping', t: 3 });
+    const next = await c.nextOfType('pong');
+    assert.equal(next['t'], 3);
+    for (const client of [a, b, c]) client.close();
+  });
+});
+
+test('a msg addressed to a connection that is not there is answered, not dropped quietly', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    await a.handshake();
+    a.send(msgFrame(randomBytes(16), 'c_00000000'));
+    const err = await a.nextOfType('error');
+    assert.equal(err['code'], 'NO_SUCH_PEER');
+    a.close();
+  });
+});
+
+test('a msg with a malformed target, or before the handshake, is refused', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    await a.handshake();
+    const closed = new Promise<number>((resolve) => {
+      a.ws.once('close', (code: number) => resolve(code));
+    });
+    a.send(msgFrame(randomBytes(16), 'not a connection id'));
+    assert.equal(await closed, 4005);
+
+    const early = await TestClient.open(port);
+    const earlyClosed = new Promise<number>((resolve) => {
+      early.ws.once('close', (code: number) => resolve(code));
+    });
+    early.send(msgFrame(randomBytes(16)));
+    assert.equal(await earlyClosed, 4005);
+  });
+});

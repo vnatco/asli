@@ -31,6 +31,7 @@ export type EventName =
   | 'clip_forward'
   | 'chunk_complete'
   | 'announce_forward'
+  | 'msg_forward'
   | 'chunk_assembly_timeout'
   | 'clip_dropped'
   | 'clip_retained'

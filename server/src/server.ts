@@ -26,6 +26,7 @@ import type { AuthFailCode, NonceState } from './auth.ts';
 import {
   parseFrame,
   validateAnnounce,
+  validateMsg,
   validateAuth,
   validateChunk,
   validateClip,
@@ -534,6 +535,68 @@ export function createRelay(config: Config): Relay {
     });
   }
 
+  /**
+   * Forwards one sealed device to device message, to one connection or to the rest of the room.
+   *
+   * Like a chunk, never parked and never dropped quietly: a join grant or a new account key that
+   * vanished under backpressure would leave a device stranded with nothing saying why. A receiver
+   * already past the hard limit is disconnected instead, and sorts itself out on reconnecting. Never
+   * retained, so a message reaches only the devices connected when it is sent.
+   */
+  function handleMsg(
+    session: Session,
+    raw: NodeBuffer,
+    message: ReturnType<typeof parseFrame>,
+  ): void {
+    if (!message.ok) return;
+    const fields = validateMsg(message.message, config.maxFrameBytes);
+    if (fields === null) {
+      sendError(session, 'MALFORMED', 'msg failed validation');
+      session.ws.close(4005, 'MALFORMED');
+      return;
+    }
+    if (roomKeyOf(fields.roomText) !== session.conn.roomId) {
+      session.ws.close(4005, 'ROOM_MISMATCH');
+      return;
+    }
+
+    const now = Date.now();
+    let quota = roomQuotas.get(session.conn.roomId);
+    if (quota === undefined) {
+      quota = new RollingQuota(config.roomBytesPerDay, 24 * 60 * 60 * 1000, now);
+      roomQuotas.set(session.conn.roomId, quota);
+    }
+    if (!quota.charge(raw.length, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
+      sendError(session, 'QUOTA_EXCEEDED', 'room daily quota exhausted', quota.retryAfterMs(now));
+      session.ws.close(4008, 'QUOTA_EXCEEDED');
+      return;
+    }
+
+    if (registry.isDuplicate(session.conn.roomId, fields.msgIdText)) return;
+
+    const frame = raw.toString('utf8');
+    let delivered = 0;
+    for (const peer of sessions) {
+      if (peer === session) continue;
+      if (peer.state !== 'ready' || peer.conn.roomId !== session.conn.roomId) continue;
+      if (fields.to !== null && peer.conn.id !== fields.to) continue;
+      deliverChunk(peer, frame);
+      delivered += 1;
+    }
+    if (fields.to !== null && delivered === 0) {
+      sendError(session, 'NO_SUCH_PEER', 'that connection is not in this room');
+    }
+
+    log.debug('msg_forward', {
+      conn: session.conn.id,
+      room: roomLogId(session.conn.roomId),
+      bytes: raw.length,
+      count: delivered,
+      code: fields.to === null ? 'room' : 'one',
+    });
+  }
+
   // How long to tell a peer to wait when its socket is already behind. One second: long enough
   // for the buffer to drain, short enough that catching up after a reconnect is not slow.
   const BACKPRESSURE_RETRY_AFTER_MS = 1000;
@@ -711,6 +774,9 @@ export function createRelay(config: Config): Relay {
           return;
         case 'announce':
           handleAnnounce(session, raw, parsed);
+          return;
+        case 'msg':
+          handleMsg(session, raw, parsed);
           return;
         case 'fetch_last':
           handleFetchLast(session);

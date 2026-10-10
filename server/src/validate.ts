@@ -39,6 +39,7 @@ const KNOWN_TYPES = new Set([
   'clip_chunk',
   'clip_end',
   'announce',
+  'msg',
   'fetch_last',
   'ping',
   'pong',
@@ -65,6 +66,7 @@ const ALLOWED_FIELDS: Record<string, ReadonlySet<string>> = {
   clip_chunk: CHUNK_FIELDS,
   clip_end: CHUNK_FIELDS,
   announce: new Set(['v', 'type', 'room', 'epoch', 'msg_id', 'n', 'ct']),
+  msg: new Set(['v', 'type', 'room', 'epoch', 'msg_id', 'n', 'ct', 'to']),
   fetch_last: new Set(['v', 'type']),
   ping: new Set(['v', 'type', 't']),
   pong: new Set(['v', 'type', 't']),
@@ -244,6 +246,31 @@ export function validateAnnounce(message: Envelope): ClipFields | null {
   const fields = validateClip(message, maxChars);
   if (fields === null || fields.ciphertextBytes > ANNOUNCE_MAX_CT_BYTES) return null;
   return fields;
+}
+
+export type MsgFields = ClipFields & {
+  /** The one connection to deliver to, or null for every other connection in the room. */
+  to: string | null;
+};
+
+/** What a connection id looks like, as this relay assigns them. Anything else is refused. */
+const CONN_ID = /^c_[0-9a-f]{8}$/;
+
+/**
+ * Validates the shape of `msg`, a sealed device to device message.
+ *
+ * The header is a clip's, and the relay never opens the ciphertext: what kind of message it is, a
+ * device card, a join request or a piece of a file, is inside it. `to`, when present, names one
+ * connection in the room, which is how one device sends to another without the others receiving
+ * a copy. Connection ids are this relay's own, so they say nothing about the devices.
+ */
+export function validateMsg(message: Envelope, maxFrameChars: number): MsgFields | null {
+  const fields = validateClip(message, maxFrameChars);
+  if (fields === null) return null;
+  const to = message['to'];
+  if (to === undefined) return { ...fields, to: null };
+  if (typeof to !== 'string' || !CONN_ID.test(to)) return null;
+  return { ...fields, to };
 }
 
 /** Upper bound on chunks per message, matching the crypto layer's cap. */
