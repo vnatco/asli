@@ -73,6 +73,11 @@ Nothing is tagged yet and there are no downloads. What exists today:
   they cannot reach each other, the file goes through the relay instead. The first time it sends a
   file, Windows may ask whether Asli may accept connections on private networks; saying no leaves
   files going through the relay.
+- The shelf. Put a file on it, from the Shelf screen, by dropping it on the window, or with `asli
+  shelf add`, and your other devices can fetch it for the next day whenever both are on. It stays
+  where it is on disk and is never stored anywhere else; any device can take it off the shelf, and
+  that never deletes it. `asli shelf`, `asli shelf take` and `asli shelf remove` do the rest from a
+  terminal. The tray menu has a Shelf item.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,

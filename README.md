@@ -52,6 +52,9 @@ locally, which `--with-server` sets up.
    <device> <file>` in a terminal). The other machine asks before taking it. On the same network the
    file goes straight between the two machines; otherwise it goes through the relay encrypted like
    everything else, without being stored there.
+6. To leave a file where all your machines can get it, put it on the **Shelf** (`asli shelf add
+   <file>`). It stays on that machine for a day, and the others can fetch it from their own Shelf
+   screen whenever both are on.
 
 The relay only ever sees ciphertext. It cannot read your clipboard, and it does not know who you
 are. It keeps at most your most recent clip, briefly, so a machine that was switched off can catch

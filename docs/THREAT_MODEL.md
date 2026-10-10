@@ -228,6 +228,12 @@ connects only to private, carrier grade and link local addresses, so a forged or
 cannot make it reach the internet. Someone on the same network learns that the two machines
 exchanged a file of about that size, which the relay would otherwise learn instead.
 
+**The shelf.** A shelved file's name and size are told to every device on the account, and any of
+them can fetch it or take it off the shelf without a prompt on the device that holds it, as all
+devices are equally trusted (section 5). Requests are signed and accepted only from pinned devices.
+Nothing on a shelf leaves the device until one of them asks, a fetched file is checked and kept
+exactly like an accepted one, and taking a file off the shelf never deletes it.
+
 ## 5. Accepted risks, not mitigated in v1
 
 | Risk | Why it is accepted | Cost of fixing |
