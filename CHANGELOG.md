@@ -85,6 +85,9 @@ Nothing is tagged yet and there are no downloads. What exists today:
   change, and Status says when another device runs a newer one than this. `asli devices` and `asli
   status` show it too. A dropped file that no device can receive now says why, naming the devices
   that need updating, instead of offering only the shelf.
+- A device that joins another account says goodbye first, and the devices of the account it left
+  take it off their lists. A machine that joins again with its own key replaces its old keyless
+  entry, and an entry that cannot be removed the usual way has a Forget button.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,

@@ -1423,6 +1423,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 5 | Rekey | The account room |
 | 6 | Join where | A meeting room (section 18.5.1) |
 | 7 | About | The account room, to everyone or one connection (section 18.10) |
+| 8 | Leave | The account room (section 18.10) |
 | 16 | File offer | The account room, to one connection (section 18.8) |
 | 17 | File answer | The account room, to one connection |
 | 18 | File chunk | The account room, to one connection |
@@ -1430,7 +1431,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 20 | File cancel | The account room, to one connection |
 | 21 | Shelf list | The account room, to everyone or one connection (section 18.9) |
 | 22 | Shelf request | The account room, to one connection |
-| 8 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
+| 9 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
 
 Every signature in this section is Ed25519 over `label || room_id_bytes || body_without_signature`,
 so a signed body can be replayed neither as another kind nor into another room. Text fields are a
@@ -1699,4 +1700,16 @@ which only grows on the main branch, so a higher number is a newer build; 0 mean
 receiver MUST ignore one not signed by the key pinned for `from_device_id`. It is informational: it
 lets each device show which version the others run and say when this one is behind. A device too
 old to send one shows as an older version.
+
+```
+leave = u8(1) || from_device_id[16] || u64be(ts_ms) || signature, label "asli/v2/leave"
+```
+
+A device about to join another account sends a `leave` to the room it is leaving and waits briefly
+for the relay to have read it. A device that hears one, signed by the key pinned for that device,
+takes it off its list and forgets its shelf. It is a courtesy, not a security step: the leaving
+device keeps nothing of the old account, and one that has to be shut out is removed instead
+(section 18.6). A device offline at the time never hears it, so clients also drop an entry with no
+device key once a keyed device with the same name and operating system appears, and let the person
+forget an entry by hand.
 
