@@ -106,6 +106,9 @@ pub struct DevicesHandle(Arc<Mutex<Registry>>);
 
 #[derive(Debug, Default)]
 struct Registry {
+    /// Each device's connection at the relay, as its last card said, while this device is
+    /// connected. Not saved: connections change every time.
+    conns: std::collections::HashMap<String, String>,
     paths: Option<Paths>,
     stored: Stored,
     /// Whether this device is connected to the relay right now.
@@ -174,6 +177,9 @@ impl DevicesHandle {
             return;
         };
         let id = hex(&card.device_id);
+        if let Some(conn) = &card.conn_id {
+            registry.conns.insert(id.clone(), conn.clone());
+        }
         let device = Device {
             sign_pub: hex(&card.sign_pub),
             box_pub: hex(&card.box_pub),
@@ -194,6 +200,26 @@ impl DevicesHandle {
         registry.evict();
         if changed {
             registry.save();
+        }
+    }
+
+    /// The device's connection at the relay right now, if it is connected and has said.
+    #[must_use]
+    pub fn conn_of(&self, device_id: &[u8; 16]) -> Option<String> {
+        let registry = self.0.lock().ok()?;
+        if !registry.connected {
+            return None;
+        }
+        let id = hex(device_id);
+        let online = registry
+            .stored
+            .devices
+            .get(&id)
+            .is_some_and(|device| device.last_seen_ms >= registry.last_departure_ms);
+        if online {
+            registry.conns.get(&id).cloned()
+        } else {
+            None
         }
     }
 
@@ -254,6 +280,9 @@ impl DevicesHandle {
         let Ok(mut registry) = self.0.lock() else {
             return;
         };
+        if !connected {
+            registry.conns.clear();
+        }
         if registry.connected && !connected {
             // Last seen is when the connection ended for everyone still listed as online, since
             // that is the last moment this device could have known they were there.

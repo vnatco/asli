@@ -49,6 +49,23 @@ export struct DeviceRow {
     // Whether it can be removed from here: another device, which has sent a signed card, so the
     // new account key can be sealed to the ones that stay.
     removable: bool,
+    // Whether a file can be sent to it now: removable, and connected.
+    can-send: bool,
+}
+
+// A file on its way to or from this device.
+export struct FileRow {
+    name: string,
+    // "To MacBook" or "From MacBook".
+    peer: string,
+    // Size, and how far it has got or how it ended.
+    detail: string,
+    // 0 to 1 while it moves.
+    progress: float,
+    // Still under way, so it can be called off.
+    live: bool,
+    // Over, and it went well.
+    good: bool,
 }
 
 // A device asking to join, on the device that approves it.
@@ -467,6 +484,16 @@ export component AppWindow inherits Window {
     in property <string> confirm-title: "";
     in property <string> confirm-body: "";
     in property <string> confirm-action: "";
+    // Files: what is moving, a file offered to this device, and a file dropped on the window.
+    in property <[FileRow]> files: [];
+    in property <bool> offer-waiting: false;
+    in property <string> offer-from: "";
+    in property <string> offer-name: "";
+    in property <string> offer-size: "";
+    in property <string> offer-folder: "";
+    in property <string> drop-name: "";
+    in property <[string]> drop-targets: [];
+    in property <bool> drop-hover: false;
 
     // First run.
     in property <bool> creating: false;
@@ -529,6 +556,14 @@ export component AppWindow inherits Window {
     callback ask-replace-key();
     callback confirm-yes();
     callback confirm-no();
+    callback send-file(int);
+    callback accept-offer();
+    callback decline-offer();
+    callback change-offer-folder();
+    callback cancel-file(int);
+    callback clear-files();
+    callback send-dropped(int);
+    callback cancel-drop();
     callback restore-entry(int);
     callback copy-entry(int);
     callback forget-entry(int);
@@ -1732,6 +1767,126 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
+                                    // A file offered to this device: nothing is kept unless it is
+                                    // accepted here.
+                                    if root.offer-waiting: VerticalLayout {
+                                        padding-bottom: 14px;
+                                        Card {
+                                            height: offer-body.preferred-height;
+                                            offer-body := VerticalLayout {
+                                                padding-top: 14px;
+                                                padding-bottom: 14px;
+                                                padding-left: 16px;
+                                                padding-right: 16px;
+                                                spacing: 0px;
+                                                Text {
+                                                    text: root.offer-from + " wants to send you a file";
+                                                    color: Theme.text;
+                                                    font-size: 13.5px;
+                                                    font-weight: 600;
+                                                    wrap: word-wrap;
+                                                }
+                                                Rectangle { height: 8px; }
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    Icon {
+                                                        source: Icons.download;
+                                                        size: 15px;
+                                                        tint: Theme.link;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                    Text {
+                                                        text: root.offer-name;
+                                                        color: Theme.text;
+                                                        font-size: 13px;
+                                                        overflow: elide;
+                                                        horizontal-stretch: 1;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    Text {
+                                                        text: root.offer-size;
+                                                        color: Theme.text-3;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                                Rectangle { height: 8px; }
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    Caption {
+                                                        text: "Save to " + root.offer-folder;
+                                                        overflow: elide;
+                                                        horizontal-stretch: 1;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    Button {
+                                                        text: "Change";
+                                                        small: true;
+                                                        clicked => { root.change-offer-folder(); }
+                                                    }
+                                                }
+                                                Rectangle { height: 12px; }
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    alignment: start;
+                                                    Button {
+                                                        text: "Accept";
+                                                        kind: ButtonKind.primary;
+                                                        icon: Icons.check;
+                                                        show-icon: true;
+                                                        clicked => { root.accept-offer(); }
+                                                    }
+                                                    Button {
+                                                        text: "Decline";
+                                                        clicked => { root.decline-offer(); }
+                                                    }
+                                                }
+                                                Rectangle { height: 8px; }
+                                                Caption {
+                                                    text: "Only accept files you expect. Asli never opens them.";
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // A file dropped on the window, waiting to be told where to go.
+                                    if root.drop-name != "": VerticalLayout {
+                                        padding-bottom: 14px;
+                                        Card {
+                                            height: drop-body.preferred-height;
+                                            drop-body := VerticalLayout {
+                                                padding-top: 14px;
+                                                padding-bottom: 14px;
+                                                padding-left: 16px;
+                                                padding-right: 16px;
+                                                spacing: 0px;
+                                                Text {
+                                                    text: "Send " + root.drop-name + " to";
+                                                    color: Theme.text;
+                                                    font-size: 13.5px;
+                                                    font-weight: 600;
+                                                    overflow: elide;
+                                                }
+                                                Rectangle { height: 10px; }
+                                                HorizontalLayout {
+                                                    spacing: 8px;
+                                                    alignment: start;
+                                                    for target[t] in root.drop-targets: Button {
+                                                        text: target;
+                                                        kind: ButtonKind.primary;
+                                                        icon: Icons.send;
+                                                        show-icon: true;
+                                                        clicked => { root.send-dropped(t); }
+                                                    }
+                                                    Button {
+                                                        text: "Cancel";
+                                                        clicked => { root.cancel-drop(); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     if root.rekey-note != "": VerticalLayout {
                                         padding-bottom: 14px;
                                         Banner {
@@ -1907,6 +2062,78 @@ export component AppWindow inherits Window {
                                     }
 
                                     Rectangle { height: 14px; }
+                                    if root.files.length > 0: VerticalLayout {
+                                        spacing: 0px;
+                                        HorizontalLayout {
+                                            Overline {
+                                                text: "FILES";
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Button {
+                                                text: "Clear finished";
+                                                small: true;
+                                                clicked => { root.clear-files(); }
+                                            }
+                                        }
+                                        Rectangle { height: 8px; }
+                                        Card {
+                                            height: files-list.preferred-height;
+                                            files-list := VerticalLayout {
+                                                for file[f] in root.files: Rectangle {
+                                                    height: file-row.preferred-height;
+                                                    file-row := HorizontalLayout {
+                                                        padding-top: 10px;
+                                                        padding-bottom: 10px;
+                                                        padding-left: 14px;
+                                                        padding-right: 14px;
+                                                        spacing: 11px;
+                                                        VerticalLayout {
+                                                            horizontal-stretch: 1;
+                                                            min-width: 0px;
+                                                            spacing: 3px;
+                                                            Text {
+                                                                text: file.name;
+                                                                color: Theme.text;
+                                                                font-size: 13px;
+                                                                overflow: elide;
+                                                            }
+                                                            Text {
+                                                                text: file.peer + "  ·  " + file.detail;
+                                                                color: file.live || file.good ? Theme.text-3 : Theme.error;
+                                                                font-size: 11.5px;
+                                                                overflow: elide;
+                                                            }
+                                                            if file.live: Rectangle {
+                                                                height: 3px;
+                                                                border-radius: 1.5px;
+                                                                background: Theme.hairline;
+                                                                Rectangle {
+                                                                    x: 0px;
+                                                                    width: parent.width * clamp(file.progress, 0, 1);
+                                                                    border-radius: 1.5px;
+                                                                    background: Theme.link;
+                                                                }
+                                                            }
+                                                        }
+                                                        if file.live: Button {
+                                                            text: "Cancel";
+                                                            small: true;
+                                                            y: (parent.height - self.height) / 2;
+                                                            clicked => { root.cancel-file(f); }
+                                                        }
+                                                    }
+                                                    if f < root.files.length - 1: Rectangle {
+                                                        y: parent.height - 1px;
+                                                        height: 1px;
+                                                        background: Theme.border-subtle;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Rectangle { height: 14px; }
+                                    }
+
                                     Overline { text: "PAIRED DEVICES"; }
                                     Rectangle { height: 8px; }
                                     Card {
@@ -2006,6 +2233,14 @@ export component AppWindow inherits Window {
                                                             font-size: 11.5px;
                                                             vertical-alignment: center;
                                                         }
+                                                    }
+                                                    if device.can-send: Button {
+                                                        text: "Send file";
+                                                        small: true;
+                                                        icon: Icons.send;
+                                                        show-icon: true;
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.send-file(i); }
                                                     }
                                                     if device.removable: Button {
                                                         text: "Remove";
@@ -2269,6 +2504,39 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        // A file dragged over the window: drop it to choose a device.
+                        if root.drop-hover: Rectangle {
+                            background: #0B0E14E6;
+                            Rectangle {
+                                x: 16px;
+                                y: 16px;
+                                width: parent.width - 32px;
+                                height: parent.height - 32px;
+                                border-radius: 14px;
+                                border-width: 2px;
+                                border-color: Theme.link;
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Icon {
+                                            source: Icons.send;
+                                            size: 28px;
+                                            tint: Theme.link;
+                                        }
+                                    }
+                                    Text {
+                                        text: "Drop to send it to another device";
+                                        color: Theme.text;
+                                        font-size: 15px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
                                     }
                                 }
                             }

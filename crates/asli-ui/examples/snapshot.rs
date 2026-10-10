@@ -11,7 +11,7 @@
 use std::rc::Rc;
 
 use asli_ui::{
-    AppWindow, AskRow, DeviceRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
+    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
 };
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
@@ -151,6 +151,36 @@ fn main() {
             }),
         ),
         (
+            "08d-status-offer",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_offer_waiting(true);
+                ui.set_offer_from("MacBook-Air".into());
+                ui.set_offer_name("Quarterly report final.pdf".into());
+                ui.set_offer_size("3.4 MB".into());
+                ui.set_offer_folder("~/Downloads".into());
+                sample_files(ui);
+            }),
+        ),
+        (
+            "08e-status-drop",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_drop_name("holiday-photos.zip".into());
+                ui.set_drop_targets(ModelRc::new(VecModel::from(vec![
+                    SharedString::from("MacBook-Air"),
+                    SharedString::from("DESKTOP-7Q"),
+                ])));
+            }),
+        ),
+        (
+            "08f-status-drop-hover",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_drop_hover(true);
+            }),
+        ),
+        (
             "09-status-connecting",
             Box::new(|ui: &AppWindow| {
                 ui.set_sync_state(SyncState::Connecting);
@@ -245,6 +275,35 @@ fn write_png(path: &str, pixels: &[PremultipliedRgbaColor]) {
 
 const SAMPLE_TOKEN: &str = "asli2_04SJTBY11JG60WFJWN0SA9X57WPR8E63";
 
+fn sample_files(ui: &AppWindow) {
+    ui.set_files(ModelRc::new(VecModel::from(vec![
+        FileRow {
+            name: "holiday-photos.zip".into(),
+            peer: "To DESKTOP-7Q".into(),
+            detail: "212 MB · 41%".into(),
+            progress: 0.41,
+            live: true,
+            good: false,
+        },
+        FileRow {
+            name: "notes.md".into(),
+            peer: "From MacBook-Air".into(),
+            detail: "4 KB · saved to Downloads".into(),
+            progress: 1.0,
+            live: false,
+            good: true,
+        },
+        FileRow {
+            name: "video.mov".into(),
+            peer: "To MacBook-Air".into(),
+            detail: "1.2 GB · declined".into(),
+            progress: 0.0,
+            live: false,
+            good: false,
+        },
+    ])));
+}
+
 fn sample(ui: &AppWindow) {
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
@@ -274,6 +333,7 @@ fn sample(ui: &AppWindow) {
             online: true,
             this_device: true,
             removable: false,
+            can_send: false,
         },
         DeviceRow {
             name: "MacBook Pro".into(),
@@ -283,6 +343,7 @@ fn sample(ui: &AppWindow) {
             online: true,
             this_device: false,
             removable: true,
+            can_send: true,
         },
         DeviceRow {
             name: "fedora-desk".into(),
@@ -292,6 +353,7 @@ fn sample(ui: &AppWindow) {
             online: false,
             this_device: false,
             removable: true,
+            can_send: false,
         },
     ])));
     let row = |preview: &str, meta: &str, image: bool, mono: bool| HistoryRow {

@@ -314,6 +314,42 @@ pub fn action_failed(what: &str, reason: &str) {
     action(what, reason);
 }
 
+/// Another device offers a file. Always shown, whatever the notifications switch says: nothing
+/// arrives unless the person accepts it, so they have to know it is waiting.
+pub fn file_offered(from: &str, name: &str, bytes: u64) {
+    send(
+        &format!("{from} wants to send you a file"),
+        &format!(
+            "{name}, {}. Open Asli to accept or decline it.",
+            human(bytes)
+        ),
+    );
+}
+
+/// A file finished arriving and was kept.
+pub fn file_received(name: &str, folder: &str) {
+    send("File received", &format!("{name} is in {folder}."));
+}
+
+/// A file that was sending or arriving did not make it.
+pub fn file_failed(name: &str, reason: &str) {
+    send("A file transfer stopped", &format!("{name}: {reason}"));
+}
+
+fn human(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let value = bytes as f64;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", value / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", value / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.0} KB", value / 1024.0)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 /// Connection to the relay was lost and is being retried.
 pub fn connection_lost(enabled: bool) {
     if !enabled {

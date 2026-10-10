@@ -78,6 +78,28 @@ enum Command {
     /// Replace the account key and keep every device, so an old copy of the key stops working.
     /// Asks the running Asli to do it.
     Rekey,
+    /// Send a file to one of the other devices. It arrives only if someone there accepts it.
+    Send {
+        /// The device's name, or the start of its id as `asli devices` shows it.
+        device: String,
+        /// The file.
+        file: std::path::PathBuf,
+    },
+    /// List files on their way to or from this device.
+    Transfers,
+    /// Accept a file offered to this device.
+    Accept {
+        /// The start of its id, as `asli transfers` shows it. Omit when only one is waiting.
+        offer: Option<String>,
+        /// Where to keep it. Downloads unless given.
+        #[arg(long)]
+        into: Option<std::path::PathBuf>,
+    },
+    /// Turn down a file offered to this device.
+    Decline {
+        /// The start of its id. Omit when only one is waiting.
+        offer: Option<String>,
+    },
     /// Write or check a Windows shortcut. For the installer and setup.ps1 rather than people, so
     /// every shortcut Asli makes comes from the same code.
     #[command(hide = true)]
@@ -134,6 +156,15 @@ fn dispatch() -> Result<()> {
         Command::Devices => devices(&paths),
         Command::Remove { device } => remove(&paths, &device),
         Command::Rekey => request_rekey(&paths, &[]),
+        Command::Send { device, file } => send_file(&paths, &device, &file),
+        Command::Transfers => {
+            list_transfers(&paths);
+            Ok(())
+        }
+        Command::Accept { offer, into } => {
+            answer_offer(&paths, offer.as_deref(), OfferAnswer::Accept(into))
+        }
+        Command::Decline { offer } => answer_offer(&paths, offer.as_deref(), OfferAnswer::Decline),
         Command::Shortcut { action } => shortcut_command(&action),
     }
 }
@@ -301,7 +332,8 @@ fn devices(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn remove(paths: &Paths, query: &str) -> Result<()> {
+/// The one other device a name or the start of an id names.
+fn find_device(paths: &Paths, query: &str) -> Result<crate::devices::Listed> {
     let query = query.trim();
     let matches: Vec<crate::devices::Listed> = known_devices(paths)?
         .into_iter()
@@ -311,19 +343,137 @@ fn remove(paths: &Paths, query: &str) -> Result<()> {
                 || (query.len() >= 4 && device.id.starts_with(&query.to_ascii_lowercase()))
         })
         .collect();
-    match matches.as_slice() {
-        [device] => {
-            request_rekey(paths, std::slice::from_ref(&device.id))?;
-            println!("Asked Asli to remove {}.", device.name);
-            Ok(())
-        }
-        [] => Err(Error::Parse(format!(
+    match <[crate::devices::Listed; 1]>::try_from(matches) {
+        Ok([device]) => Ok(device),
+        Err(matches) if matches.is_empty() => Err(Error::Parse(format!(
             "no other device is called '{query}' or has an id starting with it. 'asli devices' lists them"
         ))),
-        _ => Err(Error::Parse(format!(
+        Err(_) => Err(Error::Parse(format!(
             "more than one device matches '{query}'. Use more of its id, from 'asli devices'"
         ))),
     }
+}
+
+fn remove(paths: &Paths, query: &str) -> Result<()> {
+    let device = find_device(paths, query)?;
+    request_rekey(paths, std::slice::from_ref(&device.id))?;
+    println!("Asked Asli to remove {}.", device.name);
+    Ok(())
+}
+
+/// Leaves a transfer request for the running Asli.
+fn request_transfer(paths: &Paths, request: &daemon::TransferRequest) -> Result<()> {
+    if !instance::is_running(paths) {
+        return Err(Error::Join(
+            "Asli is not running here. Start it with 'asli tray', then try again".to_owned(),
+        ));
+    }
+    let bytes = serde_json::to_vec(request).map_err(|err| Error::Parse(err.to_string()))?;
+    crate::config::write_atomically(&daemon::transfer_request_path(paths), &bytes, 0o600)
+}
+
+fn send_file(paths: &Paths, query: &str, file: &std::path::Path) -> Result<()> {
+    let device = find_device(paths, query)?;
+    let file = std::fs::canonicalize(file)?;
+    request_transfer(
+        paths,
+        &daemon::TransferRequest::Send {
+            device: device.id.clone(),
+            path: file.clone(),
+        },
+    )?;
+    println!(
+        "Offered {} to {}. It is sent once someone there accepts it; 'asli transfers' shows how it is going.",
+        file.display(),
+        device.name
+    );
+    Ok(())
+}
+
+fn read_transfers(paths: &Paths) -> Vec<daemon::TransferStatus> {
+    std::fs::read(daemon::transfer_status_path(paths))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn list_transfers(paths: &Paths) {
+    let list = read_transfers(paths);
+    if list.is_empty() {
+        println!("No files on their way to or from this device.");
+    }
+    for t in list {
+        let arrow = if t.direction == "sending" {
+            "to  "
+        } else {
+            "from"
+        };
+        println!(
+            "{}  {} {:<16} {}  ({} bytes)  {}",
+            &t.id[..8],
+            arrow,
+            t.peer,
+            t.name,
+            t.size,
+            t.stage
+        );
+    }
+}
+
+/// How to answer an offered file.
+enum OfferAnswer {
+    /// Keep it, in this folder or in Downloads.
+    Accept(Option<std::path::PathBuf>),
+    /// Turn it down.
+    Decline,
+}
+
+/// Accepts or declines an offered file.
+fn answer_offer(paths: &Paths, query: Option<&str>, answer: OfferAnswer) -> Result<()> {
+    let waiting: Vec<daemon::TransferStatus> = read_transfers(paths)
+        .into_iter()
+        .filter(|t| t.direction == "receiving" && t.stage == "waiting for an answer")
+        .filter(|t| query.is_none_or(|q| t.id.starts_with(&q.to_ascii_lowercase())))
+        .collect();
+    let offer = match <[daemon::TransferStatus; 1]>::try_from(waiting) {
+        Ok([offer]) => offer,
+        Err(rest) if rest.is_empty() => {
+            return Err(Error::Parse("no file is waiting for an answer".to_owned()))
+        }
+        Err(_) => return Err(Error::Parse(
+            "more than one file is waiting. Name one by the start of its id, from 'asli transfers'"
+                .to_owned(),
+        )),
+    };
+    match answer {
+        OfferAnswer::Accept(into) => {
+            let folder = into.unwrap_or_else(crate::transfer::default_folder);
+            let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
+            request_transfer(
+                paths,
+                &daemon::TransferRequest::Accept {
+                    offer: offer.id.clone(),
+                    folder: folder.clone(),
+                },
+            )?;
+            println!(
+                "Accepted {} from {}, into {}.",
+                offer.name,
+                offer.peer,
+                folder.display()
+            );
+        }
+        OfferAnswer::Decline => {
+            request_transfer(
+                paths,
+                &daemon::TransferRequest::Decline {
+                    offer: offer.id.clone(),
+                },
+            )?;
+            println!("Turned down {} from {}.", offer.name, offer.peer);
+        }
+    }
+    Ok(())
 }
 
 /// Leaves a key change for the running Asli to make.

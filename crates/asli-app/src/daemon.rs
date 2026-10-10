@@ -65,6 +65,8 @@ pub struct Controls {
     pub devices: DevicesHandle,
     /// What the window sends to the other devices through the live connection.
     pub outbox: Outbox,
+    /// Files on their way to or from the other devices.
+    pub transfers: crate::transfer::Transfers,
 }
 
 /// The window's way into the live connection, for what it asks to send to the other devices.
@@ -714,6 +716,7 @@ pub async fn run(
     let seq = reserve_sequence(paths)?;
     let identity = account.identity;
     let room = identity.room_id();
+    let room_bytes = identity.room_id_bytes();
     let keys = KeyContext {
         paths: paths.clone(),
         device_secret: Zeroizing::new(*account.device.secret()),
@@ -747,9 +750,27 @@ pub async fn run(
     session.share_replay_memory(Arc::clone(&replay.sink));
 
     // The watcher thread is blocking, so it gets its own bridge into the async side.
-    let (local_tx, mut local_rx) = mpsc::channel::<LocalEvent>(16);
+    // Room for a window of file pieces beside the clipboard's own traffic.
+    let (local_tx, mut local_rx) = mpsc::channel::<LocalEvent>(64);
     controls.outbox.attach(local_tx.clone());
+    controls.transfers.attach(
+        local_tx.clone(),
+        &keys.device_secret,
+        device_id,
+        room_bytes,
+        controls.devices.clone(),
+    );
     let rekey_watch = spawn_rekey_watch(paths, controls.clone());
+    let pacer = {
+        let transfers = controls.transfers.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                every.tick().await;
+                transfers.tick();
+            }
+        })
+    };
     // The bridge consumes its sender, and the retained pump needs one of its own.
     let local_tx_for_retained = local_tx.clone();
     spawn_clipboard_bridge(
@@ -783,6 +804,7 @@ pub async fn run(
     )
     .await;
     rekey_watch.abort();
+    pacer.abort();
     result
 }
 
@@ -800,15 +822,143 @@ pub struct RekeyRequest {
     pub remove: Vec<String>,
 }
 
-/// Picks up a key change asked for from the command line and makes it, exactly as the window's
-/// confirm button does.
+/// Where a file transfer asked for from the command line waits for the running daemon.
+#[must_use]
+pub fn transfer_request_path(paths: &Paths) -> std::path::PathBuf {
+    paths.dir.join("transfer-request.json")
+}
+
+/// Where the running daemon describes the transfers for `asli transfers`.
+#[must_use]
+pub fn transfer_status_path(paths: &Paths) -> std::path::PathBuf {
+    paths.dir.join("transfers.json")
+}
+
+/// A file transfer asked for from the command line.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferRequest {
+    /// Offer a file to a device, by id in hex.
+    Send {
+        /// The device.
+        device: String,
+        /// The file.
+        path: std::path::PathBuf,
+    },
+    /// Accept an offered file into a folder.
+    Accept {
+        /// The offer, by id in hex.
+        offer: String,
+        /// Where to keep it.
+        folder: std::path::PathBuf,
+    },
+    /// Turn an offered file down.
+    Decline {
+        /// The offer, by id in hex.
+        offer: String,
+    },
+    /// Call a transfer off.
+    Cancel {
+        /// The offer, by id in hex.
+        offer: String,
+    },
+}
+
+/// One transfer as `asli transfers` prints it.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TransferStatus {
+    /// Its offer id in hex.
+    pub id: String,
+    /// `sending` or `receiving`.
+    pub direction: String,
+    /// The other device.
+    pub peer: String,
+    /// The file's name.
+    pub name: String,
+    /// Its size in bytes.
+    pub size: u64,
+    /// Where it stands, in words.
+    pub stage: String,
+}
+
+fn act_on_transfer_request(request: TransferRequest, controls: &Controls) {
+    let offer = |hex: &str| crate::devices::id_bytes(hex);
+    let outcome = match request {
+        TransferRequest::Send { device, path } => match crate::devices::id_bytes(&device) {
+            Some(to) => controls.transfers.send(&path, to),
+            None => Err("no such device".to_owned()),
+        },
+        TransferRequest::Accept { offer: id, folder } => match offer(&id) {
+            Some(id) => controls.transfers.accept(&id, &folder),
+            None => Err("no such offer".to_owned()),
+        },
+        TransferRequest::Decline { offer: id } => {
+            if let Some(id) = offer(&id) {
+                controls.transfers.decline(&id);
+            }
+            Ok(())
+        }
+        TransferRequest::Cancel { offer: id } => {
+            if let Some(id) = offer(&id) {
+                controls.transfers.cancel(&id);
+            }
+            Ok(())
+        }
+    };
+    if let Err(why) = outcome {
+        eprintln!("{}", log_line("transfer_request_refused", &why));
+    }
+}
+
+/// Writes the transfers for `asli transfers` to read.
+fn write_transfer_status(paths: &Paths, controls: &Controls) {
+    let list: Vec<TransferStatus> = controls
+        .transfers
+        .list()
+        .into_iter()
+        .map(|t| TransferStatus {
+            id: crate::config::hex(&t.id),
+            direction: match t.direction {
+                crate::transfer::Direction::Sending => "sending",
+                crate::transfer::Direction::Receiving => "receiving",
+            }
+            .to_owned(),
+            peer: t.peer,
+            name: t.name,
+            size: t.size,
+            stage: crate::transfer::describe(&t.stage, t.chunks),
+        })
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec_pretty(&list) {
+        let _ = crate::config::write_atomically(&transfer_status_path(paths), &bytes, 0o600);
+    }
+}
+
+/// Picks up a key change or a file transfer asked for from the command line and carries it out,
+/// exactly as the window's buttons do, and keeps the transfer list on disk for the command line.
 fn spawn_rekey_watch(paths: &Paths, controls: Controls) -> tokio::task::JoinHandle<()> {
     let path = rekey_request_path(paths);
-    // One left over from before this run is stale: nobody is waiting on it any more.
+    let transfer_path = transfer_request_path(paths);
+    let paths = paths.clone();
+    // Ones left over from before this run are stale: nobody is waiting on them any more.
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&transfer_path);
     tokio::spawn(async move {
+        let mut shown = u64::MAX;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if let Ok(bytes) = std::fs::read(&transfer_path) {
+                let _ = std::fs::remove_file(&transfer_path);
+                match serde_json::from_slice::<TransferRequest>(&bytes) {
+                    Ok(request) => act_on_transfer_request(request, &controls),
+                    Err(_) => eprintln!("{}", log_line("transfer_request_invalid", "ignored")),
+                }
+            }
+            let revision = controls.transfers.revision();
+            if revision != shown {
+                shown = revision;
+                write_transfer_status(&paths, &controls);
+            }
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
@@ -847,7 +997,20 @@ fn on_account_event(
     history: &SharedHistory,
 ) {
     match event {
-        ClientEvent::Connected { .. } => controls.outbox.resend_pending(),
+        ClientEvent::Connected { conn_id } => {
+            controls.outbox.resend_pending();
+            controls.transfers.connected(conn_id);
+        }
+        ClientEvent::Message { kind, body } => {
+            if let Some((from, name, bytes)) = controls.transfers.on_message(*kind, body) {
+                notify::file_offered(&from, &name, bytes);
+                crate::window::open_from_any_thread(crate::window::Screen::Status);
+            }
+        }
+        ClientEvent::RelayError {
+            code: asli_net::envelope::ErrorCode::QuotaExceeded,
+            ..
+        } => controls.transfers.over_quota(),
         ClientEvent::Sent { token } => {
             if let Some(pending) = controls.outbox.take_rekey(*token) {
                 move_to_new_key(
@@ -1374,6 +1537,7 @@ async fn run_connection_loop(
 
         retained_pump.abort();
         controls.devices.set_connected(false, 0, client::now_ms());
+        controls.transfers.disconnected();
 
         // A connection that authenticated and then stayed up resets the pacing, including a floor
         // a rate limit or quota close imposed. Nothing did before, so after a handful of drops

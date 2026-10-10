@@ -35,6 +35,12 @@ asli-history = { path = "../asli-history", version = "0.1.0" }
 asli-net = { path = "../asli-net", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+# The system's own dialogs for choosing a file to send and a folder to keep one in: the native
+# ones on Windows and macOS, the desktop portal on Linux, so no GTK. The window toolkit has none.
+rfd = "0.17"
+# Hashing a file before offering it and while it arrives, so a piece that was altered, swapped or
+# lost is caught before the file is kept. Already in the tree through the crypto crate.
+sha2 = { version = "0.11", default-features = false }
 # The join token is shown as a QR because copying it would put the root secret onto the very
 # clipboard this app synchronises. fast_qr is the maintained option; qrcode has had no release
 # since 2024.
