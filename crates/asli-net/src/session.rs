@@ -201,6 +201,8 @@ pub enum Action {
         secret: HandedSecret,
         /// The device that made it.
         by: [u8; DEVICE_ID_LEN],
+        /// Every device the new key went to. Any other device was left out, and is gone.
+        kept: Vec<[u8; DEVICE_ID_LEN]>,
     },
     /// Another device replaced the account key and left this one out: it was removed.
     RemovedBy {
@@ -953,6 +955,7 @@ impl Session {
             Ok(Some(rekeyed)) if Self::fresh(now_ms, rekeyed.ts_ms) => vec![Action::Rekeyed {
                 secret: HandedSecret(rekeyed.secret),
                 by: from,
+                kept: rekeyed.recipients,
             }],
             Ok(None) => vec![Action::RemovedBy { by: from }],
             Ok(Some(_)) => dropped("rekey_stale", false),
@@ -1552,11 +1555,12 @@ mod tests {
         let frame = a.rekey_frame(&[DEVICE_B], &new_secret, NOW).expect("rekey");
 
         let got = b.handle_frame(&frame, NOW).expect("rekey at b");
-        let [Action::Rekeyed { secret, by }] = got.as_slice() else {
+        let [Action::Rekeyed { secret, by, kept }] = got.as_slice() else {
             panic!("expected the new key, got {got:?}");
         };
         assert_eq!(*secret.0, new_secret);
         assert_eq!(*by, DEVICE_A);
+        assert_eq!(kept, &vec![DEVICE_B], "C was left out");
 
         let got = c.handle_frame(&frame, NOW).expect("rekey at c");
         assert!(matches!(got.as_slice(), [Action::RemovedBy { by }] if *by == DEVICE_A));

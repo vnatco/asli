@@ -168,6 +168,8 @@ pub enum ClientEvent {
         secret: HandedSecret,
         /// The device that replaced it.
         by: [u8; 16],
+        /// Every device the new key went to. Any other device was left out.
+        kept: Vec<[u8; 16]>,
     },
     /// The account key was replaced and this device left out: it was removed from the account.
     RemovedBy {
@@ -535,7 +537,7 @@ async fn apply_action(
             kind,
             body: body.to_vec(),
         }),
-        Action::Rekeyed { secret, by } => on_event(ClientEvent::Rekeyed { secret, by }),
+        Action::Rekeyed { secret, by, kept } => on_event(ClientEvent::Rekeyed { secret, by, kept }),
         Action::RemovedBy { by } => on_event(ClientEvent::RemovedBy { by }),
         Action::Clip {
             text,
