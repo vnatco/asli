@@ -220,6 +220,14 @@ treats it as from the internet, and Asli never opens or runs it.
 **Residual.** A person can still accept a harmful file from a device of theirs that was compromised,
 and the content is never inspected. The prompt says to accept only files that are expected.
 
+**On the same network.** While an offer waits, the sender listens on a port on its local network so
+the receiver can fetch the file directly. Anyone on that network can connect, but the first frame
+must be sealed under a key that went to the receiver alone, sealed to its device key, so a stranger
+gets nothing and is disconnected; after 16 such attempts the sender stops listening. The receiver
+connects only to private, carrier grade and link local addresses, so a forged or altered offer
+cannot make it reach the internet. Someone on the same network learns that the two machines
+exchanged a file of about that size, which the relay would otherwise learn instead.
+
 ## 5. Accepted risks, not mitigated in v1
 
 | Risk | Why it is accepted | Cost of fixing |

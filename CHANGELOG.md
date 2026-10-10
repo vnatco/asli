@@ -68,6 +68,11 @@ Nothing is tagged yet and there are no downloads. What exists today:
   is never stored there, is checked against the hash the sender signed, and is saved under a name
   the receiver makes safe, marked as downloaded. Up to 4 GiB a file. Dropping files is not available
   on Wayland yet. See protocol section 18.8.
+- Files between two devices on the same network go straight from one to the other, encrypted
+  under a key made for that transfer and sealed to the receiver, at the speed of the network. When
+  they cannot reach each other, the file goes through the relay instead. The first time it sends a
+  file, Windows may ask whether Asli may accept connections on private networks; saying no leaves
+  files going through the relay.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,

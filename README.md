@@ -49,8 +49,9 @@ locally, which `--with-server` sets up.
 4. To take a machine off the account, remove it on Status. Every other machine gets a new key, and
    the removed one can read nothing sent after.
 5. To send a file, drop it on the window, or use **Send file** beside a device on Status (`asli send
-   <device> <file>` in a terminal). The other machine asks before taking it, and it goes through the
-   relay encrypted like everything else, without being stored there.
+   <device> <file>` in a terminal). The other machine asks before taking it. On the same network the
+   file goes straight between the two machines; otherwise it goes through the relay encrypted like
+   everything else, without being stored there.
 
 The relay only ever sees ciphertext. It cannot read your clipboard, and it does not know who you
 are. It keeps at most your most recent clip, briefly, so a machine that was switched off can catch

@@ -1553,7 +1553,9 @@ is accepted, and nothing is retained by the relay.
 ```
 offer   = u8(1) || offer_id[16] || from_device_id[16] || to_device_id[16] || u64be(size)
           || sha256[32] || u32be(chunk_bytes) || u64be(ts_ms) || text(reply_to)
-          || u16be(name_len) || name || signature, label "asli/v2/file-offer"
+          || u16be(name_len) || name || u8(addr_count) || addr_count * text(addr)
+          || [ u32be(len) || box(to_box_pub, "asli/v2/file-direct-key", key[32]) ]  if addr_count > 0
+          || signature, label "asli/v2/file-offer"
 answer  = u8(1) || offer_id[16] || from_device_id[16] || u8(accepted) || text(reply_to)
           || signature, label "asli/v2/file-answer"
 chunk   = u8(1) || offer_id[16] || u32be(index) || u32be(len) || bytes
@@ -1583,6 +1585,36 @@ drops for rate leaves the receiver waiting for it, since pieces are accepted onl
 reference client sends at most 5 MiB of file a second. A transfer that makes no progress for 60
 seconds is given up on by either side, and a transfer under way does not survive a reconnection: the
 connection ids it was addressed to are gone.
+
+#### 18.8.1 Directly, on the same network
+
+An offer MAY carry up to 4 local addresses, `ip:port`, where the sender listens for this transfer,
+and a transfer key of 32 random bytes sealed to the receiving device's box key (section 18.1). Only
+private, carrier grade (100.64.0.0/10) and link local IPv4 addresses are named, and a receiver MUST
+NOT connect to any other kind, so an offer cannot send a device to the internet or to itself. The
+sender listens only while the offer is unanswered, and stops after one successful connection, 16
+failed ones, or 15 minutes.
+
+Once a person accepts, the receiver tries the addresses for 1.5 seconds. If one answers:
+
+```
+receiver -> sender   salt[16]                     (in the clear, once)
+key                = HKDF-SHA256(salt = salt, ikm = transfer_key, info = "asli/v2/file-direct")
+each frame         = u32be(len) || XChaCha20-Poly1305(key, nonce, plaintext,
+                                                      aad = "asli/v2/file-direct" || offer_id)
+nonce              = u8(side) || u64be(counter) || zero[15]     side 0 receiver, 1 sender
+receiver -> sender   hello = u8(1) || offer_id
+sender -> receiver   one frame per piece, in order, plaintext = the piece
+receiver -> sender   u8(state), 1 kept, 2 damaged
+```
+
+Each side counts its own frames from zero. The hello can be made only by the device that opened
+the transfer key, so it stands in for the answer, and no `answer` is sent through the relay. A
+sender MUST NOT read a frame longer than a piece plus 16 bytes, or a hello longer than 64. If no
+address answers in time, the receiver sends its answer through the relay and the transfer goes as
+above. A direct transfer does not depend on the relay connection and survives it dropping.
+
+#### 18.8.2 Keeping the file
 
 The receiver writes the file under a temporary name next to its destination, checks its size and
 hash, and only then gives it its name. It makes its own name from `name`: the last path component
