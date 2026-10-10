@@ -42,6 +42,8 @@ pub enum Kind {
     JoinDecline,
     /// A new account key, sealed to each remaining device, after one was removed.
     Rekey,
+    /// Where the approving device listens on its local network, for a new device to reach it.
+    JoinWhere,
     /// A file offered to one device. See [`crate::file`].
     FileOffer,
     /// The answer to a file offer.
@@ -70,6 +72,7 @@ impl Kind {
             Self::JoinGrant => 3,
             Self::JoinDecline => 4,
             Self::Rekey => 5,
+            Self::JoinWhere => 6,
             Self::FileOffer => 16,
             Self::FileAnswer => 17,
             Self::FileChunk => 18,
@@ -90,6 +93,7 @@ impl Kind {
             3 => Self::JoinGrant,
             4 => Self::JoinDecline,
             5 => Self::Rekey,
+            6 => Self::JoinWhere,
             16 => Self::FileOffer,
             17 => Self::FileAnswer,
             18 => Self::FileChunk,

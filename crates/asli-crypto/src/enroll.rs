@@ -60,6 +60,9 @@ const LABEL_CHECK: &[u8] = b"asli/v2/join-check";
 const LABEL_ENROLL_SALT: &[u8] = b"asli/v2/enroll-salt";
 const LABEL_ENROLL: &[u8] = b"asli/v2/enroll";
 const LABEL_COMPARE: &[u8] = b"asli/v2/compare";
+const LABEL_JOIN_DIRECT: &[u8] = b"asli/v2/join-direct";
+/// Most local addresses a `where` message names.
+pub const MAX_WHERE_ADDRS: usize = 4;
 /// Signature label for a join request.
 pub const LABEL_REQUEST: &[u8] = b"asli/v2/join-request";
 /// Signature label for a join grant, and the purpose of the box inside it.
@@ -177,6 +180,21 @@ impl JoinCode {
         hk.expand(LABEL_ENROLL, secret.as_mut())
             .expect("32 bytes is well within the HKDF output limit");
         Identity::from_secret(&secret)
+    }
+
+    /// The key both devices seal their frames with when the new one reaches the approving one on
+    /// the local network (see [`crate::direct`]). Only someone holding the code can make it.
+    ///
+    /// # Panics
+    ///
+    /// Never: 32 bytes is well within what HKDF can produce.
+    #[must_use]
+    pub fn direct_key(&self) -> Zeroizing<[u8; KEY_LEN]> {
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(LABEL_ENROLL_SALT), self.meeting_secret.as_ref());
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        hk.expand(LABEL_JOIN_DIRECT, key.as_mut())
+            .expect("32 bytes is well within the HKDF output limit");
+        key
     }
 
     /// Whether `sign_pub` is the key of the device that made this code.
@@ -420,6 +438,45 @@ fn verify(
     crate::identity::verify_signature(sign_pub, &covered, &sig)
 }
 
+/// Where the approving device listens on its local network, for an invitation that accepts a new
+/// device only from there: `u8(1) || u8(count) || count * text(addr)`.
+///
+/// # Errors
+///
+/// Returns [`Error::AnnounceField`] for no addresses, too many, or one too long.
+pub fn where_body(addrs: &[String]) -> Result<Vec<u8>> {
+    if addrs.is_empty() || addrs.len() > MAX_WHERE_ADDRS {
+        return Err(Error::AnnounceField);
+    }
+    let mut body = Writer::default();
+    body.u8(1)
+        .u8(u8::try_from(addrs.len()).map_err(|_| Error::AnnounceField)?);
+    for addr in addrs {
+        body.text(addr)?;
+    }
+    Ok(body.finish())
+}
+
+/// Reads the addresses out of a `where` message.
+///
+/// # Errors
+///
+/// Returns an error for a malformed message.
+pub fn read_where(body: &[u8]) -> Result<Vec<String>> {
+    let mut r = Reader::new(body);
+    match r.u8()? {
+        1 => {}
+        other => return Err(Error::InnerVersion(other)),
+    }
+    let count = usize::from(r.u8()?);
+    if count == 0 || count > MAX_WHERE_ADDRS {
+        return Err(Error::AnnounceField);
+    }
+    let addrs = (0..count).map(|_| r.text()).collect::<Result<Vec<_>>>()?;
+    r.done()?;
+    Ok(addrs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +623,23 @@ mod tests {
             .expect("encodes");
         asked[20] ^= 0x01;
         assert!(JoinRequest::decode(&asked, &room).is_err());
+    }
+
+    #[test]
+    fn where_round_trips_and_the_direct_key_follows_the_code() {
+        let addrs = vec!["192.168.1.20:40000".to_owned()];
+        assert_eq!(
+            read_where(&where_body(&addrs).expect("encodes")).expect("reads"),
+            addrs
+        );
+        assert!(where_body(&[]).is_err());
+        let approver = DeviceKeys::from_secret(&[1u8; 32]);
+        let one = JoinCode::generate(&approver).expect("makes");
+        let again = JoinCode::parse(&one.encode()).expect("parses");
+        let other = JoinCode::generate(&approver).expect("makes");
+        assert_eq!(*one.direct_key(), *again.direct_key());
+        assert_ne!(*one.direct_key(), *other.direct_key());
+        assert_ne!(*one.direct_key(), *one.meeting().secret());
     }
 
     #[test]
