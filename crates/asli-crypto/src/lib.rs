@@ -67,6 +67,7 @@ pub mod clip;
 pub mod device;
 pub mod enroll;
 pub mod error;
+pub mod file;
 pub mod identity;
 pub mod kdf;
 pub mod msg;

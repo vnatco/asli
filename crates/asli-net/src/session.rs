@@ -1604,6 +1604,21 @@ mod tests {
     }
 
     #[test]
+    fn a_msg_frame_names_its_type_first() {
+        // The relay reads a frame's first bytes to give file traffic its larger allowance before
+        // parsing. A frame that does not say `msg` up front is held to the clipboard's allowance.
+        let (mut a, _) = keyed_session(DEVICE_A, 1);
+        let frame = a
+            .msg_frame(Kind::FileChunk, b"x", Some("c_00112233".to_owned()))
+            .expect("msg");
+        assert!(
+            frame.starts_with(r#"{"type":"msg""#),
+            "got {}",
+            &frame[..40]
+        );
+    }
+
+    #[test]
     fn a_relay_that_does_not_know_msg_is_remembered_and_absorbed() {
         let (mut a, _) = keyed_session(DEVICE_A, 1);
         let err = r#"{"v":1,"type":"error","code":"UNKNOWN_TYPE"}"#;

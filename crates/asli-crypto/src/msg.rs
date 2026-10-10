@@ -42,6 +42,16 @@ pub enum Kind {
     JoinDecline,
     /// A new account key, sealed to each remaining device, after one was removed.
     Rekey,
+    /// A file offered to one device. See [`crate::file`].
+    FileOffer,
+    /// The answer to a file offer.
+    FileAnswer,
+    /// One piece of a file.
+    FileChunk,
+    /// The receiver's acknowledgement of the pieces so far.
+    FileAck,
+    /// Either side calling a transfer off.
+    FileCancel,
     /// A kind this version does not know. Ignored, so later kinds can be added.
     Other(u8),
 }
@@ -56,6 +66,11 @@ impl Kind {
             Self::JoinGrant => 3,
             Self::JoinDecline => 4,
             Self::Rekey => 5,
+            Self::FileOffer => 16,
+            Self::FileAnswer => 17,
+            Self::FileChunk => 18,
+            Self::FileAck => 19,
+            Self::FileCancel => 20,
             Self::Other(code) => code,
         }
     }
@@ -69,6 +84,11 @@ impl Kind {
             3 => Self::JoinGrant,
             4 => Self::JoinDecline,
             5 => Self::Rekey,
+            16 => Self::FileOffer,
+            17 => Self::FileAnswer,
+            18 => Self::FileChunk,
+            19 => Self::FileAck,
+            20 => Self::FileCancel,
             other => Self::Other(other),
         }
     }
