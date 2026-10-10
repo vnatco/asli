@@ -601,6 +601,25 @@ impl Store {
         }
     }
 
+    /// Re-encrypts every entry under a key derived from a new account key, and writes the file.
+    ///
+    /// For when the account key is replaced. The history is sealed under a key derived from it,
+    /// so without this the history of every device on the account became unreadable the moment
+    /// the account moved to a new key, and was discarded at the next start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written; the store keeps its old key then, so it
+    /// still matches what is on disk.
+    pub fn rekey(&mut self, secret: &[u8; key::KEY_LEN]) -> Result<()> {
+        let old = std::mem::replace(&mut self.key, key::derive(secret));
+        if let Err(err) = self.persist() {
+            self.key = old;
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// Writes the whole store through a temporary file and a rename.
     fn persist(&self) -> Result<()> {
         let mut buf = Vec::with_capacity(HEADER_LEN + self.entries.len() * 128);
@@ -1214,6 +1233,19 @@ mod tests {
             "a shortened preview says so"
         );
         assert_eq!(summary.bytes, long.len());
+    }
+
+    #[test]
+    fn a_rekeyed_store_opens_under_the_new_key_only() {
+        let temp = Temp::new("rekey");
+        let mut store = store(&temp);
+        store.append(text("kept"), false, NOW).expect("appends");
+        let new_secret = [9u8; 32];
+        store.rekey(&new_secret).expect("rekeys");
+
+        let reopened = Store::open(temp.path(), &new_secret, Limits::default()).expect("opens");
+        assert_eq!(reopened.list()[0].preview, "kept");
+        assert!(Store::open(temp.path(), &SECRET, Limits::default()).is_err());
     }
 
     #[test]
