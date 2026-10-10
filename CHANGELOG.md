@@ -44,6 +44,24 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Added
 
+- Joining with a code and an approval, in place of the join string. **Add a device** makes a code
+  that works once, for ten minutes, and carries no key. The new device types it, both devices show
+  the same six digits, and the account key crosses only once the person approves, sealed to the new
+  device alone. Someone who glimpses a code can neither join with it nor trick the new device into
+  joining an account of theirs. `asli add` and `asli join` do the same from a terminal. See protocol
+  section 18.
+- Every device has a key of its own, kept beside the account key. Devices sign a card saying who
+  they are, and each device's key is pinned the first time it is seen, so one device cannot take
+  another's place in the list.
+- Removing a device. **Remove** on Status, or `asli remove <name>`, gives every other device a new
+  account key sealed to its own key, and the removed device forgets the account. Local history moves
+  to the new key with everything else. Devices offline at the time, or still on an older version,
+  have to join again, and the window names them before anything happens.
+- Replacing the account key, for an account whose key was shown as a join string by an earlier
+  version, which may still be in a screenshot. Status offers it; `asli rekey` does it from a
+  terminal.
+- `asli devices` lists the devices on the account.
+
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,
   and `packaging/release.sh` uploads the result to a draft GitHub release.
@@ -59,6 +77,13 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - The macOS bundle has an icon, `asli.icns`, in the installer and in `setup.sh --install` alike.
 
 ### Changed
+
+- The join string is retired: it was the account key itself, and anyone who ever saw one held the
+  account for good. Current versions neither show nor accept it, and `asli show` now makes a join
+  code. A device joining gets a new device id along with its new keys.
+- The relay forwards a new sealed message type, `msg`, between the devices of a room or to one
+  connection, never storing it. It carries device cards, joining and key changes, and is what file
+  transfer will use. The relay must be updated before clients use it; older clients ignore it.
 
 - Windows builds link the C runtime statically, so they start on a machine without the Visual C++
   redistributable.

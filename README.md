@@ -4,7 +4,8 @@ One clipboard, every machine. Copy on your laptop, paste on your desktop.
 
 Asli is a small tray app that keeps the clipboard in sync across your own computers, over the
 internet, end to end encrypted. There is no account, no email and no password. You create a key on
-one machine and paste it (or scan its QR) on the others. That is the entire setup.
+one machine, and add each other machine by typing a short code on it and approving it on the first.
+That is the entire setup.
 
 "Asli" is the Georgian word for copy (ასლი).
 
@@ -37,12 +38,16 @@ locally, which `--with-server` sets up.
 
 ## How it works
 
-1. On the first machine you pick **Create**. Asli generates a 32 byte secret, keeps it in your OS
-   keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service), and shows it to you
-   once as a QR code and a short token.
-2. On your other machines you pick **Connect** and scan or paste that token.
+1. On the first machine you pick **Create**. Asli generates a 32 byte secret and keeps it in your
+   OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service). It is never shown.
+2. To add another machine, open **Add a device** on one that is set up. It makes a join code that
+   works once, for ten minutes, and carries no key. Type it on the new machine under **Join an
+   existing account**. Both machines show the same six digits; if they match, approve the new one,
+   and the key crosses to it sealed so that only it can open it.
 3. From then on, whenever you copy something, the app encrypts it on your machine and sends it
    through a relay server to your other machines, which decrypt it and put it on their clipboard.
+4. To take a machine off the account, remove it on Status. Every other machine gets a new key, and
+   the removed one can read nothing sent after.
 
 The relay only ever sees ciphertext. It cannot read your clipboard, and it does not know who you
 are. It keeps at most your most recent clip, briefly, so a machine that was switched off can catch
@@ -53,12 +58,14 @@ the same code and the same configuration you would deploy yourself.
 
 - Everything is encrypted on your device with XChaCha20-Poly1305 before it leaves. The relay stores
   and forwards ciphertext only.
-- The key never reaches the server. It exists only in the join token and in your OS keychain.
+- The key never reaches the server and is never displayed. It lives in your OS keychain, and goes to
+  a new machine only after you approve it, sealed to that machine's own key.
 - The server authenticates you with a signature over a fresh challenge, so it never holds a
   credential that would let it (or anyone who steals its database) join your room.
 - Content that your password manager marks as sensitive is not synced at all, by default.
-- We do not claim forward secrecy, and v1 has no way to revoke one device: if a key leaks, you
-  create a new one. The full, honest version is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- Removing a machine gives every other machine a new key, so it reads nothing new. We do not claim
+  forward secrecy: what it already had, it keeps. The full, honest version is in
+  [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Self-hosting the relay
 

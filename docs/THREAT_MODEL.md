@@ -18,7 +18,8 @@ key that can decrypt anything.
 | Asset | Where it lives | Value to an attacker |
 |---|---|---|
 | **Clipboard plaintext** | OS clipboard buffers on each device, in our process briefly, sealed in transit | Immediately actionable. Real clipboards carry passwords, API tokens, one time codes, private URLs, source code and personal messages. This is the reason the product needs encryption at all |
-| **Root secret (32 bytes)** | OS keychain on each device, in the join token and QR during onboarding | Total compromise of one account. It decrypts every message ever archived by an observer and every future message, allows joining the room, and allows sending clips that every device will accept |
+| **Root secret (32 bytes)** | OS keychain on each device. Handed to a new device sealed to that device's key, after a person approves it (protocol section 18). Never displayed. Accounts made before that change may have shown it as a join token | Total compromise of one account. It decrypts every message ever archived by an observer and every future message, allows joining the room, and allows sending clips that every device will accept |
+| **Device secret (32 bytes)** | OS keychain, beside the root secret, one per device. Never transmitted | Lets the holder speak as that one device: its card, a key change in its name. Gives nothing the root secret does not already give |
 | **Device linkage metadata** | Visible to the relay: source IPs, connection times, message timing, padded sizes, connection count per room | Shows that a set of IP addresses belongs to one person, and when that person is active. Valuable to a surveillance oriented adversary even without content |
 | **Room id** | Public routing label in every frame and in relay logs (salted) | Low. By design it is a hash of a public key and grants nothing on its own |
 
@@ -101,29 +102,35 @@ relay by default.
 fixable by a single relay design. The answer for anyone who will not accept them is self-hosting,
 which is a first class path running the identical published compose file.
 
-### 4.3 Attacker who obtains the join token or a QR screenshot
+### 4.3 Attacker who sees a join code, or an old join token
 
-**Capabilities.** The join token **is** the root secret with a version byte and a checksum. Whoever
-holds it holds the account.
+**A join code** (protocol section 18.5) carries no key. It names a meeting place on the relay for ten
+minutes and one answer, and a fingerprint of the device that made it.
 
-**Gains.** Everything: decryption of archived and future traffic, the ability to join the room, and
-the ability to send clips that every device will accept.
+**Capabilities with a join code.** Someone who sees it in time can send a join request of their own,
+and can answer the real new device's request with a grant of their own.
 
-**How it leaks in practice, and what we do about it:**
+**Gains: none without the person's help.** Their request reaches the approving device, which shows it
+with a six digit comparison code; the real new device shows a different six digits for its own
+request, so approving the stranger means approving a request whose digits match nothing on the new
+device. Their grant is refused by the new device, which accepts a grant only from the key the code
+fingerprints. After ten minutes, or after one answer, the code is worth nothing.
+
+**An old join token** (protocol section 5), shown by versions before join codes, **is** the root
+secret. Whoever holds one holds the account until its key is replaced. Current versions neither show
+nor accept tokens, and Status offers to replace the key of an account whose key was ever shown as
+one; once replaced, every old token, screenshot and chat message carrying it is useless.
+
+**How a code or an old token leaks, and what is done about it:**
 
 | Leak path | Mitigation | Implemented |
 |---|---|---|
-| The user copies the token, and our own clipboard watcher captures and uploads it | Hash the token into the loop suppression ring **before** writing it to the clipboard | Not implemented, and not currently reachable: the echo guard is private to the transport's session with no way to seed it from the application. The leak itself is closed by a different mechanism, since the token is written with the concealment markers and the watcher skips marked content without reading it, verified live. The guard remains the right belt to the marker's braces, because a platform that cannot express concealment would otherwise have no protection at all |
-| Windows Clipboard History and Cloud Clipboard persist and sync it to Microsoft | Set `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` 0 and `CanUploadToCloudClipboard` 0 when writing it | Implemented. The equivalent Linux marker, `x-kde-passwordManagerHint`, is verified on a real session. The Windows formats are compile checked only, since no Win32 call in this project has ever executed. macOS refuses a concealed write rather than writing unmarked content |
-| A third party clipboard manager writes it to disk, often forever | The OS markers above are hints that well behaved managers respect. They are not enforcement, so the token display says so in as many words and recommends the QR instead | Implemented |
-| The token sits in the clipboard indefinitely | Auto clear after 90 seconds, and only if nothing has been copied since, so a later copy by the user is never destroyed | Implemented and verified live. The first attempt compared against what this app last wrote, which is stale the moment someone copies elsewhere, and it wiped out a newer copy. It now tracks a generation counter that any clipboard change bumps, so a stale clear is dropped |
-| Shoulder surfing, screenshots, screen sharing, screen recording | QR and token start concealed behind an explicit reveal, auto hide after 2 minutes, never written to a file, rendered no larger than needed | Designed |
-| Pasting the token into a browser or a chat client that unfurls links | The token is not a URL. If a deep link is ever used it is app specific and carries the token in the **fragment**, which conventional URL handling does not transmit | Designed |
-| A malicious app registers a generic `clip://` scheme and harvests join links | We do not use a generic scheme, and paste the token remains the primary path | Designed |
+| Shoulder surfing, screenshots, screen sharing | A code expires in ten minutes and is single use, and still needs approval with matching digits | Implemented, and run end to end against a local relay from the command line. The window's screens are rendered and not yet driven by hand |
+| Someone races the real new device with a request of their own | The comparison code, shown on both devices | Implemented and tested |
+| Someone answers the new device's request with an account of their own | The grant must be signed by the key the code fingerprints | Implemented and tested |
+| An old token survives in a screenshot, a chat or a clipboard manager | Replace the account key: a new root secret goes to every device sealed to its own key, and the old one opens nothing new | Implemented and run end to end |
 
-**Recovery.** There is no device revocation in v1. If a token leaks, the answer is "Reset account":
-generate a new secret, re-onboard the devices you still trust, abandon the old room. This is a first
-class menu action, not a documentation workaround. See section 5.
+**Recovery.** Remove the device, or replace the key: section 5 below, and protocol section 18.6.
 
 ### 4.4 Local attacker on an unlocked device
 
@@ -193,9 +200,11 @@ the public instance defensible.
 | Risk | Why it is accepted | Cost of fixing |
 |---|---|---|
 | **No forward secrecy.** A secret compromised at any time decrypts all archived and future traffic | Real forward secrecy needs a ratchet with per device pairwise state, which destroys the stateless one string join that is the entire product thesis. Key epochs do **not** help: every device must be able to derive any epoch from the root secret so an offline device can catch up, therefore old epoch keys are always recoverable | A full rekeying protocol plus device enrollment. Changes onboarding fundamentally |
-| **No device revocation.** A device that holds the root secret can derive every past and future epoch | v1 has no intra account security boundary by design. All devices are equally trusted | Per device keypairs, a signed device roster, and per epoch group keys wrapped to each device. Onboarding becomes "paste a string, then approve on an existing device". Planned as the v2 path, and v1 keeps the fields (`v`, `epoch`, suite id) that make it possible |
+| **Removing a device protects the future, not the past.** Removing one replaces the root secret and hands the new one to every other device sealed to its own key, so the removed device reads nothing sent after. It keeps whatever it already decrypted and kept, and it can still read anything an observer archived from before | A deleted copy cannot be recalled, and archived ciphertext stays decryptable under the old key by design (no forward secrecy, above) | Nothing short of forward secrecy |
+| **A device offline during a key change is left behind** | The relay keeps no message for a device that is not connected, so a device that misses the new key stays on the old one, alone. It has to join again with a code. The window says which devices this will happen to before the change is made | Retained key change messages, which the relay would have to store |
+| **All devices are equally trusted.** Every device holds the root secret, so a compromised device can read everything and can remove the others | Device keys stop one device speaking as another and make removal possible; they do not create a hierarchy of devices | Per device group keys and an admin role, which nobody has asked for |
 | **The relay learns timing and padded sizes** | Unavoidable for any relay that forwards messages. Padding removes exact length leakage, including password and token lengths, but the bucket is still visible and timing is not hidden at all | Cover traffic and constant rate sending, which is disproportionate for a clipboard tool and would hurt battery life |
-| **XChaCha20-Poly1305 is not key committing** | Harmless with a single key. A ciphertext could in principle be made to decrypt under two different keys, which only becomes relevant once multiple keys exist | Bind `epoch` in AAD (done, partial), and adopt a committing construction before any multi key feature. Must be revisited before per device keys |
+| **XChaCha20-Poly1305 is not key committing** | Harmless while every ciphertext is opened under exactly one key, which still holds with device keys: a message is opened with the room key of the epoch its header names, and a sealed box only with the recipient's own key derived for that box. A ciphertext that also decrypts under another key would only matter to a receiver that tries several keys, and none does | Adopt a committing construction before any feature that tries more than one key per message |
 | **VM snapshot nonce reuse.** A virtual machine snapshot restored twice can repeat OS CSPRNG output and therefore repeat a nonce | Low relevance for a desktop clipboard tool, and no cheap general defence exists | Nonce misuse resistant AEAD, or persistent nonce state, both of which add complexity for a rare case |
 | **Clipboard content is readable by any local app** | This is how every desktop OS works. Not our bug and not ours to fix | Nothing available at the application layer |
 | **The relay can drop, delay or withhold messages** | Availability is always the forwarder's to deny | Self host, or use multiple relays, which is not v1 |
@@ -266,7 +275,8 @@ intent that has not been independently tested. An interop check is item 4 in the
   are online, when you copy, and roughly how much. Self host if that matters.
 - **We do not claim protection against a compromised endpoint.** Malware on your machine reads your
   clipboard directly and reads your keychain. Nothing in this design changes that.
-- **We do not claim device revocation.** v1 has none. Resetting the account is the answer.
+- **We do not claim a removed device forgets.** Removing a device stops it reading anything new. What
+  it already decrypted and kept, it keeps.
 - **We do not claim the relay cannot deny you service.** It can, trivially.
 - **We do not claim to detect all passwords.** We honour the markers that exist and refuse to guess
   beyond them.

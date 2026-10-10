@@ -229,6 +229,13 @@ the field.
 
 ## 5. Join token
 
+> **Retired.** The join token carries the root secret itself, so a token seen once, in a
+> screenshot or a chat, is the account for good. Clients that have device keys (section 18) neither
+> show nor accept it, and join with a single use join code and an approval instead (section 18.5).
+> This section stays as the reference for the format a client refuses, and for accounts made before
+> the change, whose key may still exist as a token somewhere; section 18.6 is how such an account
+> retires it.
+
 The join token is the entire onboarding payload. It carries the root secret and nothing else.
 
 ```
@@ -339,6 +346,7 @@ Registry. Direction C is client, S is server.
 | `clip_chunk` | C to S, S to C | An interior chunk | 7.11 |
 | `clip_end` | C to S, S to C | Final chunk, completing the message | 7.11 |
 | `announce` | C to S, S to C | Sealed device name and operating system, never retained | 7.12 |
+| `msg` | C to S, S to C | Sealed device to device message, to the room or one connection, never retained | 7.13 |
 
 Sealed message types additionally have a numeric **type code**, bound into AAD (section 9.1):
 
@@ -349,7 +357,8 @@ Sealed message types additionally have a numeric **type code**, bound into AAD (
 | 3 | `clip_chunk` | v1 |
 | 4 | `clip_end` | v1 |
 | 5 | `announce` | v1, added after the first release. See section 7.12 for compatibility |
-| 6 to 255 | unassigned | Reserved |
+| 6 | `msg` | v1, added after the first release. See section 7.13 for compatibility |
+| 7 to 255 | unassigned | Reserved |
 
 Type codes are reserved now so that a v1.1 chunked message cannot collide with a v1 `clip` in AAD.
 
@@ -739,6 +748,46 @@ without a disconnect:
 }
 ```
 
+### 7.13 `msg`
+
+Client to server, then server to the rest of the room, or to one connection. A sealed message
+between devices: a device card, a join request or its answer, a new account key. What kind it is
+lives inside the ciphertext (section 18.2), so the relay sees one opaque type for all of them, and a
+kind added later needs no relay change.
+
+| Field | Type | Encoding | Required | Meaning |
+|---|---|---|---|---|
+| `v` | integer | | yes | `1` |
+| `type` | string | | yes | `"msg"` |
+| `room` | string | Crockford base32, 26 chars | yes | MUST equal the connection's authenticated room |
+| `epoch` | integer | u32 range | yes | Key epoch used to seal this message |
+| `msg_id` | string | base64, 16 bytes | yes | Client generated, unique per message |
+| `n` | string | base64, 24 bytes | yes | AEAD nonce |
+| `ct` | string | base64, at least 17 bytes | yes | Ciphertext with the 16 byte tag appended |
+| `to` | string | `c_` and 8 lowercase hex digits | no | The one connection to deliver to: a `conn_id` from that connection's `auth_ok`. Absent for every other connection in the room |
+
+**Sealing.** The section 9.1 AAD with type code **6**, over the plaintext of section 18.2.
+
+**Relay obligations.** Steps 1 to 5 of section 7.6, with these differences:
+
+- It is **never retained** and never served by `fetch_last`.
+- With `to`, it goes to that connection alone, if it is in the sender's room; otherwise the relay
+  answers `error` `NO_SUCH_PEER` and keeps the connection.
+- It is **never parked and never dropped quietly**. A join grant or a new account key that vanished
+  under backpressure would strand a device with nothing saying why, so a receiver already past the
+  hard backpressure limit is disconnected instead, as for chunks (section 11.5), and recovers by
+  reconnecting.
+- The room quota is charged.
+
+`conn_id` values are the relay's own, per connection, and say nothing about the device. A relay that
+addresses connections differently MUST still accept exactly the `conn_id` it issued.
+
+**Compatibility.** A client that does not know `msg` ignores it (section 14). A relay that does not
+know `msg` answers `UNKNOWN_TYPE` and keeps the connection; a client that has sent a `msg` on the
+current connection MUST take that answer as "this relay does not forward messages", absorb it, and
+send no further `msg` until its next connection. Clips keep working either way. A client MUST also
+accept an `error` code it does not know rather than fail the frame.
+
 ## 8. Authentication handshake
 
 ### 8.1 Signature input
@@ -1125,6 +1174,11 @@ different meaning in a later version.
 | `UNKNOWN_TYPE` | The `type` field is not in the section 7 registry | yes |
 | `NOT_AUTHENTICATED` | A message requiring `[READY]` arrived before `auth_ok` | yes |
 | `NO_RETAINED` | `fetch_last` was sent but the relay holds no retained clip | yes |
+| `NO_SUCH_PEER` | A `msg` named a `to` connection that is not in the sender's room | yes |
+
+`NO_SUCH_PEER` was added after the first release. A client MUST treat an `error` code it does not
+know as non fatal rather than as a malformed frame, so that a relay can add a code without
+disconnecting older clients.
 
 ---
 
@@ -1305,5 +1359,174 @@ Each of these MUST fail closed:
 | `bin1` binary framing | Reserved, not implemented | Section 3.2. Negotiated through `enc` in `hello` |
 | Image content (`content_type` 2) | Specified and implemented at the transport layer | PNG only, see section 9.6. Clipboard capture of images is a client concern and lands separately |
 | Chunked transfer | Specified and implemented | See sections 7.11 and 9.5 |
-| Per device keys and a signed device roster | Not specified | The v2 path to real revocation, noted in the architecture notes It changes onboarding and is deliberately not in v1 |
+| Per device keys, approved joining, removing a device | Specified and implemented | Section 18 |
 | Files as a content type | Not planned | Out of scope |
+
+---
+
+## 18. Devices, joining, and replacing the account key
+
+Every device on an account holds the root secret, which encrypts clips and authenticates to the
+relay. On top of it, each device now holds a key of its own. Three things follow from that: a
+device's messages can be told from anyone else's; a device joins by being approved on one already
+in, rather than by being shown the root secret; and a device can be removed, by giving everyone
+else a new root secret.
+
+### 18.1 Device keys
+
+```
+device_secret   32 bytes, OS CSPRNG, made when the device joins or creates an account, kept
+                beside the root secret and never transmitted
+PRK_d           = HKDF-Extract(salt = "asli/v2/device-salt", IKM = device_secret)
+sign_seed_d     = HKDF-Expand(PRK_d, info = "asli/v2/device-sign", L = 32)   -> Ed25519 key
+box_secret_d    = HKDF-Expand(PRK_d, info = "asli/v2/device-box",  L = 32)   -> X25519 key
+```
+
+A device that existed before device keys makes its device secret on its first start under a client
+that has them, and keeps it from then on. A device that **joins** an account makes a new device
+secret **and a new `device_id`**: a new membership is a new identity, and reusing an old id would
+clash with the keys the other devices pinned for it last time (section 18.3).
+
+A **sealed box** hands a secret to one device:
+
+```
+eph             fresh X25519 key pair per box
+shared          = X25519(eph_secret, recipient_box_pub)          refused if all zero
+key             = HKDF-SHA-256(salt = eph_pub || recipient_box_pub, IKM = shared, info = label, 32)
+box             = eph_pub[32] || nonce[24] || XChaCha20-Poly1305(key, nonce, plaintext, aad = label)
+```
+
+`label` names the purpose, `"asli/v2/join-grant"` or `"asli/v2/rekey"`, so a box made for one cannot
+be presented as the other.
+
+### 18.2 Message plaintext
+
+```
+plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a multiple of 256
+```
+
+| Kind | Name | Room it is sent in |
+|---|---|---|
+| 1 | Device card | The account room |
+| 2 | Join request | A meeting room (section 18.5) |
+| 3 | Join grant | A meeting room |
+| 4 | Join decline | A meeting room |
+| 5 | Rekey | The account room |
+| 6 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
+
+Every signature in this section is Ed25519 over `label || room_id_bytes || body_without_signature`,
+so a signed body can be replayed neither as another kind nor into another room. Text fields are a
+length byte and UTF-8, at most 64 bytes.
+
+### 18.3 Device card
+
+```
+body = u8(1) || device_id[16] || sign_pub[32] || box_pub[32] || u64be(ts_ms)
+       || text(conn_id) || text(name) || text(os)
+       || signature by sign_pub, label "asli/v2/card"
+```
+
+Sent by a device with keys after `auth_ok` and on every `presence` change, alongside the older
+`announce`, which it supersedes between clients that both know it. `conn_id` is the sender's
+connection, so a later message can be addressed to it with `to`.
+
+A receiver MUST discard a card that does not verify against its own `sign_pub`, is its own
+`device_id`, or has a `ts_ms` outside the section 10 freshness window. Otherwise the **first** card
+seen for a `device_id` pins that id to its `sign_pub`, and a receiver MUST refuse a later card for
+the same id naming another key. Pins are saved across restarts.
+
+### 18.4 What the relay sees
+
+A card, a request, a grant and a rekey are all `msg` frames with ciphertexts padded to multiples of
+256 bytes. The relay learns that devices talk to each other, roughly how much, and, for an addressed
+message, which connection it went to. It learns no name, no key and no kind.
+
+### 18.5 Joining: the join code
+
+The device already on the account (the **approver**) makes a code; the new device types it.
+
+```
+E          12 bytes, OS CSPRNG, one per code
+fp         = SHA-256("asli/v2/approver" || approver_sign_pub)[0..6]
+payload    = u8(2) || E || fp                                          (19 bytes)
+checksum   = SHA-256("asli/v2/join-check" || payload)[0..3]
+code       = "asli2_" || Crockford-Base32(payload || checksum)         (6 + 36 characters)
+
+meeting    = the section 4.3 identity of
+             HKDF(salt = "asli/v2/enroll-salt", IKM = E, info = "asli/v2/enroll", L = 32)
+```
+
+A parser ignores spaces, line breaks and dashes anywhere, and case, and reports each fault as for
+the old token (section 5.1). A code carries no part of the root secret.
+
+Both devices authenticate to the meeting identity's room, which to the relay is a room like any
+other. The approver offers the code for **ten minutes** and for **one answer**, then forgets `E`.
+
+**Request**, from the new device, repeated every few seconds until answered, because the relay
+keeps nothing for a room:
+
+```
+body = u8(1) || request_id[16] || device_id[16] || sign_pub[32] || box_pub[32] || u64be(ts_ms)
+       || text(name) || text(os)
+       || signature by sign_pub, label "asli/v2/join-request", room = meeting room
+```
+
+**Comparison code.** Both devices show
+
+```
+SHA-256("asli/v2/compare" || E || request_id || sign_pub || box_pub)[0..4] as u32be mod 1 000 000
+```
+
+as six digits. The approver shows each request with its name, its operating system and this code,
+and the person approves it only if the new device shows the same digits. Someone who saw the join
+code can send a request of their own, but cannot make it show the digits the real new device shows.
+
+**Grant**, from the approver, for one request:
+
+```
+body = u8(1) || request_id[16] || requester_sign_pub[32] || approver_sign_pub[32]
+       || u32be(len) || box(requester_box_pub, "asli/v2/join-grant",
+                            u8(1) || root_secret[32] || u8(never_exported))
+       || signature by approver_sign_pub, label "asli/v2/join-grant", room = meeting room
+```
+
+The new device MUST accept a grant only if `fp` of the code matches `approver_sign_pub`, the
+signature verifies, `request_id` and `requester_sign_pub` are its own, and the box opens. The first
+check is what stops someone who saw the code from answering the request themselves and enrolling the
+new device into an account of their own. `never_exported` is 1 when the root secret has never been
+shown as a section 5 token.
+
+**Decline**: `u8(1) || request_id[16] || approver_sign_pub[32]`, signed with label
+`"asli/v2/join-decline"`, honoured under the same `fp` and `request_id` checks.
+
+### 18.6 Replacing the account key, and removing a device
+
+One device makes a new root secret, seals it to each device that stays, and sends the bundle in the
+account room:
+
+```
+body = u8(1) || from_device_id[16] || u64be(ts_ms) || u8(count)
+       || count * ( device_id[16] || u32be(len) || box(that device's box_pub, "asli/v2/rekey",
+                                                      u8(1) || new_root_secret[32]) )
+       || signature by the sender's device key, label "asli/v2/rekey", room = the old room
+```
+
+A receiver MUST accept a bundle only from a device whose card it pinned, verified against that pin,
+and with a fresh `ts_ms`. A device that finds its entry stores the new root secret beside its own
+device secret, forgets the devices the bundle left out, re-encrypts its local history under the new
+key, and reconnects to the new room. A device with no entry has been removed: it forgets the
+account. The sender moves only once the relay has confirmed reading the bundle, and sends it again on
+its next connection if the confirmation never came, so it never moves to a key nobody received.
+
+Removing a device is a rekey that leaves it out. Retiring a key that was once shown as a section 5
+token is a rekey that keeps everyone. Either way, a device that is offline at the time misses the
+bundle and must join again; so must a device whose client predates device keys, which has no box
+key to seal to.
+
+### 18.7 Compatibility
+
+Everything here travels in `msg` frames and is invisible to a client that predates it, which keeps
+syncing clips with clients that have it. A rekey leaves such a client behind on the old key. Clients
+with device keys refuse the section 5 token, so adding a device to an account needs a client with
+device keys on both ends.
+
