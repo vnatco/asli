@@ -186,7 +186,10 @@ function announceFrame(msgId: Buffer): Json {
   };
 }
 
-async function withRelay(fn: (port: number) => Promise<void>): Promise<void> {
+async function withRelay(
+  fn: (port: number) => Promise<void>,
+  overrides: Record<string, string> = {},
+): Promise<void> {
   // The relay is told to listen on an ephemeral port directly, so PORT is left alone: a port of
   // zero in a real deployment is almost always a typo, and config.ts is right to reject it.
   process.env['METRICS_PORT'] = '0';
@@ -194,8 +197,14 @@ async function withRelay(fn: (port: number) => Promise<void>): Promise<void> {
   process.env['LOG_LEVEL'] = 'silent';
   process.env['MSG_BURST'] = '200';
   process.env['MSGS_PER_SEC'] = '200';
+  for (const [key, value] of Object.entries(overrides)) process.env[key] = value;
 
-  const relay: Relay = createRelay(loadConfig());
+  let relay: Relay;
+  try {
+    relay = createRelay(loadConfig());
+  } finally {
+    for (const key of Object.keys(overrides)) delete process.env[key];
+  }
   await new Promise<void>((resolve) => {
     relay.httpServer.listen(0, '127.0.0.1', () => resolve());
   });
@@ -514,4 +523,60 @@ test('a msg with a malformed target, or before the handshake, is refused', async
     early.send(msgFrame(randomBytes(16)));
     assert.equal(await earlyClosed, 4005);
   });
+});
+
+test('file traffic has its own allowance, beyond what a clipboard is allowed', async () => {
+  await withRelay(
+    async (port) => {
+      const a = await TestClient.open(port);
+      const b = await TestClient.open(port);
+      await a.handshake();
+      const bOk = await b.handshake();
+      // Ten frames at once: far past the clip allowance of two, inside the transfer one.
+      for (let i = 0; i < 10; i += 1) a.send(msgFrame(randomBytes(16), bOk['conn_id'] as string));
+      for (let i = 0; i < 10; i += 1) await b.nextOfType('msg');
+      a.close();
+      b.close();
+    },
+    { MSG_BURST: '2', MSGS_PER_SEC: '1' },
+  );
+});
+
+test('a frame that claims to be a msg to get the larger allowance, and is not, is closed', async () => {
+  await withRelay(async (port) => {
+    const a = await TestClient.open(port);
+    await a.handshake();
+    const closed = new Promise<number>((resolve) => {
+      a.ws.once('close', (code: number) => resolve(code));
+    });
+    // A repeated key: it reads as a msg from its first bytes, and parses as a clip.
+    const clip = JSON.stringify(clipFrame(randomBytes(16), 0x61));
+    a.ws.send(`{"type":"msg",${clip.slice(1)}`);
+    assert.equal(await closed, 4005);
+  });
+});
+
+test('a spent daily transfer budget is refused, and the connection carries on', async () => {
+  await withRelay(
+    async (port) => {
+      const a = await TestClient.open(port);
+      const b = await TestClient.open(port);
+      await a.handshake();
+      await b.handshake();
+      const big = (): Json => ({
+        ...msgFrame(randomBytes(16)),
+        ct: Buffer.alloc(400 * 1024, 0x66).toString('base64'),
+      });
+      a.send(big());
+      a.send(big());
+      a.send(big());
+      const err = await a.nextOfType('error');
+      assert.equal(err['code'], 'QUOTA_EXCEEDED');
+      a.send({ v: 1, type: 'ping', t: 5 });
+      assert.equal((await a.nextOfType('pong'))['t'], 5);
+      a.close();
+      b.close();
+    },
+    { ROOM_TRANSFER_BYTES_PER_DAY: String(1024 * 1024) },
+  );
 });

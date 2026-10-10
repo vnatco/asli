@@ -71,6 +71,9 @@ type Session = {
   missedPongs: number;
   msgBucket: TokenBucket;
   byteBucket: TokenBucket;
+  /** Device to device messages, which carry files, have their own allowance. */
+  transferMsgBucket: TokenBucket;
+  transferByteBucket: TokenBucket;
   rateStrikes: number;
   /** When the last rate limit strike happened, so strikes can expire. */
   lastStrikeMs: number;
@@ -87,6 +90,19 @@ type Session = {
  * Exported so the backpressure rule can be tested directly. Simulating a peer that never drains a
  * socket is flaky; the decision itself is the part that has to be right.
  */
+/**
+ * Whether a frame announces itself as a `msg`, judged from its first bytes, before it is parsed.
+ *
+ * Rate limits are applied before parsing, so that a flood costs the relay as little as possible,
+ * and `msg` frames, which carry files, have a larger allowance than clips. A frame that claims to
+ * be a `msg` here and turns out not to be one when parsed has lied to get the larger allowance, and
+ * the connection is closed. One that is a `msg` without saying so first is only held to the
+ * smaller allowance, which harms nobody but its sender.
+ */
+export function looksLikeMsg(raw: NodeBuffer): boolean {
+  return raw.subarray(0, 48).toString('latin1').includes('"type":"msg"');
+}
+
 /** The room key for a room id as written in a frame, or null if it does not decode. */
 function roomKeyOf(roomText: string): string | null {
   const bytes = decodeCrockford(roomText, 16);
@@ -119,6 +135,12 @@ export function createRelay(config: Config): Relay {
 
   const ipLimiter = new IpLimiter(config.maxConnsPerIp, config.newConnBurst, config.newConnRefillMs);
   const roomQuotas = new Map<string, RollingQuota>();
+  const roomTransferQuotas = new Map<string, RollingQuota>();
+  const globalTransferQuota = new RollingQuota(
+    config.globalTransferBytesPerDay,
+    24 * 60 * 60 * 1000,
+    Date.now(),
+  );
   const sessions = new Set<Session>();
 
   const httpServer = createServer((req, res) => {
@@ -560,16 +582,22 @@ export function createRelay(config: Config): Relay {
       return;
     }
 
+    // Charged against a budget of its own, per room and for the whole relay. Refused rather than
+    // closed when it runs out: the sender learns why at once, and its clipboard keeps syncing.
     const now = Date.now();
-    let quota = roomQuotas.get(session.conn.roomId);
+    let quota = roomTransferQuotas.get(session.conn.roomId);
     if (quota === undefined) {
-      quota = new RollingQuota(config.roomBytesPerDay, 24 * 60 * 60 * 1000, now);
-      roomQuotas.set(session.conn.roomId, quota);
+      quota = new RollingQuota(config.roomTransferBytesPerDay, 24 * 60 * 60 * 1000, now);
+      roomTransferQuotas.set(session.conn.roomId, quota);
+    }
+    if (!globalTransferQuota.charge(raw.length, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, code: 'global_transfer' });
+      sendError(session, 'QUOTA_EXCEEDED', 'relay transfer budget exhausted', globalTransferQuota.retryAfterMs(now));
+      return;
     }
     if (!quota.charge(raw.length, now)) {
       log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
-      sendError(session, 'QUOTA_EXCEEDED', 'room daily quota exhausted', quota.retryAfterMs(now));
-      session.ws.close(4008, 'QUOTA_EXCEEDED');
+      sendError(session, 'QUOTA_EXCEEDED', 'room daily transfer quota exhausted', quota.retryAfterMs(now));
       return;
     }
 
@@ -677,6 +705,8 @@ export function createRelay(config: Config): Relay {
       missedPongs: 0,
       msgBucket: new TokenBucket(config.msgBurst, config.msgsPerSec, now),
       byteBucket: new TokenBucket(config.byteBurst, config.bytesPerSec, now),
+      transferMsgBucket: new TokenBucket(config.transferMsgBurst, config.transferMsgsPerSec, now),
+      transferByteBucket: new TokenBucket(config.transferByteBurst, config.transferBytesPerSec, now),
       rateStrikes: 0,
       lastStrikeMs: 0,
       pendingClip: null,
@@ -710,13 +740,16 @@ export function createRelay(config: Config): Relay {
       const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       const nowMs = Date.now();
 
-      if (!session.msgBucket.take(1, nowMs) || !session.byteBucket.take(raw.length, nowMs)) {
+      const transfer = session.state === 'ready' && looksLikeMsg(raw);
+      const msgBucket = transfer ? session.transferMsgBucket : session.msgBucket;
+      const byteBucket = transfer ? session.transferByteBucket : session.byteBucket;
+      if (!msgBucket.take(1, nowMs) || !byteBucket.take(raw.length, nowMs)) {
         // Strikes expire. Without that, a connection that lives for weeks was closed on its
         // fourth breach ever, however far apart the breaches were.
         if (nowMs - session.lastStrikeMs > RATE_STRIKE_MEMORY_MS) session.rateStrikes = 0;
         session.lastStrikeMs = nowMs;
         session.rateStrikes += 1;
-        const retryAfter = session.msgBucket.retryAfterMs(1, nowMs);
+        const retryAfter = msgBucket.retryAfterMs(1, nowMs);
         log.warn('rate_limited', { conn: session.conn.id, count: session.rateStrikes });
         if (session.rateStrikes > 3) {
           session.ws.close(4007, 'RATE_LIMITED');
@@ -744,6 +777,10 @@ export function createRelay(config: Config): Relay {
       }
 
       const type = parsed.message.type;
+      if (transfer && type !== 'msg') {
+        session.ws.close(4005, 'frame claimed to be a msg');
+        return;
+      }
 
       if (session.state === 'connected') {
         if (type !== 'hello') {
@@ -862,6 +899,9 @@ export function createRelay(config: Config): Relay {
     ipLimiter.sweep(now, 10 * 60 * 1000);
     for (const [roomId, quota] of roomQuotas) {
       if (quota.isIdle(now) && registry.peers(roomId) === 0) roomQuotas.delete(roomId);
+    }
+    for (const [roomId, quota] of roomTransferQuotas) {
+      if (quota.isIdle(now) && registry.peers(roomId) === 0) roomTransferQuotas.delete(roomId);
     }
   }, 60_000);
   sweeper.unref?.();

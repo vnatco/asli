@@ -30,6 +30,19 @@ export type Config = {
   readonly bytesPerSec: number;
   readonly roomBytesPerDay: number;
 
+  /**
+   * Device to device messages, which carry files, get their own allowance: a file is many frames
+   * of a few hundred kilobytes, far beyond what a clipboard needs. Separate buckets per connection,
+   * a separate daily budget per room, and one daily budget for the whole relay, so that nobody can
+   * turn a public relay into a free file pipe however many rooms they mint.
+   */
+  readonly transferMsgBurst: number;
+  readonly transferMsgsPerSec: number;
+  readonly transferByteBurst: number;
+  readonly transferBytesPerSec: number;
+  readonly roomTransferBytesPerDay: number;
+  readonly globalTransferBytesPerDay: number;
+
   readonly maxConnsPerIp: number;
   readonly newConnBurst: number;
   readonly newConnRefillMs: number;
@@ -104,6 +117,13 @@ export function loadConfig(): Config {
     byteBurst: readInt('BYTE_BURST', 2 * MIB, KIB, 512 * MIB),
     bytesPerSec: readInt('BYTES_PER_SEC', 256 * KIB, KIB, 512 * MIB),
     roomBytesPerDay: readInt('ROOM_BYTES_PER_DAY', 50 * MIB, 64 * KIB, 64 * 1024 * MIB),
+
+    transferMsgBurst: readInt('TRANSFER_MSG_BURST', 128, 1, 100_000),
+    transferMsgsPerSec: readInt('TRANSFER_MSGS_PER_SEC', 64, 1, 100_000),
+    transferByteBurst: readInt('TRANSFER_BYTE_BURST', 16 * MIB, KIB, 4096 * MIB),
+    transferBytesPerSec: readInt('TRANSFER_BYTES_PER_SEC', 8 * MIB, KIB, 4096 * MIB),
+    roomTransferBytesPerDay: readInt('ROOM_TRANSFER_BYTES_PER_DAY', 4096 * MIB, MIB, 1024 * 1024 * MIB),
+    globalTransferBytesPerDay: readInt('GLOBAL_TRANSFER_BYTES_PER_DAY', 32 * 1024 * MIB, MIB, 1024 * 1024 * MIB),
 
     maxConnsPerIp: readInt('MAX_CONNS_PER_IP', 20, 1, 100_000),
     newConnBurst: readInt('NEW_CONN_BURST', 10, 1, 10_000),
