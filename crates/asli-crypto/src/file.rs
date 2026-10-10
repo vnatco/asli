@@ -9,7 +9,9 @@
 //! ```text
 //! offer   = u8(1) || offer_id[16] || from_device_id[16] || to_device_id[16] || u64be(size)
 //!           || sha256[32] || u32be(chunk_bytes) || u64be(ts_ms) || text(reply_to)
-//!           || u16be(name_len) || name || signature, label "asli/v2/file-offer"
+//!           || u16be(name_len) || name || u8(addr_count) || addr_count * text(addr)
+//!           || [ u32be(len) || box(to_box_pub, "asli/v2/file-direct-key", key[32]) ]  if addr_count > 0
+//!           || signature, label "asli/v2/file-offer"
 //! answer  = u8(1) || offer_id[16] || from_device_id[16] || u8(accepted) || text(reply_to)
 //!           || signature, label "asli/v2/file-answer"
 //! chunk   = u8(1) || offer_id[16] || u32be(index) || u32be(len) || bytes
@@ -21,12 +23,17 @@
 //! to it alone. The pieces are not signed one by one: they are sealed under the room key, which
 //! only the account's devices hold, and the whole file is checked against the offer's hash before
 //! it is kept, so a piece that was altered, swapped or left out is caught at the end.
+//!
+//! The addresses, when there are any, are where the sender listens on its local network for the
+//! receiver to fetch the file directly; see [`crate::direct`].
 
 use crate::clip::DEVICE_ID_LEN;
-use crate::device::DeviceKeys;
+use crate::device::{seal_box, DeviceKeys, BOX_PUB_LEN};
 use crate::error::{Error, Result};
 use crate::identity::{verify_signature, PUB_KEY_LEN, ROOM_ID_LEN, SIGNATURE_LEN};
+use crate::kdf::KEY_LEN;
 use crate::msg::{Reader, Writer};
+use zeroize::Zeroizing;
 
 /// Length of an offer id.
 pub const OFFER_ID_LEN: usize = 16;
@@ -37,7 +44,59 @@ pub const CHUNK_BYTES: u32 = 256 * 1024;
 /// Longest file name an offer may carry, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
 
+/// Most local addresses an offer carries.
+pub const MAX_DIRECT_ADDRS: usize = 4;
+
 const LABEL_OFFER: &[u8] = b"asli/v2/file-offer";
+const LABEL_DIRECT_KEY: &[u8] = b"asli/v2/file-direct-key";
+
+/// Where the sender can be reached on its local network, and the key for that one transfer,
+/// sealed to the receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Direct {
+    /// `address:port`, at most [`MAX_DIRECT_ADDRS`] of them.
+    pub addrs: Vec<String>,
+    /// The transfer key, sealed to the receiver's box key.
+    pub sealed_key: Vec<u8>,
+}
+
+impl Direct {
+    /// Seals `key` to the receiver and names where to find the sender.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AnnounceField`] for no addresses or too many, and a sealing error if the
+    /// key cannot be sealed.
+    pub fn new(
+        addrs: Vec<String>,
+        to_box_pub: &[u8; BOX_PUB_LEN],
+        key: &[u8; KEY_LEN],
+    ) -> Result<Self> {
+        if addrs.is_empty() || addrs.len() > MAX_DIRECT_ADDRS {
+            return Err(Error::AnnounceField);
+        }
+        Ok(Self {
+            addrs,
+            sealed_key: seal_box(to_box_pub, LABEL_DIRECT_KEY, key)?,
+        })
+    }
+
+    /// Opens the transfer key, which only the receiver can.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Open`] on any other device, and [`Error::InnerMalformed`] for a key of the
+    /// wrong length.
+    pub fn open_key(&self, keys: &DeviceKeys) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+        let opened = keys.open_box(LABEL_DIRECT_KEY, &self.sealed_key)?;
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        if opened.len() != KEY_LEN {
+            return Err(Error::InnerMalformed);
+        }
+        key.copy_from_slice(&opened);
+        Ok(key)
+    }
+}
 const LABEL_ANSWER: &[u8] = b"asli/v2/file-answer";
 
 /// A file one device offers another.
@@ -61,6 +120,8 @@ pub struct Offer {
     pub reply_to: String,
     /// Its name, as the sender has it. Untrusted: the receiver makes its own safe name from it.
     pub name: String,
+    /// How to fetch it directly on the same network, when the sender is listening.
+    pub direct: Option<Direct>,
 }
 
 impl Offer {
@@ -95,6 +156,21 @@ impl Offer {
             .u64(self.ts_ms);
         body.text(&self.reply_to)?;
         body.bytes(&name_len.to_be_bytes()).bytes(name);
+        match &self.direct {
+            None => {
+                body.u8(0);
+            }
+            Some(direct) => {
+                if direct.addrs.is_empty() || direct.addrs.len() > MAX_DIRECT_ADDRS {
+                    return Err(Error::AnnounceField);
+                }
+                body.u8(u8::try_from(direct.addrs.len()).map_err(|_| Error::AnnounceField)?);
+                for addr in &direct.addrs {
+                    body.text(addr)?;
+                }
+                body.blob(&direct.sealed_key)?;
+            }
+        }
         Ok(sign(keys, LABEL_OFFER, room, body))
     }
 
@@ -130,6 +206,21 @@ impl Offer {
                 std::str::from_utf8(r.bytes(len)?)
                     .map_err(|_| Error::NotUtf8)?
                     .to_owned()
+            },
+            direct: {
+                let count = usize::from(r.u8()?);
+                if count > MAX_DIRECT_ADDRS {
+                    return Err(Error::AnnounceField);
+                }
+                if count == 0 {
+                    None
+                } else {
+                    let addrs = (0..count).map(|_| r.text()).collect::<Result<Vec<_>>>()?;
+                    Some(Direct {
+                        addrs,
+                        sealed_key: r.blob()?.to_vec(),
+                    })
+                }
             },
         };
         r.done()?;
@@ -426,6 +517,7 @@ mod tests {
             ts_ms: 1_767_225_600_000,
             reply_to: "c_0011aabb".to_owned(),
             name: "asli-0.1.0-macos-universal.dmg".to_owned(),
+            direct: None,
         }
     }
 
@@ -442,6 +534,30 @@ mod tests {
         assert!(Offer::decode(&body, &ROOM, &other.sign_pub()).is_err());
         assert!(Offer::decode(&body, &[8u8; ROOM_ID_LEN], &sender.sign_pub()).is_err());
         assert_eq!(offer().chunk_count(), 3);
+    }
+
+    #[test]
+    fn an_offer_carries_local_addresses_and_a_key_only_its_receiver_opens() {
+        let sender = DeviceKeys::from_secret(&[1u8; 32]);
+        let receiver = DeviceKeys::from_secret(&[3u8; 32]);
+        let other = DeviceKeys::from_secret(&[4u8; 32]);
+        let key = [9u8; KEY_LEN];
+        let mut with_direct = offer();
+        with_direct.direct = Some(
+            Direct::new(
+                vec!["192.168.1.20:51234".to_owned(), "10.0.0.5:51234".to_owned()],
+                &receiver.box_pub(),
+                &key,
+            )
+            .expect("seals"),
+        );
+        let body = with_direct.encode(&sender, &ROOM).expect("encodes");
+        let back = Offer::decode(&body, &ROOM, &sender.sign_pub()).expect("decodes");
+        assert_eq!(back, with_direct);
+        let direct = back.direct.expect("has addresses");
+        assert_eq!(*direct.open_key(&receiver).expect("opens"), key);
+        assert!(direct.open_key(&other).is_err());
+        assert!(Direct::new(Vec::new(), &receiver.box_pub(), &key).is_err());
     }
 
     #[test]

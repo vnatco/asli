@@ -65,6 +65,7 @@ pub mod base32;
 pub mod chunk;
 pub mod clip;
 pub mod device;
+pub mod direct;
 pub mod enroll;
 pub mod error;
 pub mod file;
