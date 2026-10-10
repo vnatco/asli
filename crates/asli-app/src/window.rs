@@ -785,6 +785,23 @@ fn wire_invite(window: &AppWindow) {
 /// Attaches the callbacks on Status that change the account key: removing a device, and retiring
 /// a key that was once shown as an old style join string.
 fn wire_removal(window: &AppWindow) {
+    window.on_forget_device(|index| {
+        let id = DEVICE_ROWS.with_borrow(|rows| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| rows.get(index))
+                .and_then(|device| crate::devices::id_bytes(&device.id))
+        });
+        if let (Some(context), Some(id)) = (CONTEXT.get(), id) {
+            context.controls.devices.forget(&id);
+            WINDOW.with_borrow(|window| {
+                if let Some(window) = window.as_ref() {
+                    refresh_status(window);
+                }
+            });
+        }
+    });
+
     let handle = window.as_weak();
     window.on_ask_remove(move |index| {
         let Some(window) = handle.upgrade() else {
@@ -961,6 +978,18 @@ fn finish_join(
     never_exported: bool,
 ) -> Result<()> {
     let context = CONTEXT.get().ok_or(Error::NoAccount)?;
+    // Goodbye to the account this one is leaving, if it had one, so its devices list it no more.
+    // Waited for briefly: the restart that follows would otherwise cut it off.
+    if context
+        .controls
+        .transfers
+        .say_leaving(std::time::Duration::from_secs(2))
+    {
+        eprintln!(
+            "{}",
+            log_line("left", "said goodbye to the previous account")
+        );
+    }
     secrets::store(&context.paths, secret, device_secret)?;
     let mut config = context.paths.load_config()?;
     config.key_never_exported = never_exported;
@@ -1459,6 +1488,7 @@ fn refresh_status(window: &AppWindow) {
             }
             .into(),
             outdated: device.build < newest,
+            forgettable: !device.this_device && !device.keyed,
             can_send: !device.this_device && device.keyed && device.online,
             removable: !device.this_device && device.keyed,
             name: device.name.into(),

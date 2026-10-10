@@ -63,6 +63,8 @@ export struct DeviceRow {
     version: string,
     // Whether it runs an older Asli than the newest on the account.
     outdated: bool,
+    // Whether it can only be taken off this list: it has no key of its own to remove it with.
+    forgettable: bool,
 }
 
 // A file on its way to or from this device.
@@ -571,6 +573,7 @@ export component AppWindow inherits Window {
     callback approve-request(int);
     callback decline-request(int);
     callback ask-remove(int);
+    callback forget-device(int);
     callback ask-replace-key();
     callback confirm-yes();
     callback confirm-no();
@@ -2314,6 +2317,12 @@ export component AppWindow inherits Window {
                                                         enabled: !root.rekey-busy;
                                                         y: (parent.height - self.height) / 2;
                                                         clicked => { root.ask-remove(i); }
+                                                    }
+                                                    if device.forgettable: Button {
+                                                        text: "Forget";
+                                                        small: true;
+                                                        y: (parent.height - self.height) / 2;
+                                                        clicked => { root.forget-device(i); }
                                                     }
                                                 }
 

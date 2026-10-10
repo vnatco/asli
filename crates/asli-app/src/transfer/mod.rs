@@ -148,6 +148,8 @@ struct State {
     shelf: shelf::Shelf,
     /// Files only on the local network, never through the relay.
     same_network_only: bool,
+    /// Whether the relay has read this device's goodbye.
+    leave_sent: bool,
     /// Bumped on every change, so a window knows to redraw.
     revision: u64,
 }
@@ -227,6 +229,36 @@ impl Transfers {
                 conn_id: None,
             });
             state.devices = devices;
+        }
+    }
+
+    /// Tells the other devices this one is leaving the account, and waits up to `patience` for the
+    /// relay to have read it. Returns whether it did.
+    #[must_use]
+    pub fn say_leaving(&self, patience: std::time::Duration) -> bool {
+        let queued = self.0.lock().is_ok_and(|mut state| {
+            state.leave_sent = false;
+            about::say_leaving(&state)
+        });
+        if !queued {
+            return false;
+        }
+        let until = Instant::now() + patience;
+        while Instant::now() < until {
+            if self.0.lock().is_ok_and(|state| state.leave_sent) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// The relay read a message sent with `token`.
+    pub(crate) fn sent(&self, token: u64) {
+        if token == about::LEAVE_TOKEN {
+            if let Ok(mut state) = self.0.lock() {
+                state.leave_sent = true;
+            }
         }
     }
 
@@ -811,6 +843,7 @@ impl Transfers {
             MsgKind::FileCancel => on_cancel(&mut state, body),
             MsgKind::ShelfList => shelf::on_list(&mut state, body),
             MsgKind::About => about::on_about(&state, body),
+            MsgKind::Leave => about::on_leave(&mut state, body),
             MsgKind::ShelfRequest => {
                 if let Some((path, to, id)) = shelf::on_request(&mut state, body) {
                     then = Then::Send(path, to, id);

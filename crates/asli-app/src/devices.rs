@@ -228,9 +228,19 @@ impl DevicesHandle {
                     .map_or(0, |d| d.last_seen_ms),
                 ..device.clone()
             });
+        // The same machine from before it had its own key, which joined again under a new id:
+        // an older entry with this name and system and no key is that machine, and goes.
+        let before = registry.stored.devices.len();
+        registry.stored.devices.retain(|other_id, other| {
+            *other_id == id
+                || !other.box_pub.is_empty()
+                || other.name != device.name
+                || other.os != device.os
+        });
+        let deduped = registry.stored.devices.len() != before;
         registry.stored.devices.insert(id, device);
         registry.evict();
-        if changed {
+        if changed || deduped {
             registry.save();
         }
     }
@@ -682,5 +692,31 @@ mod tests {
     fn a_blank_name_falls_back_to_the_computer_name() {
         assert_eq!(display_name("  Work laptop "), "Work laptop");
         assert!(!display_name("   ").is_empty());
+    }
+
+    #[test]
+    fn a_machine_that_joined_again_with_a_key_replaces_its_old_keyless_entry() {
+        let devices = DevicesHandle::default();
+        devices.heard(&[2u8; 16], "DESKTOP-7Q", "Windows 11", 1_000);
+        devices.heard(&[3u8; 16], "laptop", "macOS 15", 1_000);
+        devices.heard_card(
+            &asli_net::session::KnownDevice {
+                device_id: [4u8; 16],
+                sign_pub: [7u8; 32],
+                box_pub: [8u8; 32],
+                conn_id: None,
+                name: "DESKTOP-7Q".to_owned(),
+                os: "Windows 11".to_owned(),
+                ts_ms: 0,
+            },
+            2_000,
+        );
+        let ids: Vec<String> = devices.list(&this()).into_iter().map(|d| d.id).collect();
+        assert!(ids.contains(&hex(&[4u8; 16])));
+        assert!(ids.contains(&hex(&[3u8; 16])), "a different machine stays");
+        assert!(
+            !ids.contains(&hex(&[2u8; 16])),
+            "the old entry of the same machine goes"
+        );
     }
 }

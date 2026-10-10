@@ -1,6 +1,7 @@
-//! Telling the other devices which Asli this one runs, and hearing which they run.
+//! Telling the other devices which Asli this one runs, and hearing which they run. Also saying
+//! goodbye when this device leaves the account, and hearing others do it.
 
-use asli_crypto::about::About;
+use asli_crypto::about::{About, Leave};
 use asli_net::client::{LocalEvent, MsgKind};
 
 use super::{send_msg, State};
@@ -65,4 +66,57 @@ pub(super) fn on_about(state: &State, body: &[u8]) {
     if about.ask {
         announce(state, false, Some(&about.reply_to));
     }
+}
+
+/// Token of the goodbye, to know when the relay has read it.
+pub(super) const LEAVE_TOKEN: u64 = u64::MAX - 8;
+
+/// Tells the room this device is leaving. Returns whether it went into the queue.
+pub(super) fn say_leaving(state: &State) -> bool {
+    let Some(link) = state.link.as_ref() else {
+        return false;
+    };
+    if link.conn_id.is_none() {
+        return false;
+    }
+    let body = Leave {
+        from_device_id: link.device_id,
+        ts_ms: asli_net::client::now_ms(),
+    }
+    .encode(&link.keys(), &link.room);
+    link.tx
+        .try_send(LocalEvent::Message {
+            kind: MsgKind::Leave,
+            body,
+            to: None,
+            token: Some(LEAVE_TOKEN),
+        })
+        .is_ok()
+}
+
+/// Another device left the account: it comes off the list, and its shelf with it.
+pub(super) fn on_leave(state: &mut State, body: &[u8]) {
+    let Some(link) = state.link.as_ref() else {
+        return;
+    };
+    let Ok(from) = About::claimed_sender(body) else {
+        return;
+    };
+    let Some(pinned) = state
+        .devices
+        .pinned()
+        .into_iter()
+        .find(|device| device.device_id == from)
+    else {
+        return;
+    };
+    if Leave::decode(body, &link.room, &pinned.sign_pub).is_err() {
+        return;
+    }
+    eprintln!(
+        "{}",
+        crate::clipboard_io::log_line("device_left", &pinned.name)
+    );
+    state.devices.forget(&from);
+    state.shelf.forget_device(&from);
 }

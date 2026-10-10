@@ -400,6 +400,7 @@ fn sample(ui: &AppWindow) {
             can_send: false,
             version: "0.1.0 (build 129)".into(),
             outdated: false,
+            forgettable: false,
         },
         DeviceRow {
             name: "MacBook Pro".into(),
@@ -412,6 +413,7 @@ fn sample(ui: &AppWindow) {
             can_send: true,
             version: "0.1.0 (build 131)".into(),
             outdated: false,
+            forgettable: false,
         },
         DeviceRow {
             name: "fedora-desk".into(),
@@ -424,6 +426,7 @@ fn sample(ui: &AppWindow) {
             can_send: false,
             version: "0.1.0 (build 118)".into(),
             outdated: true,
+            forgettable: false,
         },
     ])));
     let row = |preview: &str, meta: &str, image: bool, mono: bool| HistoryRow {

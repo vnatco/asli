@@ -878,6 +878,8 @@ pub enum TransferRequest {
         /// The item, by id in hex.
         item: String,
     },
+    /// Say goodbye to the account, because this device is about to join another.
+    Leave,
     /// Fetch an item from another device's shelf.
     Take {
         /// The device, by id in hex.
@@ -885,6 +887,12 @@ pub enum TransferRequest {
         /// The item, by id in hex.
         item: String,
     },
+}
+
+/// Written by the running daemon once the relay has read its goodbye, for `asli join` to wait on.
+#[must_use]
+pub fn leave_done_path(paths: &Paths) -> std::path::PathBuf {
+    paths.dir.join("leave-done")
 }
 
 /// Where the running daemon describes the shelves for `asli shelf`.
@@ -927,7 +935,7 @@ pub struct TransferStatus {
     pub stage: String,
 }
 
-fn act_on_transfer_request(request: TransferRequest, controls: &Controls) {
+fn act_on_transfer_request(request: TransferRequest, controls: &Controls, paths: &Paths) {
     let offer = |hex: &str| crate::devices::id_bytes(hex);
     let outcome = match request {
         TransferRequest::Send { device, path } => match crate::devices::id_bytes(&device) {
@@ -965,6 +973,17 @@ fn act_on_transfer_request(request: TransferRequest, controls: &Controls) {
             (Some(device), Some(item)) => controls.transfers.take(device, item),
             _ => Err("no such item".to_owned()),
         },
+        TransferRequest::Leave => {
+            // Waits for the relay on a thread of its own: the confirmation arrives on this one.
+            let transfers = controls.transfers.clone();
+            let done = leave_done_path(paths);
+            std::thread::spawn(move || {
+                if transfers.say_leaving(std::time::Duration::from_secs(3)) {
+                    let _ = std::fs::write(&done, b"ok");
+                }
+            });
+            Ok(())
+        }
     };
     if let Err(why) = outcome {
         eprintln!("{}", log_line("transfer_request_refused", &why));
@@ -1030,7 +1049,7 @@ fn spawn_rekey_watch(paths: &Paths, controls: Controls) -> tokio::task::JoinHand
             if let Ok(bytes) = std::fs::read(&transfer_path) {
                 let _ = std::fs::remove_file(&transfer_path);
                 match serde_json::from_slice::<TransferRequest>(&bytes) {
-                    Ok(request) => act_on_transfer_request(request, &controls),
+                    Ok(request) => act_on_transfer_request(request, &controls, &paths),
                     Err(_) => eprintln!("{}", log_line("transfer_request_invalid", "ignored")),
                 }
             }
@@ -1092,6 +1111,7 @@ fn on_account_event(
             ..
         } => controls.transfers.over_quota(),
         ClientEvent::Sent { token } => {
+            controls.transfers.sent(*token);
             if let Some(pending) = controls.outbox.take_rekey(*token) {
                 move_to_new_key(
                     keys,

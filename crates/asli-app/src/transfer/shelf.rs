@@ -43,6 +43,13 @@ pub(super) struct Shelf {
     wanted: HashMap<OfferId, [u8; 16]>,
 }
 
+impl Shelf {
+    /// Drops what a device that left had on its shelf.
+    pub(super) fn forget_device(&mut self, device: &[u8; 16]) {
+        self.theirs.remove(device);
+    }
+}
+
 /// One item, as the window and the command line show it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shelved {

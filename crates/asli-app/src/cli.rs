@@ -293,6 +293,7 @@ fn join(paths: &Paths, token_in_argv: bool) -> Result<()> {
     };
 
     let identity = Identity::from_secret(&secret);
+    say_goodbye(paths);
     let store = secrets::store(paths, identity.secret(), &device_secret)?;
     config.key_never_exported = never_exported;
     config.device_id = crate::config::hex(&device_id);
@@ -626,6 +627,27 @@ fn request_rekey(paths: &Paths, remove: &[String]) -> Result<()> {
     println!("It moves to the new key once the relay confirms the other devices have it, and");
     println!("restarts. Devices that are offline now will need to join again.");
     Ok(())
+}
+
+/// Has the running Asli tell the account this device is leaving, so its devices list it no more,
+/// and waits a moment for that to reach the relay. Nothing to do when Asli is not running.
+fn say_goodbye(paths: &Paths) {
+    if !instance::is_running(paths) {
+        return;
+    }
+    let done = daemon::leave_done_path(paths);
+    let _ = std::fs::remove_file(&done);
+    if request_transfer(paths, &daemon::TransferRequest::Leave).is_err() {
+        return;
+    }
+    // The request is picked up within half a second, and the relay answers within a few more.
+    for _ in 0..40 {
+        if done.exists() {
+            let _ = std::fs::remove_file(&done);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// Shows a join code for another device and approves it, in the terminal.
