@@ -8,6 +8,13 @@
 //! A device sends one to the room when it connects, with `ask` set, and every device that hears
 //! that answers with its own to `reply_to` alone. `build` is the number of commits the build came
 //! from, higher meaning newer, and 0 when unknown. Believed only from a device whose key is pinned.
+//!
+//! A device leaving the account, to join another, says goodbye the same way, so the others take it
+//! off their lists:
+//!
+//! ```text
+//! leave = u8(1) || from_device_id[16] || u64be(ts_ms) || signature, label "asli/v2/leave"
+//! ```
 
 use crate::clip::DEVICE_ID_LEN;
 use crate::device::DeviceKeys;
@@ -92,6 +99,48 @@ impl About {
     }
 }
 
+const LABEL_LEAVE: &[u8] = b"asli/v2/leave";
+
+/// A device saying it is leaving the account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leave {
+    /// The device leaving.
+    pub from_device_id: [u8; DEVICE_ID_LEN],
+    /// When, by its clock.
+    pub ts_ms: u64,
+}
+
+impl Leave {
+    /// Encodes and signs it.
+    #[must_use]
+    pub fn encode(&self, keys: &DeviceKeys, room: &[u8; ROOM_ID_LEN]) -> Vec<u8> {
+        let mut body = Writer::default();
+        body.u8(1).bytes(&self.from_device_id).u64(self.ts_ms);
+        sign(keys, LABEL_LEAVE, room, body)
+    }
+
+    /// Decodes it, checking it was signed by `sign_pub`, the key pinned for its sender.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed message or one not signed by that key.
+    pub fn decode(
+        body: &[u8],
+        room: &[u8; ROOM_ID_LEN],
+        sign_pub: &[u8; PUB_KEY_LEN],
+    ) -> Result<Self> {
+        verify(LABEL_LEAVE, room, body, sign_pub)?;
+        let mut r = Reader::new(&body[..body.len() - SIGNATURE_LEN]);
+        version(&mut r)?;
+        let leave = Self {
+            from_device_id: r.array()?,
+            ts_ms: r.u64()?,
+        };
+        r.done()?;
+        Ok(leave)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +164,24 @@ mod tests {
             about
         );
         assert!(About::decode(&body, &room, &other.sign_pub()).is_err());
+    }
+
+    #[test]
+    fn a_goodbye_counts_only_from_the_device_itself() {
+        let room = [9u8; ROOM_ID_LEN];
+        let keys = DeviceKeys::from_secret(&[1u8; 32]);
+        let other = DeviceKeys::from_secret(&[2u8; 32]);
+        let leave = Leave {
+            from_device_id: [1u8; 16],
+            ts_ms: 5,
+        };
+        let body = leave.encode(&keys, &room);
+        assert_eq!(About::claimed_sender(&body).expect("names"), [1u8; 16]);
+        assert_eq!(
+            Leave::decode(&body, &room, &keys.sign_pub()).expect("decodes"),
+            leave
+        );
+        assert!(Leave::decode(&body, &room, &other.sign_pub()).is_err());
+        assert!(About::decode(&body, &room, &keys.sign_pub()).is_err());
     }
 }
