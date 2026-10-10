@@ -13,7 +13,8 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use crate::envelope::{AuthFailCode, ErrorCode};
 use crate::error::{Error, Result};
 use crate::session::{Action, Session};
-pub use crate::session::{DeviceInfo, PeerInfo};
+pub use crate::session::{DeviceInfo, HandedSecret, KnownDevice, PeerInfo};
+pub use asli_crypto::msg::Kind as MsgKind;
 
 /// Something originating on this device that the connection must carry.
 ///
@@ -35,6 +36,31 @@ pub enum LocalEvent {
     /// This device's name or operating system changed. Announced at once when connected, and
     /// used for every announcement after.
     DeviceInfo(DeviceInfo),
+    /// A sealed device to device message, for the room or, with `to`, one connection.
+    ///
+    /// Never coalesced: every one is sent, in order. With a `token`, the relay is asked to confirm
+    /// it read the message, and [`ClientEvent::Sent`] reports the token when it has.
+    Message {
+        /// What it is.
+        kind: MsgKind,
+        /// Its body.
+        body: Vec<u8>,
+        /// The connection to send it to, or `None` for the whole room.
+        to: Option<String>,
+        /// Reported back once the relay has read it.
+        token: Option<u64>,
+    },
+    /// Replace the account key: seal `secret` to each device in `keep` and send it. Reported back
+    /// with [`ClientEvent::Sent`] once the relay has read it, which is when the caller may move
+    /// to the new key itself.
+    Rekey {
+        /// The devices that keep the account. Everyone else is left out.
+        keep: Vec<[u8; 16]>,
+        /// The new account key.
+        secret: HandedSecret,
+        /// Reported back once the relay has read it.
+        token: u64,
+    },
 }
 
 /// A clip that arrived, decrypted and validated.
@@ -121,6 +147,46 @@ pub enum ClientEvent {
     ClockSkew {
         /// The relay's clock minus ours, in milliseconds.
         skew_ms: i64,
+    },
+    /// This connection's id at the relay, which another device addresses this one by.
+    Connected {
+        /// The relay's id for this connection.
+        conn_id: String,
+    },
+    /// Another device's signed card arrived. See [`Action::Device`].
+    Device(KnownDevice),
+    /// A device to device message for the caller: a join request or its answer, or a newer kind.
+    Message {
+        /// What it is.
+        kind: MsgKind,
+        /// Its body.
+        body: Vec<u8>,
+    },
+    /// The account key was replaced by another device, and this device was given the new one.
+    Rekeyed {
+        /// The new account key.
+        secret: HandedSecret,
+        /// The device that replaced it.
+        by: [u8; 16],
+    },
+    /// The account key was replaced and this device left out: it was removed from the account.
+    RemovedBy {
+        /// The device that removed it.
+        by: [u8; 16],
+    },
+    /// The relay read a message sent with a token, so it has been forwarded to every device
+    /// connected at the time.
+    Sent {
+        /// The token it was sent with.
+        token: u64,
+    },
+    /// A message could not be sent: no keys, a device never seen, or a relay that does not
+    /// forward device messages.
+    NotSent {
+        /// The token it was sent with, when it had one.
+        token: Option<u64>,
+        /// Why, for a log line.
+        reason: String,
     },
 }
 
@@ -279,8 +345,7 @@ async fn converse(
     // Pings are numbered, so the answer to the one sent right after a copy can be told apart from
     // the answer to an earlier one. That answer is what confirms the copy reached the relay:
     // frames arrive in order, so the relay read the copy before the ping.
-    let mut pings: u64 = 0;
-    let mut confirming: Option<u64> = None;
+    let mut confirm = Confirm::default();
 
     loop {
         let ready = session.is_ready();
@@ -295,8 +360,7 @@ async fn converse(
                     vec![event],
                     on_event,
                     unconfirmed,
-                    &mut pings,
-                    &mut confirming,
+                    &mut confirm,
                 )
                 .await?;
             }
@@ -329,10 +393,22 @@ async fn converse(
                         return Ok(Disconnect::Close(code));
                     }
                     WsMessage::Pong(payload) => {
-                        if confirming.is_some_and(|n| payload.as_ref() == n.to_be_bytes()) {
-                            confirming = None;
+                        let Ok(number) = <[u8; 8]>::try_from(payload.as_ref()).map(u64::from_be_bytes) else {
+                            continue;
+                        };
+                        if confirm.copy == Some(number) {
+                            confirm.copy = None;
                             *unconfirmed = None;
                         }
+                        // Every message sent before this ping has been read too, frames being in
+                        // order, so every token up to it is reported.
+                        confirm.tokens.retain(|&(ping, token)| {
+                            let read = ping <= number;
+                            if read {
+                                on_event(ClientEvent::Sent { token });
+                            }
+                            !read
+                        });
                     }
                     // Protocol level pings are answered by the library. Binary frames are not part
                     // of v1, so they are ignored rather than treated as fatal.
@@ -351,16 +427,16 @@ async fn converse(
                 // One unconfirmed copy is tracked, the newest: a newer copy replaces it on every
                 // device's clipboard anyway, so once one is sent the older no longer matters.
                 // send_local only replaces it when this batch actually sends a copy.
-                send_local(socket, session, batch, on_event, unconfirmed, &mut pings, &mut confirming).await?;
+                send_local(socket, session, batch, on_event, unconfirmed, &mut confirm).await?;
             }
 
             _ = ping.tick() => {
                 if last_heard.elapsed() > SILENCE_LIMIT {
                     return Ok(Disconnect::Eof);
                 }
-                pings = pings.wrapping_add(1);
+                confirm.pings += 1;
                 socket
-                    .send(WsMessage::Ping(pings.to_be_bytes().to_vec().into()))
+                    .send(WsMessage::Ping(confirm.pings.to_be_bytes().to_vec().into()))
                     .await
                     .map_err(|e| Error::Transport(format!("{e}")))?;
             }
@@ -372,19 +448,35 @@ async fn converse(
     }
 }
 
-/// Sends local events, and asks the relay to confirm the copy among them.
+/// The numbered pings that confirm what the relay has read.
+#[derive(Default)]
+struct Confirm {
+    /// The number of the last ping sent. Never wraps in practice: one ping a second for the age
+    /// of the universe is short of it.
+    pings: u64,
+    /// The ping sent after the newest copy, until its answer arrives.
+    copy: Option<u64>,
+    /// Pings sent after messages that asked to be confirmed, with their tokens.
+    tokens: Vec<(u64, u64)>,
+}
+
+/// Sends local events, and asks the relay to confirm the copy and the messages among them.
 async fn send_local(
     socket: &mut Socket,
     session: &mut Session,
     events: Vec<LocalEvent>,
     on_event: &mut dyn FnMut(ClientEvent),
     unconfirmed: &mut Option<LocalEvent>,
-    pings: &mut u64,
-    confirming: &mut Option<u64>,
+    confirm: &mut Confirm,
 ) -> Result<()> {
     for event in events {
         let copy =
             matches!(event, LocalEvent::Text(_) | LocalEvent::Image(_)).then(|| event.clone());
+        let token = match &event {
+            LocalEvent::Message { token, .. } => *token,
+            LocalEvent::Rekey { token, .. } => Some(*token),
+            _ => None,
+        };
         let frames = frames_for(session, event, on_event)?;
         let sent_something = !frames.is_empty();
         for frame in frames {
@@ -393,14 +485,20 @@ async fn send_local(
                 .await
                 .map_err(|e| Error::Transport(format!("{e}")))?;
         }
-        if let (Some(copy), true) = (copy, sent_something) {
-            *pings = pings.wrapping_add(1);
-            socket
-                .send(WsMessage::Ping(pings.to_be_bytes().to_vec().into()))
-                .await
-                .map_err(|e| Error::Transport(format!("{e}")))?;
-            *confirming = Some(*pings);
+        if !sent_something || (copy.is_none() && token.is_none()) {
+            continue;
+        }
+        confirm.pings += 1;
+        socket
+            .send(WsMessage::Ping(confirm.pings.to_be_bytes().to_vec().into()))
+            .await
+            .map_err(|e| Error::Transport(format!("{e}")))?;
+        if let Some(copy) = copy {
+            confirm.copy = Some(confirm.pings);
             *unconfirmed = Some(copy);
+        }
+        if let Some(token) = token {
+            confirm.tokens.push((confirm.pings, token));
         }
     }
     Ok(())
@@ -420,14 +518,25 @@ async fn apply_action(
             .map_err(|e| Error::Transport(format!("{e}")))?,
         Action::AuthFailed(code) => return Ok(Some(Disconnect::AuthFailed(code))),
         Action::Authenticated {
+            conn_id,
             peers,
             has_retained,
             stored_at,
-        } => on_event(ClientEvent::Authenticated {
-            peers,
-            has_retained,
-            stored_at,
+        } => {
+            on_event(ClientEvent::Connected { conn_id });
+            on_event(ClientEvent::Authenticated {
+                peers,
+                has_retained,
+                stored_at,
+            });
+        }
+        Action::Device(device) => on_event(ClientEvent::Device(device)),
+        Action::Message { kind, body } => on_event(ClientEvent::Message {
+            kind,
+            body: body.to_vec(),
         }),
+        Action::Rekeyed { secret, by } => on_event(ClientEvent::Rekeyed { secret, by }),
+        Action::RemovedBy { by } => on_event(ClientEvent::RemovedBy { by }),
         Action::Clip {
             text,
             ts_ms,
@@ -495,9 +604,12 @@ fn coalesce(first: LocalEvent, local_rx: &mut mpsc::Receiver<LocalEvent>) -> Vec
     let mut newest_copy = None;
     let mut newest_info = None;
     let mut fetch = false;
+    // Device to device messages are not a clipboard: each one matters, in order.
+    let mut messages = Vec::new();
     let mut take = |event: LocalEvent| match event {
         LocalEvent::FetchRetained => fetch = true,
         LocalEvent::DeviceInfo(info) => newest_info = Some(LocalEvent::DeviceInfo(info)),
+        message @ (LocalEvent::Message { .. } | LocalEvent::Rekey { .. }) => messages.push(message),
         copy => newest_copy = Some(copy),
     };
     take(first);
@@ -506,6 +618,7 @@ fn coalesce(first: LocalEvent, local_rx: &mut mpsc::Receiver<LocalEvent>) -> Vec
     }
     newest_info
         .into_iter()
+        .chain(messages)
         .chain(newest_copy)
         .chain(fetch.then_some(LocalEvent::FetchRetained))
         .collect()
@@ -559,8 +672,44 @@ fn frames_for(
         // Stored whatever happens, so a name changed while offline is the one announced next.
         LocalEvent::DeviceInfo(info) => {
             session.set_device_info(info);
-            Ok(session.announce_frame(now_ms())?.into_iter().collect())
+            let now = now_ms();
+            Ok(session
+                .announce_frame(now)?
+                .into_iter()
+                .chain(session.card_frame(now)?)
+                .collect())
         }
+        LocalEvent::Message {
+            kind,
+            body,
+            to,
+            token,
+        } => match session.msg_frame(kind, &body, to) {
+            Ok(frame) => Ok(vec![frame]),
+            Err(err @ (Error::OutOfOrder(_) | Error::Unsupported(_))) => {
+                on_event(ClientEvent::NotSent {
+                    token,
+                    reason: err.to_string(),
+                });
+                Ok(Vec::new())
+            }
+            Err(other) => Err(other),
+        },
+        LocalEvent::Rekey {
+            keep,
+            secret,
+            token,
+        } => match session.rekey_frame(&keep, &secret.0, now_ms()) {
+            Ok(frame) => Ok(vec![frame]),
+            Err(err @ (Error::OutOfOrder(_) | Error::Unsupported(_))) => {
+                on_event(ClientEvent::NotSent {
+                    token: Some(token),
+                    reason: err.to_string(),
+                });
+                Ok(Vec::new())
+            }
+            Err(other) => Err(other),
+        },
     }
 }
 

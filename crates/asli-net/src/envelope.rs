@@ -85,6 +85,8 @@ pub enum Message {
     ClipEnd(ClipChunk),
     /// A sealed device announcement, in either direction. Forwarded, never retained.
     Announce(Announce),
+    /// A sealed device to device message, to the room or to one connection. Never retained.
+    Msg(Msg),
 }
 
 /// Every message type this version understands, as spelled on the wire.
@@ -104,6 +106,7 @@ const KNOWN_TYPES: &[&str] = &[
     "clip_chunk",
     "clip_end",
     "announce",
+    "msg",
 ];
 
 impl Message {
@@ -155,6 +158,7 @@ impl Message {
             Self::Error(m) => m.v,
             Self::ClipBegin(m) | Self::ClipChunk(m) | Self::ClipEnd(m) => m.v,
             Self::Announce(m) => m.v,
+            Self::Msg(m) => m.v,
         }
     }
 }
@@ -441,7 +445,32 @@ pub struct Pong {
     pub t: Option<u64>,
 }
 
-/// Non fatal error codes. A closed enum: the relay may not invent others.
+/// A sealed device to device message: a device card, a join request or answer, a new account key,
+/// or a piece of a file. Which one is inside the ciphertext, so the relay cannot tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Msg {
+    /// Protocol version.
+    pub v: u8,
+    /// Room id, which must match the authenticated room.
+    pub room: String,
+    /// Key epoch used to seal this message.
+    pub epoch: u32,
+    /// Client generated message id, 16 bytes.
+    #[serde(with = "b64")]
+    pub msg_id: Vec<u8>,
+    /// AEAD nonce, 24 bytes.
+    #[serde(with = "b64")]
+    pub n: Vec<u8>,
+    /// Ciphertext with the 16 byte tag appended.
+    #[serde(with = "b64")]
+    pub ct: Vec<u8>,
+    /// The one connection to deliver to, by the relay's id for it. Absent for the whole room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
+/// Non fatal error codes, as the relay sends them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
@@ -460,6 +489,12 @@ pub enum ErrorCode {
     NotAuthenticated,
     /// `fetch_last` was sent but the relay holds no retained clip.
     NoRetained,
+    /// A `msg` was addressed to a connection that is not in the room.
+    NoSuchPeer,
+    /// A code this version does not know. Kept rather than failing the frame, so a newer relay
+    /// can add codes without disconnecting older clients.
+    #[serde(other)]
+    Other,
 }
 
 impl ErrorCode {
@@ -474,6 +509,8 @@ impl ErrorCode {
             Self::UnknownType => "UNKNOWN_TYPE",
             Self::NotAuthenticated => "NOT_AUTHENTICATED",
             Self::NoRetained => "NO_RETAINED",
+            Self::NoSuchPeer => "NO_SUCH_PEER",
+            Self::Other => "OTHER",
         }
     }
 }

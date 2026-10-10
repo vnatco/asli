@@ -19,6 +19,8 @@ serde_json = "1"
 # binary fields, and data-encoding rejects non canonical padding by default, which is the behaviour
 # the spec requires.
 data-encoding = "2"
+# Wipes secrets handed between devices: a new account key, or one granted to a joining device.
+zeroize = "1"
 # The driver in session.rs is sans I/O, so async appears only in client.rs.
 # "sync" is what provides the mpsc channel the client uses to receive local clipboard events.
 tokio = { version = "1", features = ["rt", "time", "macros", "net", "sync"] }

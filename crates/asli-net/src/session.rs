@@ -7,19 +7,22 @@
 //!
 //! The caller supplies the current time, so tests are deterministic.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use asli_core::{EchoGuard, Incoming, ReplayGuard, ReplayMemory, Verdict};
 use asli_crypto::announce;
 use asli_crypto::chunk::{self, Assembly, ChunkPos};
 use asli_crypto::clip::{self, ContentType, Inner, DEVICE_ID_LEN, MSG_ID_LEN, NONCE_LEN, TAG_LEN};
-use asli_crypto::identity::ROOM_ID_LEN;
-use asli_crypto::Identity;
+use asli_crypto::device::{DeviceKeys, BOX_PUB_LEN};
+use asli_crypto::identity::{PUB_KEY_LEN, ROOM_ID_LEN};
+use asli_crypto::msg::{self, Card, Kind};
+use asli_crypto::{rekey, Identity};
+use zeroize::Zeroizing;
 
 use crate::envelope::{
     self, Announce, Auth, AuthFailCode, Clip, ClipChunk, ErrorCode, FetchLast, Hello, Limits,
-    Message, Pong, PROTOCOL_VERSION,
+    Message, Msg, Pong, PROTOCOL_VERSION,
 };
 use crate::error::{Error, Result};
 
@@ -54,6 +57,55 @@ pub struct PeerInfo {
 /// How many announcement message ids are remembered for dedup.
 const ANNOUNCE_SEEN_CAPACITY: usize = 64;
 
+/// What is known about whether a relay forwards a message type newer than the first release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// Nothing of that type has been sent on this connection.
+    Untried,
+    /// One has been sent and not refused.
+    Sent,
+    /// The relay answered `UNKNOWN_TYPE`. Nothing more of that type goes on this connection.
+    Refused,
+}
+
+/// How many device to device message ids are remembered for dedup.
+const MSG_SEEN_CAPACITY: usize = 256;
+
+/// Another device on the account, as its signed card described it.
+///
+/// The signing key is pinned: the first card seen for a device id fixes the key, and a later card
+/// naming another key for the same id is refused, so one device cannot take another's place in
+/// the list or speak in its name. Pins outlive a restart because the caller saves them and hands
+/// them back with [`Session::restore_known`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownDevice {
+    /// The device, the same id its clips carry.
+    pub device_id: [u8; DEVICE_ID_LEN],
+    /// The key its messages are signed with.
+    pub sign_pub: [u8; PUB_KEY_LEN],
+    /// The key a secret is sealed to for it.
+    pub box_pub: [u8; BOX_PUB_LEN],
+    /// The relay's id for its connection, while it is connected. Not saved: it changes with every
+    /// connection.
+    pub conn_id: Option<String>,
+    /// What the person calls it.
+    pub name: String,
+    /// Its operating system.
+    pub os: String,
+    /// When its last card was made, by its clock.
+    pub ts_ms: u64,
+}
+
+/// A secret handed over by another device, with a `Debug` that does not print it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HandedSecret(pub Zeroizing<[u8; 32]>);
+
+impl std::fmt::Debug for HandedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HandedSecret(..)")
+    }
+}
+
 /// How far the driver has progressed through the handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -71,6 +123,8 @@ pub enum Action {
     Send(String),
     /// The relay accepted us.
     Authenticated {
+        /// The relay's id for this connection, which other devices address this one by.
+        conn_id: String,
         /// Connections in the room, including this one. Never a device count.
         peers: u32,
         /// Whether a retained clip is available to fetch.
@@ -131,6 +185,28 @@ pub enum Action {
         /// that asked for the stored clip needs to know to report that nothing came of it.
         retained: bool,
     },
+    /// Another device's signed card arrived and matched the key pinned for it, or pinned one.
+    Device(KnownDevice),
+    /// A device to device message this session does not act on itself: a join request or its
+    /// answer, in a meeting room, or a kind added after this version.
+    Message {
+        /// What it is.
+        kind: Kind,
+        /// Its body, opened and unchecked beyond that.
+        body: Zeroizing<Vec<u8>>,
+    },
+    /// Another device on the account replaced the account key and gave this one the new key.
+    Rekeyed {
+        /// The new account key.
+        secret: HandedSecret,
+        /// The device that made it.
+        by: [u8; DEVICE_ID_LEN],
+    },
+    /// Another device replaced the account key and left this one out: it was removed.
+    RemovedBy {
+        /// The device that removed it.
+        by: [u8; DEVICE_ID_LEN],
+    },
     /// This device's clock disagrees with the relay's by more than [`CLOCK_SKEW_WARN_MS`].
     ///
     /// Clips are judged by their capture time, so a device whose clock is off by more than the
@@ -182,17 +258,24 @@ pub struct Session {
     assembly: Option<Assembly>,
     /// What this device announces. Nothing is announced until it is set.
     device_info: Option<DeviceInfo>,
-    /// Whether the relay on this connection is known not to forward announcements.
+    /// Whether this connection's relay forwards announcements, as far as is known.
     ///
     /// A relay from before announcements answers one with `UNKNOWN_TYPE` and keeps the connection,
     /// so the first such answer settles it, and nothing more is announced until the next
     /// connection, which may be to a relay that has since been updated.
-    announce_refused: bool,
-    /// Whether an announcement went out on this connection, which is what makes an
-    /// `UNKNOWN_TYPE` answer mean the relay does not know announcements.
-    announced: bool,
+    announce_probe: Probe,
     /// Message ids of recent announcements, so a replayed one is not reported twice.
     announce_seen: VecDeque<[u8; MSG_ID_LEN]>,
+    /// This device's own keys. Without them no card is sent and no new account key is opened.
+    device_keys: Option<DeviceKeys>,
+    /// The relay's id for this connection, from `auth_ok`, which this device's card carries.
+    conn_id: Option<String>,
+    /// Devices seen on this account, each pinned to its signing key.
+    known: HashMap<[u8; DEVICE_ID_LEN], KnownDevice>,
+    /// Whether this connection's relay forwards `msg`, as far as is known.
+    msg_probe: Probe,
+    /// Message ids of recent device to device messages, so a replayed one is acted on once.
+    msg_seen: VecDeque<[u8; MSG_ID_LEN]>,
 }
 
 impl Session {
@@ -219,10 +302,163 @@ impl Session {
             echo_guard: true,
             resend: None,
             device_info: None,
-            announce_refused: false,
-            announced: false,
+            announce_probe: Probe::Untried,
             announce_seen: VecDeque::new(),
+            device_keys: None,
+            conn_id: None,
+            known: HashMap::new(),
+            msg_probe: Probe::Untried,
+            msg_seen: VecDeque::new(),
         }
+    }
+
+    /// Gives this session the device's own keys, so it sends a signed card and can open a new
+    /// account key sealed to this device.
+    pub fn set_device_keys(&mut self, keys: DeviceKeys) {
+        self.device_keys = Some(keys);
+    }
+
+    /// Takes back the devices seen in an earlier run, with the keys they were pinned to, so a
+    /// card naming another key for one of them is refused from the first.
+    pub fn restore_known(&mut self, devices: Vec<KnownDevice>) {
+        for mut device in devices {
+            device.conn_id = None;
+            self.known.insert(device.device_id, device);
+        }
+    }
+
+    /// Every device seen on this account, with the keys pinned for it.
+    #[must_use]
+    pub fn known_devices(&self) -> Vec<KnownDevice> {
+        self.known.values().cloned().collect()
+    }
+
+    /// The relay's id for this connection, once authenticated.
+    #[must_use]
+    pub fn conn_id(&self) -> Option<&str> {
+        self.conn_id.as_deref()
+    }
+
+    /// Whether the relay on this connection forwards device to device messages.
+    #[must_use]
+    pub const fn relay_forwards_messages(&self) -> bool {
+        !matches!(self.msg_probe, Probe::Refused)
+    }
+
+    /// Seals a device to device message, for the whole room or, with `to`, one connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::OutOfOrder`] before the handshake completes, [`Error::Unsupported`] when
+    /// this relay is known not to forward messages, and a sealing error if sealing fails.
+    pub fn msg_frame(&mut self, kind: Kind, body: &[u8], to: Option<String>) -> Result<String> {
+        if self.phase != Phase::Ready {
+            return Err(Error::OutOfOrder("msg before auth_ok"));
+        }
+        if self.msg_probe == Probe::Refused {
+            return Err(Error::Unsupported(
+                "this relay does not forward device messages",
+            ));
+        }
+        let msg_id: [u8; MSG_ID_LEN] = asli_crypto::random::bytes()?;
+        let sealed = msg::seal(
+            &self.identity.enc_key(self.epoch),
+            self.epoch,
+            &self.identity.room_id_bytes(),
+            &msg_id,
+            kind,
+            body,
+        )?;
+        self.msg_probe = Probe::Sent;
+        Message::Msg(Msg {
+            v: PROTOCOL_VERSION,
+            room: self.identity.room_id(),
+            epoch: self.epoch,
+            msg_id: msg_id.to_vec(),
+            n: sealed.nonce.to_vec(),
+            ct: sealed.ciphertext,
+            to,
+        })
+        .to_frame()
+    }
+
+    /// This device's signed card, or nothing when it has no keys yet, the handshake has not
+    /// finished, or the relay does not forward messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if randomness or sealing fails.
+    pub fn card_frame(&mut self, now_ms: u64) -> Result<Option<String>> {
+        if self.phase != Phase::Ready || self.msg_probe == Probe::Refused {
+            return Ok(None);
+        }
+        let (Some(keys), Some(conn_id)) = (&self.device_keys, &self.conn_id) else {
+            return Ok(None);
+        };
+        let (name, os) = self
+            .device_info
+            .as_ref()
+            .map(|info| (info.name.clone(), info.os.clone()))
+            .unwrap_or_default();
+        let body = Card {
+            device_id: self.device_id,
+            sign_pub: keys.sign_pub(),
+            box_pub: keys.box_pub(),
+            ts_ms: now_ms,
+            conn_id: conn_id.clone(),
+            name,
+            os,
+        }
+        .encode(keys, &self.identity.room_id_bytes())?;
+        self.msg_frame(Kind::Card, &body, None).map(Some)
+    }
+
+    /// A new account key for the devices named, sealed to each, signed by this device.
+    ///
+    /// Every device named must have been seen with a card, which is where its sealing key comes
+    /// from. The caller switches to the new key itself, once the relay has read this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] without device keys or for a device never seen, and the
+    /// errors of [`Session::msg_frame`].
+    pub fn rekey_frame(
+        &mut self,
+        keep: &[[u8; DEVICE_ID_LEN]],
+        new_secret: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<String> {
+        let Some(keys) = &self.device_keys else {
+            return Err(Error::Unsupported("this device has no keys of its own yet"));
+        };
+        let mut recipients = Vec::with_capacity(keep.len());
+        for id in keep {
+            let device = self
+                .known
+                .get(id)
+                .ok_or(Error::Unsupported("a device to keep has never been seen"))?;
+            recipients.push(rekey::Recipient {
+                device_id: *id,
+                box_pub: device.box_pub,
+            });
+        }
+        let body = rekey::bundle(
+            keys,
+            &self.device_id,
+            &self.identity.room_id_bytes(),
+            now_ms,
+            &recipients,
+            new_secret,
+        )?;
+        self.msg_frame(Kind::Rekey, &body, None)
+    }
+
+    /// Appends this device's card to `actions`, when there is one to send.
+    fn push_card(&mut self, actions: &mut Vec<Action>, now_ms: u64) -> Result<()> {
+        if let Some(frame) = self.card_frame(now_ms)? {
+            actions.push(Action::Send(frame));
+        }
+        Ok(())
     }
 
     /// Sets what this device announces, shortening an over long name or system to fit.
@@ -246,7 +482,7 @@ impl Session {
     ///
     /// Returns an error only if randomness or sealing fails.
     pub fn announce_frame(&mut self, now_ms: u64) -> Result<Option<String>> {
-        if self.phase != Phase::Ready || self.announce_refused {
+        if self.phase != Phase::Ready || self.announce_probe == Probe::Refused {
             return Ok(None);
         }
         let Some(info) = &self.device_info else {
@@ -266,7 +502,7 @@ impl Session {
                 os: info.os.clone(),
             },
         )?;
-        self.announced = true;
+        self.announce_probe = Probe::Sent;
 
         Ok(Some(
             Message::Announce(Announce {
@@ -371,9 +607,10 @@ impl Session {
         self.phase = Phase::HelloSent;
         // A new connection. Half an image from the one before can never be finished now.
         self.assembly = None;
-        // And possibly a different relay, so whether it forwards announcements is found out again.
-        self.announce_refused = false;
-        self.announced = false;
+        // And possibly a different relay, so whether it forwards announcements and messages is
+        // found out again.
+        self.announce_probe = Probe::Untried;
+        self.msg_probe = Probe::Untried;
         Message::Hello(Hello {
             v: PROTOCOL_VERSION,
             suites: vec![asli_crypto::SUITE.to_owned()],
@@ -418,7 +655,9 @@ impl Session {
             Message::AuthOk(ok) => {
                 self.phase = Phase::Ready;
                 self.peers = ok.peers;
+                self.conn_id = Some(ok.conn_id.clone());
                 let mut actions = vec![Action::Authenticated {
+                    conn_id: ok.conn_id.clone(),
                     peers: ok.peers,
                     has_retained: ok.has_retained,
                     stored_at: ok.stored_at,
@@ -426,6 +665,7 @@ impl Session {
                 // Introduce ourselves to whoever is already in the room. They answer when the
                 // presence count they see changes, which is how this device learns about them.
                 self.push_announce(&mut actions, now_ms)?;
+                self.push_card(&mut actions, now_ms)?;
                 Ok(actions)
             }
             Message::AuthFail(fail) => Ok(vec![Action::AuthFailed(fail.code)]),
@@ -444,10 +684,12 @@ impl Session {
                 // stays silent.
                 if changed {
                     self.push_announce(&mut actions, now_ms)?;
+                    self.push_card(&mut actions, now_ms)?;
                 }
                 Ok(actions)
             }
             Message::Announce(announce) => self.on_announce(&announce, now_ms),
+            Message::Msg(message) => self.on_msg(&message, now_ms),
             Message::Ping(ping) => Ok(vec![Action::Send(
                 Message::Pong(Pong {
                     v: PROTOCOL_VERSION,
@@ -460,8 +702,19 @@ impl Session {
             // only type this client ever sends that a conforming relay could fail to know is
             // `announce`, so this is that answer, and it is ours to absorb rather than a problem
             // to show anyone.
-            Message::Error(err) if err.code == ErrorCode::UnknownType && self.announced => {
-                self.announce_refused = true;
+            // `msg` is newer than `announce`, so a relay that knows neither answers both, and one
+            // that knows only `announce` answers `msg`. Either way the first answer after a `msg`
+            // went out settles that this relay does not forward messages.
+            Message::Error(err)
+                if err.code == ErrorCode::UnknownType && self.msg_probe == Probe::Sent =>
+            {
+                self.msg_probe = Probe::Refused;
+                Ok(Vec::new())
+            }
+            Message::Error(err)
+                if err.code == ErrorCode::UnknownType && self.announce_probe == Probe::Sent =>
+            {
+                self.announce_probe = Probe::Refused;
                 Ok(Vec::new())
             }
             Message::Error(err) => Ok(vec![Action::RelayError {
@@ -598,6 +851,113 @@ impl Session {
             retained,
             device_id: inner.device_id,
         }])
+    }
+
+    fn on_msg(&mut self, message: &Msg, now_ms: u64) -> Result<Vec<Action>> {
+        if self.phase != Phase::Ready {
+            return Err(Error::OutOfOrder("msg before auth_ok"));
+        }
+        let msg_id: [u8; MSG_ID_LEN] = envelope::fixed("msg_id", &message.msg_id)?;
+        let nonce: [u8; NONCE_LEN] = envelope::fixed("n", &message.n)?;
+        if message.ct.len() <= TAG_LEN {
+            return Err(Error::FieldLength {
+                field: "ct",
+                expected: TAG_LEN + 1,
+                got: message.ct.len(),
+            });
+        }
+
+        // From here every failure is a discard. Nothing is sent back, so the relay learns nothing
+        // from how a device reacts.
+        if message.room != self.identity.room_id() || !self.epoch_is_acceptable(message.epoch) {
+            return Ok(Vec::new());
+        }
+        if self.msg_seen.contains(&msg_id) {
+            return Ok(Vec::new());
+        }
+        let Ok((kind, body)) = msg::open(
+            &self.identity.enc_key(message.epoch),
+            message.epoch,
+            &self.identity.room_id_bytes(),
+            &msg_id,
+            &nonce,
+            &message.ct,
+        ) else {
+            return Ok(dropped("msg_open_failed", false));
+        };
+        if self.msg_seen.len() >= MSG_SEEN_CAPACITY {
+            self.msg_seen.pop_front();
+        }
+        self.msg_seen.push_back(msg_id);
+
+        match kind {
+            Kind::Card => Ok(self.on_card(&body, now_ms)),
+            Kind::Rekey => Ok(self.on_rekey(&body, now_ms)),
+            other => Ok(vec![Action::Message { kind: other, body }]),
+        }
+    }
+
+    fn fresh(now_ms: u64, ts_ms: u64) -> bool {
+        now_ms.saturating_sub(ts_ms) <= asli_core::replay::DEFAULT_MAX_AGE_MS
+            && ts_ms.saturating_sub(now_ms) <= asli_core::replay::DEFAULT_FUTURE_SKEW_MS
+    }
+
+    fn on_card(&mut self, body: &[u8], now_ms: u64) -> Vec<Action> {
+        let Ok(card) = Card::decode(body, &self.identity.room_id_bytes()) else {
+            return dropped("card_invalid", false);
+        };
+        if card.device_id == self.device_id || !Self::fresh(now_ms, card.ts_ms) {
+            return Vec::new();
+        }
+        if let Some(pinned) = self.known.get(&card.device_id) {
+            if pinned.sign_pub != card.sign_pub {
+                return dropped("card_key_changed", false);
+            }
+            // An older card arriving late says nothing new.
+            if card.ts_ms < pinned.ts_ms {
+                return Vec::new();
+            }
+        }
+        let device = KnownDevice {
+            device_id: card.device_id,
+            sign_pub: card.sign_pub,
+            box_pub: card.box_pub,
+            conn_id: Some(card.conn_id),
+            name: card.name,
+            os: card.os,
+            ts_ms: card.ts_ms,
+        };
+        self.known.insert(device.device_id, device.clone());
+        vec![Action::Device(device)]
+    }
+
+    fn on_rekey(&mut self, body: &[u8], now_ms: u64) -> Vec<Action> {
+        let Some(keys) = &self.device_keys else {
+            return Vec::new();
+        };
+        let Ok(from) = rekey::sender(body) else {
+            return dropped("rekey_invalid", false);
+        };
+        // Only a device this one already knows can move the account, checked against the key its
+        // card pinned. The relay, or anyone else holding the old key, cannot.
+        let Some(pinned) = self.known.get(&from) else {
+            return dropped("rekey_unknown_sender", false);
+        };
+        match rekey::open(
+            keys,
+            &self.device_id,
+            &self.identity.room_id_bytes(),
+            &pinned.sign_pub,
+            body,
+        ) {
+            Ok(Some(rekeyed)) if Self::fresh(now_ms, rekeyed.ts_ms) => vec![Action::Rekeyed {
+                secret: HandedSecret(rekeyed.secret),
+                by: from,
+            }],
+            Ok(None) => vec![Action::RemovedBy { by: from }],
+            Ok(Some(_)) => dropped("rekey_stale", false),
+            Err(_) => dropped("rekey_invalid", false),
+        }
     }
 
     fn on_announce(&mut self, message: &Announce, now_ms: u64) -> Result<Vec<Action>> {
@@ -1101,6 +1461,169 @@ mod tests {
         assert!(matches!(actions[0], Action::Authenticated { .. }));
         assert!(session.is_ready());
         (session, transport)
+    }
+
+    /// A ready session with device keys, whose card has already gone out.
+    fn keyed_session(device_id: [u8; 16], key_byte: u8) -> (Session, FakeTransport) {
+        let mut session = Session::new(Identity::from_secret(&SECRET), device_id, 0);
+        session.set_device_keys(DeviceKeys::from_secret(&[key_byte; 32]));
+        session.set_device_info(DeviceInfo {
+            name: format!("device {key_byte}"),
+            os: "Linux".to_owned(),
+        });
+        let mut transport = FakeTransport::default();
+        let hello = session.hello_frame().expect("hello");
+        transport.send_text(&hello).expect("send");
+        transport.deliver(challenge_frame(&[9u8; 32]));
+        transport.deliver(auth_ok_frame());
+        pump(&mut session, &mut transport, NOW).expect("handshake");
+        (session, transport)
+    }
+
+    /// The card frame a keyed session sent after authenticating.
+    fn sent_card(transport: &FakeTransport) -> String {
+        transport
+            .sent
+            .iter()
+            .find(|frame| frame.contains(r#""type":"msg""#))
+            .expect("a card was sent")
+            .clone()
+    }
+
+    #[test]
+    fn a_device_with_keys_sends_a_signed_card_and_the_other_pins_it() {
+        let (_a, a_out) = keyed_session(DEVICE_A, 1);
+        let (mut b, _) = keyed_session(DEVICE_B, 2);
+
+        let actions = b.handle_frame(&sent_card(&a_out), NOW).expect("card");
+        let Some(Action::Device(device)) = actions.first() else {
+            panic!("expected a device, got {actions:?}");
+        };
+        assert_eq!(device.device_id, DEVICE_A);
+        assert_eq!(
+            device.sign_pub,
+            DeviceKeys::from_secret(&[1u8; 32]).sign_pub()
+        );
+        assert_eq!(device.name, "device 1");
+        assert_eq!(device.conn_id.as_deref(), Some("c_1"));
+        assert_eq!(b.known_devices().len(), 1);
+    }
+
+    #[test]
+    fn a_card_naming_a_new_key_for_a_known_device_is_refused() {
+        let (_a, a_out) = keyed_session(DEVICE_A, 1);
+        let (mut b, _) = keyed_session(DEVICE_B, 2);
+        // b already knows device A under another key, from an earlier run.
+        b.restore_known(vec![KnownDevice {
+            device_id: DEVICE_A,
+            sign_pub: DeviceKeys::from_secret(&[7u8; 32]).sign_pub(),
+            box_pub: DeviceKeys::from_secret(&[7u8; 32]).box_pub(),
+            conn_id: None,
+            name: "the real A".to_owned(),
+            os: "Linux".to_owned(),
+            ts_ms: NOW - 1,
+        }]);
+        let actions = b.handle_frame(&sent_card(&a_out), NOW).expect("card");
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Dropped {
+                reason: "card_key_changed",
+                ..
+            }]
+        ));
+        assert_eq!(b.known_devices()[0].name, "the real A", "the pin stands");
+    }
+
+    #[test]
+    fn a_rekey_reaches_the_devices_kept_and_tells_the_removed_one() {
+        let (_a, a_out) = keyed_session(DEVICE_A, 1);
+        let (mut b, b_out) = keyed_session(DEVICE_B, 2);
+        let device_c = [0xcc; 16];
+        let (mut c, c_out) = keyed_session(device_c, 3);
+
+        // A learns both cards, then removes C, keeping B.
+        let (mut a, _) = keyed_session(DEVICE_A, 1);
+        a.handle_frame(&sent_card(&b_out), NOW).expect("b card");
+        a.handle_frame(&sent_card(&c_out), NOW).expect("c card");
+        b.handle_frame(&sent_card(&a_out), NOW).expect("a card");
+        c.handle_frame(&sent_card(&a_out), NOW).expect("a card");
+
+        let new_secret = [99u8; 32];
+        let frame = a.rekey_frame(&[DEVICE_B], &new_secret, NOW).expect("rekey");
+
+        let got = b.handle_frame(&frame, NOW).expect("rekey at b");
+        let [Action::Rekeyed { secret, by }] = got.as_slice() else {
+            panic!("expected the new key, got {got:?}");
+        };
+        assert_eq!(*secret.0, new_secret);
+        assert_eq!(*by, DEVICE_A);
+
+        let got = c.handle_frame(&frame, NOW).expect("rekey at c");
+        assert!(matches!(got.as_slice(), [Action::RemovedBy { by }] if *by == DEVICE_A));
+        assert_eq!(
+            format!("{:?}", HandedSecret(Zeroizing::new([1u8; 32]))),
+            "HandedSecret(..)"
+        );
+    }
+
+    #[test]
+    fn a_rekey_from_a_device_never_seen_moves_nobody() {
+        let (mut stranger, _) = keyed_session([0xee; 16], 9);
+        let (mut b, b_out) = keyed_session(DEVICE_B, 2);
+        stranger
+            .handle_frame(&sent_card(&b_out), NOW)
+            .expect("b card");
+        let frame = stranger
+            .rekey_frame(&[DEVICE_B], &[1u8; 32], NOW)
+            .expect("rekey");
+        let got = b.handle_frame(&frame, NOW).expect("rekey at b");
+        assert!(matches!(
+            got.as_slice(),
+            [Action::Dropped {
+                reason: "rekey_unknown_sender",
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_join_message_is_handed_up_unopened_and_a_replay_is_not() {
+        let (mut a, _) = keyed_session(DEVICE_A, 1);
+        let (mut b, _) = keyed_session(DEVICE_B, 2);
+        let frame = a.msg_frame(Kind::JoinRequest, b"body", None).expect("msg");
+        let got = b.handle_frame(&frame, NOW).expect("msg");
+        assert!(matches!(
+            got.as_slice(),
+            [Action::Message { kind: Kind::JoinRequest, body }] if body.as_slice() == b"body"
+        ));
+        assert!(b.handle_frame(&frame, NOW).expect("again").is_empty());
+    }
+
+    #[test]
+    fn a_relay_that_does_not_know_msg_is_remembered_and_absorbed() {
+        let (mut a, _) = keyed_session(DEVICE_A, 1);
+        let err = r#"{"v":1,"type":"error","code":"UNKNOWN_TYPE"}"#;
+        assert!(a.handle_frame(err, NOW).expect("absorbed").is_empty());
+        assert!(!a.relay_forwards_messages());
+        assert!(a.card_frame(NOW).expect("no error").is_none());
+        assert!(matches!(
+            a.msg_frame(Kind::JoinRequest, b"x", None),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn an_error_code_this_version_does_not_know_does_not_break_the_connection() {
+        let (mut a, _) = ready_session(DEVICE_A);
+        let err = r#"{"v":1,"type":"error","code":"SOMETHING_NEW"}"#;
+        let got = a.handle_frame(err, NOW).expect("parsed");
+        assert!(matches!(
+            got.as_slice(),
+            [Action::RelayError {
+                code: ErrorCode::Other,
+                ..
+            }]
+        ));
     }
 
     #[test]
