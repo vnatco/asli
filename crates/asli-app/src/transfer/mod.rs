@@ -29,6 +29,7 @@ use zeroize::Zeroizing;
 use crate::clipboard_io::log_line;
 use crate::devices::DevicesHandle;
 
+mod about;
 mod shelf;
 pub use shelf::{Shelved, KEEP_FOR_MS};
 
@@ -246,8 +247,9 @@ impl Transfers {
             link.conn_id = Some(conn_id.to_owned());
         }
         fail_all_live(&mut state, "the connection dropped. Try again.");
-        // Tells the others what is on this shelf, and asks what is on theirs.
+        // Tells the others what is on this shelf and which Asli this is, and asks the same of them.
         shelf::announce(&state, true, None);
+        about::announce(&state, true, None);
     }
 
     /// Carries on any transfer the pace held back, and gives up on any that stopped moving.
@@ -808,6 +810,7 @@ impl Transfers {
             MsgKind::FileAck => on_ack(&mut state, body),
             MsgKind::FileCancel => on_cancel(&mut state, body),
             MsgKind::ShelfList => shelf::on_list(&mut state, body),
+            MsgKind::About => about::on_about(&state, body),
             MsgKind::ShelfRequest => {
                 if let Some((path, to, id)) = shelf::on_request(&mut state, body) {
                     then = Then::Send(path, to, id);

@@ -219,6 +219,21 @@ fn main() {
             }),
         ),
         (
+            "08h-status-update",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_update_note("MacBook Pro runs build 131; this device runs build 129. Update Asli here to keep up.".into());
+            }),
+        ),
+        (
+            "08i-status-drop-old",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_drop_name("holiday-photos.zip".into());
+                ui.set_drop_note("DESKTOP-CVM6TIQ, Mariami's MacBook Air run an older Asli that cannot receive files: update them first.".into());
+            }),
+        ),
+        (
             "14b-shelf-empty",
             Box::new(|ui: &AppWindow| ui.set_screen(Screen::Shelf)),
         ),
@@ -383,6 +398,8 @@ fn sample(ui: &AppWindow) {
             this_device: true,
             removable: false,
             can_send: false,
+            version: "0.1.0 (build 129)".into(),
+            outdated: false,
         },
         DeviceRow {
             name: "MacBook Pro".into(),
@@ -393,6 +410,8 @@ fn sample(ui: &AppWindow) {
             this_device: false,
             removable: true,
             can_send: true,
+            version: "0.1.0 (build 131)".into(),
+            outdated: false,
         },
         DeviceRow {
             name: "fedora-desk".into(),
@@ -403,6 +422,8 @@ fn sample(ui: &AppWindow) {
             this_device: false,
             removable: true,
             can_send: false,
+            version: "0.1.0 (build 118)".into(),
+            outdated: true,
         },
     ])));
     let row = |preview: &str, meta: &str, image: bool, mono: bool| HistoryRow {

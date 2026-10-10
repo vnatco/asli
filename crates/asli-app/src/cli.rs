@@ -334,6 +334,8 @@ fn known_devices(paths: &Paths) -> Result<Vec<crate::devices::Listed>> {
         online: false,
         this_device: true,
         keyed: keys.device.is_some(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        build: crate::build_number(),
     }))
 }
 
@@ -350,11 +352,17 @@ fn devices(paths: &Paths) -> Result<()> {
         } else {
             "  (older Asli, no device key)"
         };
+        let version = if device.version.is_empty() {
+            "unknown".to_owned()
+        } else {
+            crate::describe_build(&device.version, device.build)
+        };
         println!(
-            "{}  {:<24} {:<18} {seen}{note}",
+            "{}  {:<24} {:<18} {:<18} {seen}{note}",
             &device.id[..12.min(device.id.len())],
             device.name,
-            device.os
+            device.os,
+            version
         );
     }
     Ok(())
@@ -686,6 +694,7 @@ fn status(paths: &Paths) -> Result<()> {
     println!("Config:        {}", paths.config_file().display());
     println!("Relay:         {}", config.relay_url);
     println!("Device id:     {}", config.device_id);
+    println!("Asli:          {}", crate::build_label());
     println!("Size cap:      {} bytes", config.max_content_bytes);
     println!(
         "History:       {}",

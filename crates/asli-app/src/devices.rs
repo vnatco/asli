@@ -70,6 +70,17 @@ pub struct Device {
     pub os: String,
     /// When it last announced itself, in milliseconds since the Unix epoch.
     pub last_seen_ms: u64,
+    /// The version of Asli it said it runs, empty until it has said.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// Its build number. Higher is newer; 0 until it has said.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub build: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// What is on disk.
@@ -98,6 +109,10 @@ pub struct Listed {
     pub this_device: bool,
     /// Whether it has sent a signed card, so a new account key can be sealed to it.
     pub keyed: bool,
+    /// The version of Asli it runs, empty when it has not said.
+    pub version: String,
+    /// Its build number, 0 when it has not said.
+    pub build: u32,
 }
 
 /// The shared list: the daemon writes it, the window reads it.
@@ -144,11 +159,18 @@ impl DevicesHandle {
         };
         let id = hex(device_id);
         // An unsigned announcement never clears keys a signed card pinned.
-        let (sign_pub, box_pub) = registry
+        let (sign_pub, box_pub, version, build) = registry
             .stored
             .devices
             .get(&id)
-            .map(|known| (known.sign_pub.clone(), known.box_pub.clone()))
+            .map(|known| {
+                (
+                    known.sign_pub.clone(),
+                    known.box_pub.clone(),
+                    known.version.clone(),
+                    known.build,
+                )
+            })
             .unwrap_or_default();
         let device = Device {
             sign_pub,
@@ -156,6 +178,8 @@ impl DevicesHandle {
             name: name.to_owned(),
             os: os.to_owned(),
             last_seen_ms: now_ms,
+            version,
+            build,
         };
         let changed = registry
             .stored
@@ -180,12 +204,20 @@ impl DevicesHandle {
         if let Some(conn) = &card.conn_id {
             registry.conns.insert(id.clone(), conn.clone());
         }
+        let (version, build) = registry
+            .stored
+            .devices
+            .get(&id)
+            .map(|d| (d.version.clone(), d.build))
+            .unwrap_or_default();
         let device = Device {
             sign_pub: hex(&card.sign_pub),
             box_pub: hex(&card.box_pub),
             name: card.name.clone(),
             os: card.os.clone(),
             last_seen_ms: now_ms,
+            version,
+            build,
         };
         let changed = registry.stored.devices.get(&id)
             != Some(&Device {
@@ -201,6 +233,22 @@ impl DevicesHandle {
         if changed {
             registry.save();
         }
+    }
+
+    /// Records which Asli a known device said it runs.
+    pub fn heard_version(&self, device_id: &[u8; 16], version: &str, build: u32) {
+        let Ok(mut registry) = self.0.lock() else {
+            return;
+        };
+        let Some(device) = registry.stored.devices.get_mut(&hex(device_id)) else {
+            return;
+        };
+        if device.version == version && device.build == build {
+            return;
+        }
+        version.clone_into(&mut device.version);
+        device.build = build;
+        registry.save();
     }
 
     /// The device's connection at the relay right now, if it is connected and has said.
@@ -349,6 +397,8 @@ impl DevicesHandle {
                 online: registry.connected && device.last_seen_ms >= registry.last_departure_ms,
                 this_device: false,
                 keyed: !device.box_pub.is_empty(),
+                version: device.version.clone(),
+                build: device.build,
             })
             .collect();
         others.sort_by(|a, b| {
@@ -557,6 +607,8 @@ mod tests {
             online: true,
             this_device: true,
             keyed: true,
+            version: "0.1.0".to_owned(),
+            build: 0,
         }
     }
 

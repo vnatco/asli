@@ -34,6 +34,28 @@
 
 #![forbid(unsafe_code)]
 
+/// This build's number: how many commits its source had. Higher is newer; 0 is unknown.
+#[must_use]
+pub fn build_number() -> u32 {
+    env!("ASLI_BUILD").parse().unwrap_or(0)
+}
+
+/// This build, as a person reads it: the version, and the build number when there is one.
+#[must_use]
+pub fn build_label() -> String {
+    describe_build(env!("CARGO_PKG_VERSION"), build_number())
+}
+
+/// A version and build number as a person reads them.
+#[must_use]
+pub fn describe_build(version: &str, build: u32) -> String {
+    if build == 0 {
+        version.to_owned()
+    } else {
+        format!("{version} (build {build})")
+    }
+}
+
 pub mod autostart;
 pub mod cli;
 pub mod clipboard_io;

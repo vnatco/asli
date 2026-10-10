@@ -59,6 +59,10 @@ export struct DeviceRow {
     removable: bool,
     // Whether a file can be sent to it now: removable, and connected.
     can-send: bool,
+    // Which Asli it runs, or that it is too old to say.
+    version: string,
+    // Whether it runs an older Asli than the newest on the account.
+    outdated: bool,
 }
 
 // A file on its way to or from this device.
@@ -503,6 +507,8 @@ export component AppWindow inherits Window {
     in property <string> drop-name: "";
     in property <[string]> drop-targets: [];
     in property <bool> drop-hover: false;
+    in property <string> update-note: "";
+    in property <string> drop-note: "";
     in property <[ShelfRow]> shelf-mine: [];
     in property <[ShelfRow]> shelf-theirs: [];
 
@@ -1890,11 +1896,19 @@ export component AppWindow inherits Window {
                                                 Text {
                                                     text: root.drop-targets.length > 0
                                                         ? "Send " + root.drop-name + " to"
-                                                        : "Put " + root.drop-name + " on the shelf?";
+                                                        : "No device can receive " + root.drop-name + " right now";
                                                     color: Theme.text;
                                                     font-size: 13.5px;
                                                     font-weight: 600;
                                                     overflow: elide;
+                                                }
+                                                if root.drop-note != "": VerticalLayout {
+                                                    padding-top: 6px;
+                                                    Caption {
+                                                        text: root.drop-note + (root.drop-targets.length == 0 ? " You can put it on the shelf for them to fetch later." : "");
+                                                        color: Theme.text-2;
+                                                        wrap: word-wrap;
+                                                    }
                                                 }
                                                 Rectangle { height: 10px; }
                                                 HorizontalLayout {
@@ -1927,6 +1941,16 @@ export component AppWindow inherits Window {
                                         Banner {
                                             kind: BannerKind.error;
                                             title: root.rekey-note;
+                                        }
+                                    }
+
+                                    // Another device on the account runs a newer Asli than this one.
+                                    if root.update-note != "": VerticalLayout {
+                                        padding-bottom: 14px;
+                                        Banner {
+                                            kind: BannerKind.warning;
+                                            title: "This device is not on the latest Asli";
+                                            body: root.update-note;
                                         }
                                     }
 
@@ -2248,6 +2272,13 @@ export component AppWindow inherits Window {
                                                                 font-size: 11.5px;
                                                                 font-family: Theme.mono;
                                                                 vertical-alignment: center;
+                                                            }
+                                                            if device.version != "": Text {
+                                                                text: "  ·  " + device.version;
+                                                                color: device.outdated ? Theme.warning : Theme.text-3;
+                                                                font-size: 11.5px;
+                                                                vertical-alignment: center;
+                                                                overflow: elide;
                                                             }
                                                         }
                                                     }

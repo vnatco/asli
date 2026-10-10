@@ -1433,6 +1433,8 @@ fn refresh_status(window: &AppWindow) {
         online: connected,
         this_device: true,
         keyed: true,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        build: crate::build_number(),
     };
     let listed = context.controls.devices.list(&this);
     DEVICE_ROWS.with_borrow_mut(|rows| rows.clone_from(&listed));
@@ -1445,9 +1447,18 @@ fn refresh_status(window: &AppWindow) {
         window.set_confirm_title(String::new().into());
     }
     window.set_rekey_note(REKEY_NOTE.with_borrow(Clone::clone).into());
+    window.set_update_note(update_note(&listed).into());
+    let newest = listed.iter().map(|d| d.build).max().unwrap_or(0);
     let rows: Vec<DeviceRow> = listed
         .into_iter()
         .map(|device| DeviceRow {
+            version: if device.version.is_empty() {
+                "older Asli".to_owned()
+            } else {
+                crate::describe_build(&device.version, device.build)
+            }
+            .into(),
+            outdated: device.build < newest,
             can_send: !device.this_device && device.keyed && device.online,
             removable: !device.this_device && device.keyed,
             name: device.name.into(),
@@ -1470,6 +1481,60 @@ fn refresh_status(window: &AppWindow) {
     });
     refresh_files(window, &context.controls.transfers);
     refresh_shelf(window, &context.controls.transfers, now);
+}
+
+/// Why a device is missing from the list a dropped file can go to.
+fn drop_note() -> String {
+    DEVICE_ROWS.with_borrow(|rows| {
+        let others = rows.iter().filter(|d| !d.this_device);
+        let old: Vec<&str> = others
+            .clone()
+            .filter(|d| !d.keyed)
+            .map(|d| d.name.as_str())
+            .collect();
+        let away: Vec<&str> = others
+            .filter(|d| d.keyed && !d.online)
+            .map(|d| d.name.as_str())
+            .collect();
+        let mut note = Vec::new();
+        if !old.is_empty() {
+            note.push(format!(
+                "{} {} an older Asli that cannot receive files: update {} first.",
+                old.join(", "),
+                if old.len() == 1 { "runs" } else { "run" },
+                if old.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        if !away.is_empty() {
+            note.push(format!(
+                "{} {} not connected right now.",
+                away.join(", "),
+                if away.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        note.join(" ")
+    })
+}
+
+/// Says so when another device runs a newer Asli than this one, and which.
+fn update_note(listed: &[crate::devices::Listed]) -> String {
+    let ours = crate::build_number();
+    let Some(newest) = listed.iter().map(|d| d.build).max() else {
+        return String::new();
+    };
+    if ours == 0 || newest <= ours {
+        return String::new();
+    }
+    let names: Vec<&str> = listed
+        .iter()
+        .filter(|d| d.build == newest)
+        .map(|d| d.name.as_str())
+        .collect();
+    format!(
+        "{} {} build {newest}; this device runs build {ours}. Update Asli here to keep up.",
+        names.join(", "),
+        if names.len() == 1 { "runs" } else { "run" }
+    )
 }
 
 /// Shows what is on this device's shelf and on the others'.
@@ -1823,6 +1888,7 @@ fn took_a_dropped_file(window: &AppWindow, path: std::path::PathBuf) {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let names: Vec<slint::SharedString> = targets.iter().map(|(n, _)| n.clone().into()).collect();
     window.set_drop_targets(ModelRc::new(VecModel::from(names)));
+    window.set_drop_note(drop_note().into());
     window.set_drop_name(name.into());
     DROPPED.with_borrow_mut(|slot| {
         *slot = Some((path, targets.into_iter().map(|(_, id)| id).collect()));
