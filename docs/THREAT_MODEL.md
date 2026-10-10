@@ -228,6 +228,12 @@ connects only to private, carrier grade and link local addresses, so a forged or
 cannot make it reach the internet. Someone on the same network learns that the two machines
 exchanged a file of about that size, which the relay would otherwise learn instead.
 
+**Same network only.** With this setting a device approves a new device only when the request
+reaches it over the local network, sealed under a key that only the join code makes, and never takes
+one through the relay. Someone who learns a code and is elsewhere cannot join even with an approval
+click. It is a setting per device, and it does not restrict clips, which still sync from anywhere:
+it narrows where a device can be added from and where files move, not who holds the account key.
+
 **The shelf.** A shelved file's name and size are told to every device on the account, and any of
 them can fetch it or take it off the shelf without a prompt on the device that holds it, as all
 devices are equally trusted (section 5). Requests are signed and accepted only from pinned devices.

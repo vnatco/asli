@@ -1421,6 +1421,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 3 | Join grant | A meeting room |
 | 4 | Join decline | A meeting room |
 | 5 | Rekey | The account room |
+| 6 | Join where | A meeting room (section 18.5.1) |
 | 16 | File offer | The account room, to one connection (section 18.8) |
 | 17 | File answer | The account room, to one connection |
 | 18 | File chunk | The account room, to one connection |
@@ -1428,7 +1429,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 20 | File cancel | The account room, to one connection |
 | 21 | Shelf list | The account room, to everyone or one connection (section 18.9) |
 | 22 | Shelf request | The account room, to one connection |
-| 6 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
+| 7 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
 
 Every signature in this section is Ed25519 over `label || room_id_bytes || body_without_signature`,
 so a signed body can be replayed neither as another kind nor into another room. Text fields are a
@@ -1514,6 +1515,28 @@ shown as a section 5 token.
 
 **Decline**: `u8(1) || request_id[16] || approver_sign_pub[32]`, signed with label
 `"asli/v2/join-decline"`, honoured under the same `fp` and `request_id` checks.
+
+#### 18.5.1 Same network only
+
+A device MAY be set to approve a new device only when that device reaches it on the local network.
+While its code is open it then listens on a port of its own and says where in the meeting room,
+every few seconds:
+
+```
+where = u8(1) || u8(count) || count * text(addr)        count 1 to 4, private IPv4 `ip:port`
+```
+
+The new device, on reading it, connects to one of the addresses (only the kinds named in section
+18.8.1) and speaks in the frames of section 18.8.1, keyed by
+`HKDF-SHA256(salt = "asli/v2/enroll-salt", ikm = meeting_secret, info = "asli/v2/join-direct")`
+in place of the transfer key and with the meeting room id in place of the offer id. Its one frame
+is its join request, exactly as it would send it to the relay. The approving device answers on the
+same connection with one frame, `u8(kind) || body`, the grant or decline it also sends to the relay.
+
+Such a device MUST NOT take a join request that arrives through the relay. A new device that cannot
+reach it, because it is elsewhere, is behind a firewall, or predates this section, is never shown
+to the person. The meeting secret keys the connection, so a stranger on the network learns nothing
+and a forged `where` can at worst point the new device at a listener that cannot answer.
 
 ### 18.6 Replacing the account key, and removing a device
 
@@ -1615,6 +1638,11 @@ the transfer key, so it stands in for the answer, and no `answer` is sent throug
 sender MUST NOT read a frame longer than a piece plus 16 bytes, or a hello longer than 64. If no
 address answers in time, the receiver sends its answer through the relay and the transfer goes as
 above. A direct transfer does not depend on the relay connection and survives it dropping.
+
+A device set to Same network only (section 18.5.1) makes an offer only when it can name a local
+address, and accepts one only if it reaches the sender directly, cancelling it otherwise rather than
+answering through the relay. As a sender, it cancels a transfer whose receiver answered through the
+relay.
 
 #### 18.8.2 Keeping the file
 

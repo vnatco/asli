@@ -56,6 +56,10 @@ locally, which `--with-server` sets up.
    <file>`). It stays on that machine for a day, and the others can fetch it from their own Shelf
    screen whenever both are on.
 
+**Same network only**, in Settings, makes a machine approve a new device only when that device
+reaches it on the local network, and send and receive files only there. Clips still sync from
+anywhere.
+
 The relay only ever sees ciphertext. It cannot read your clipboard, and it does not know who you
 are. It keeps at most your most recent clip, briefly, so a machine that was switched off can catch
 up when it comes back. You can point the app at your own relay in Settings, and the relay we run is

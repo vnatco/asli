@@ -78,6 +78,9 @@ Nothing is tagged yet and there are no downloads. What exists today:
   where it is on disk and is never stored anywhere else; any device can take it off the shelf, and
   that never deletes it. `asli shelf`, `asli shelf take` and `asli shelf remove` do the rest from a
   terminal. The tray menu has a Shelf item.
+- Same network only, in Settings. A device with it on approves a new device only when that device
+  reaches it on the local network, so a join code is useless to anyone elsewhere, and sends and
+  receives files only there, never through the relay. Clips still sync from anywhere.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,
