@@ -40,6 +40,7 @@ pub mod clipboard_io;
 pub mod config;
 pub mod daemon;
 pub mod devices;
+pub mod direct;
 pub mod enroll;
 pub mod error;
 pub mod history_store;

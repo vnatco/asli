@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use asli_crypto::device::DeviceKeys;
-use asli_crypto::file::{Ack, AckState, Answer, Cancel, Chunk, Offer, CHUNK_BYTES, OFFER_ID_LEN};
+use asli_crypto::file::{
+    Ack, AckState, Answer, Cancel, Chunk, Direct, Offer, CHUNK_BYTES, OFFER_ID_LEN,
+};
 use asli_net::client::{LocalEvent, MsgKind};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
@@ -180,6 +182,8 @@ struct Outgoing {
     stage: Stage,
     /// The last time it got anywhere.
     moved: Instant,
+    /// Going straight to the receiver on the local network, not through the relay.
+    direct: bool,
 }
 
 struct Incoming {
@@ -193,6 +197,8 @@ struct Incoming {
     stage: Stage,
     /// The last time it got anywhere.
     moved: Instant,
+    /// Coming straight from the sender on the local network, not through the relay.
+    direct: bool,
 }
 
 impl Transfers {
@@ -409,8 +415,24 @@ impl Transfers {
             .map_err(|_| "Asli is shutting down.".to_owned())?;
         let link = state.link.as_ref().ok_or("Asli is not connected.")?;
         let reply_to = link.conn_id.clone().ok_or("Asli is not connected.")?;
+        let offer_id: OfferId = asli_crypto::random::bytes().map_err(|e| e.to_string())?;
+        // Listening starts now, so the address can go in the offer. The listener waits on this
+        // lock, so it sees the transfer only once it is recorded below.
+        let direct = state
+            .devices
+            .pinned()
+            .into_iter()
+            .find(|device| device.device_id == to)
+            .and_then(|device| {
+                let key = Zeroizing::new(asli_crypto::random::bytes::<32>().ok()?);
+                let addrs = crate::direct::listen(self, offer_id, key.clone());
+                if addrs.is_empty() {
+                    return None;
+                }
+                Direct::new(addrs, &device.box_pub, &key).ok()
+            });
         let offer = Offer {
-            offer_id: asli_crypto::random::bytes().map_err(|e| e.to_string())?,
+            offer_id,
             from_device_id: link.device_id,
             to_device_id: to,
             size,
@@ -419,6 +441,7 @@ impl Transfers {
             ts_ms: asli_net::client::now_ms(),
             reply_to,
             name: truncate_name(&display_name(&path)),
+            direct,
         };
         let body = offer
             .encode(&link.keys(), &link.room)
@@ -439,6 +462,7 @@ impl Transfers {
                 acked: 0,
                 stage: Stage::Offered,
                 moved: Instant::now(),
+                direct: false,
             },
         );
         state.revision += 1;
@@ -471,24 +495,185 @@ impl Transfers {
             .create_new(true)
             .open(&part_path)
             .map_err(|err| format!("Couldn't write to {}: {err}", folder.display()))?;
-        let answer = Answer {
-            offer_id: *id,
-            from_device_id: link.device_id,
-            accepted: true,
-            reply_to: link.conn_id.clone().ok_or("Asli is not connected.")?,
-        };
-        let body = answer
-            .encode(&link.keys(), &link.room)
-            .map_err(|e| e.to_string())?;
-        if let Err(err) = send_msg(link, MsgKind::FileAnswer, body, &incoming.offer.reply_to) {
-            let _ = fs::remove_file(&part_path);
-            return Err(err);
+        // Straight from the sender if it is on this network, which is tried first; through the
+        // relay otherwise, which needs the answer now.
+        let direct = incoming.offer.direct.as_ref().and_then(|direct| {
+            let key = direct.open_key(&link.keys()).ok()?;
+            Some((direct.addrs.clone(), key))
+        });
+        if direct.is_none() {
+            if let Err(err) = answer(link, id, true, &incoming.offer.reply_to) {
+                let _ = fs::remove_file(&part_path);
+                return Err(err);
+            }
         }
         incoming.part = Some((file, part_path, final_path));
         incoming.stage = Stage::Moving(0);
         incoming.moved = Instant::now();
         state.revision += 1;
+        drop(state);
+
+        if let Some((addrs, key)) = direct {
+            let this = self.clone();
+            let id = *id;
+            std::thread::Builder::new()
+                .name("asli-direct-fetch".to_owned())
+                .spawn(move || {
+                    if !crate::direct::fetch(&this, id, &key, &addrs) {
+                        this.answer_through_relay(&id);
+                    }
+                })
+                .map_err(|err| err.to_string())?;
+        }
         Ok(())
+    }
+
+    /// The sender could not be reached on this network: asks for the file through the relay.
+    fn answer_through_relay(&self, id: &OfferId) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        let State {
+            link, receiving, ..
+        } = &mut *state;
+        let Some(incoming) = receiving.get_mut(id) else {
+            return;
+        };
+        if incoming.stage != Stage::Moving(0) || incoming.direct {
+            return;
+        }
+        let sent = link
+            .as_ref()
+            .ok_or_else(|| "Asli is not connected.".to_owned())
+            .and_then(|link| answer(link, id, true, &incoming.offer.reply_to));
+        if let Err(err) = sent {
+            discard_part(incoming);
+            incoming.stage = Stage::Failed(err);
+        }
+        state.revision += 1;
+    }
+
+    /// Whether a sender's listener should keep waiting for `id`.
+    pub(crate) fn direct_waiting(&self, id: &OfferId) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state
+                .sending
+                .get(id)
+                .is_some_and(|o| o.stage == Stage::Offered)
+        })
+    }
+
+    /// The receiver reached this device directly. Returns the file and its offer to send, unless
+    /// it was answered, called off or finished meanwhile.
+    pub(crate) fn direct_begin(&self, id: &OfferId) -> Option<(PathBuf, Offer)> {
+        let mut state = self.0.lock().ok()?;
+        let outgoing = state.sending.get_mut(id)?;
+        if outgoing.stage != Stage::Offered {
+            return None;
+        }
+        outgoing.stage = Stage::Moving(0);
+        outgoing.moved = Instant::now();
+        outgoing.direct = true;
+        let begun = (outgoing.path.clone(), outgoing.offer.clone());
+        state.revision += 1;
+        Some(begun)
+    }
+
+    /// `sent` pieces have gone. Returns false once the transfer was called off.
+    pub(crate) fn direct_progress(&self, id: &OfferId, sent: u32) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        let Some(outgoing) = state.sending.get_mut(id) else {
+            return false;
+        };
+        if outgoing.stage.finished() {
+            return false;
+        }
+        outgoing.acked = sent;
+        outgoing.next = sent;
+        outgoing.stage = Stage::Moving(sent);
+        outgoing.moved = Instant::now();
+        state.revision += 1;
+        true
+    }
+
+    /// The receiver said how a direct transfer ended.
+    pub(crate) fn direct_finished(&self, id: &OfferId, ended: AckState) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if let Some(outgoing) = state.sending.get_mut(id) {
+            if !outgoing.stage.finished() {
+                outgoing.stage = if ended == AckState::Done {
+                    eprintln!(
+                        "{}",
+                        log_line("file_sent", &format!("{} bytes", outgoing.offer.size))
+                    );
+                    Stage::Done(None)
+                } else {
+                    Stage::Failed("it arrived damaged. Try again.".to_owned())
+                };
+            }
+        }
+        state.revision += 1;
+    }
+
+    /// A direct transfer from this device broke off.
+    pub(crate) fn direct_failed(&self, id: &OfferId, reason: &str) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if let Some(outgoing) = state.sending.get_mut(id) {
+            if !outgoing.stage.finished() {
+                outgoing.stage = Stage::Failed(reason.to_owned());
+            }
+        }
+        state.revision += 1;
+    }
+
+    /// The first piece came straight from the sender: the relay plays no part from here on.
+    pub(crate) fn direct_receiving(&self, id: &OfferId) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Some(incoming) = state.receiving.get_mut(id) {
+                incoming.direct = true;
+                incoming.moved = Instant::now();
+            }
+        }
+    }
+
+    /// Keeps a piece that came straight from the sender. Returns how the transfer ended once it
+    /// has, and an error when it should stop: called off, or failed.
+    pub(crate) fn direct_piece(&self, id: &OfferId, data: &[u8]) -> Result<Option<AckState>, ()> {
+        let mut state = self.0.lock().map_err(|_| ())?;
+        let incoming = state.receiving.get_mut(id).ok_or(())?;
+        if !matches!(incoming.stage, Stage::Moving(_)) {
+            return Err(());
+        }
+        let taken = take_piece(incoming, data);
+        state.revision += 1;
+        match taken {
+            Ok(ended) => Ok(ended),
+            Err(reason) => {
+                if let Some(incoming) = state.receiving.get_mut(id) {
+                    give_up_incoming(incoming, &reason);
+                }
+                Err(())
+            }
+        }
+    }
+
+    /// A direct transfer to this device broke off.
+    pub(crate) fn direct_receive_failed(&self, id: &OfferId, reason: &str) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if let Some(incoming) = state.receiving.get_mut(id) {
+            if !incoming.stage.finished() {
+                give_up_incoming(incoming, reason);
+            }
+        }
+        state.revision += 1;
     }
 
     /// Turns an offered file down.
@@ -505,15 +690,7 @@ impl Transfers {
         if incoming.stage != Stage::Offered {
             return;
         }
-        let answer = Answer {
-            offer_id: *id,
-            from_device_id: link.device_id,
-            accepted: false,
-            reply_to: link.conn_id.clone().unwrap_or_default(),
-        };
-        if let Ok(body) = answer.encode(&link.keys(), &link.room) {
-            let _ = send_msg(link, MsgKind::FileAnswer, body, &incoming.offer.reply_to);
-        }
+        let _ = answer(link, id, false, &incoming.offer.reply_to);
         incoming.stage = Stage::Declined;
         state.revision += 1;
     }
@@ -626,6 +803,7 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<(String, String, u64)> {
             written: 0,
             stage: Stage::Offered,
             moved: Instant::now(),
+            direct: false,
         },
     );
     Some((peer, name, size))
@@ -706,7 +884,7 @@ fn pump(link: &Link, pace: &mut Pace, outgoing: &mut Outgoing) {
     };
     let total = u32::try_from(outgoing.offer.chunk_count()).unwrap_or(u32::MAX);
     while outgoing.next < total && outgoing.next < outgoing.acked.saturating_add(WINDOW) {
-        if !pace.take(expected_len(&outgoing.offer, outgoing.next), Instant::now()) {
+        if !pace.take(piece_len(&outgoing.offer, outgoing.next), Instant::now()) {
             // The pacer's tick carries on from here.
             return;
         }
@@ -744,38 +922,23 @@ fn on_chunk(state: &mut State, body: &[u8]) {
     let Some(incoming) = state.receiving.get_mut(&chunk.offer_id) else {
         return;
     };
-    if !matches!(incoming.stage, Stage::Moving(_)) || chunk.index != incoming.received {
+    if !matches!(incoming.stage, Stage::Moving(_))
+        || incoming.direct
+        || chunk.index != incoming.received
+    {
         return;
     }
-    let expected = expected_len(&incoming.offer, chunk.index);
-    if chunk.data.len() != expected {
-        fail_incoming(link, incoming, "a piece arrived the wrong size");
-        return;
-    }
-    let Some((file, _, _)) = incoming.part.as_mut() else {
-        return;
-    };
-    if let Err(err) = file.write_all(&chunk.data) {
-        let reason = format!("couldn't write the file: {err}");
-        fail_incoming(link, incoming, &reason);
-        return;
-    }
-    incoming.hasher.update(&chunk.data);
-    incoming.received += 1;
-    incoming.moved = Instant::now();
-    incoming.written += chunk.data.len() as u64;
-
-    let done = u64::from(incoming.received) == incoming.offer.chunk_count();
-    let state_now = if done {
-        finish_incoming(incoming)
-    } else {
-        incoming.stage = Stage::Moving(incoming.received);
-        AckState::Receiving
+    let ended = match take_piece(incoming, &chunk.data) {
+        Ok(ended) => ended,
+        Err(reason) => {
+            fail_incoming(link, incoming, &reason);
+            return;
+        }
     };
     let ack = Ack {
         offer_id: chunk.offer_id,
         received: incoming.received,
-        state: state_now,
+        state: ended.unwrap_or(AckState::Receiving),
     };
     let _ = send_msg(
         link,
@@ -783,6 +946,32 @@ fn on_chunk(state: &mut State, body: &[u8]) {
         ack.encode(),
         &incoming.offer.reply_to,
     );
+}
+
+/// Writes the next piece, by whichever way it came. Returns how the transfer ended once the last
+/// piece is in, and why it cannot go on otherwise.
+fn take_piece(incoming: &mut Incoming, data: &[u8]) -> Result<Option<AckState>, String> {
+    if data.len() != piece_len(&incoming.offer, incoming.received)
+        || u64::from(incoming.received) >= incoming.offer.chunk_count()
+    {
+        return Err("a piece arrived the wrong size".to_owned());
+    }
+    let (file, _, _) = incoming
+        .part
+        .as_mut()
+        .ok_or_else(|| "it was called off".to_owned())?;
+    file.write_all(data)
+        .map_err(|err| format!("couldn't write the file: {err}"))?;
+    incoming.hasher.update(data);
+    incoming.received += 1;
+    incoming.moved = Instant::now();
+    incoming.written += data.len() as u64;
+    if u64::from(incoming.received) == incoming.offer.chunk_count() {
+        Ok(Some(finish_incoming(incoming)))
+    } else {
+        incoming.stage = Stage::Moving(incoming.received);
+        Ok(None)
+    }
 }
 
 /// Checks a fully arrived file against its offer, and keeps it or throws it away.
@@ -848,6 +1037,13 @@ fn on_cancel(state: &mut State, body: &[u8]) {
     }
 }
 
+/// Gives up on a file coming to this device, without telling the sender.
+fn give_up_incoming(incoming: &mut Incoming, reason: &str) {
+    discard_part(incoming);
+    incoming.stage = Stage::Failed(reason.to_owned());
+    crate::notify::file_failed(&safe_name(&incoming.offer.name), reason);
+}
+
 fn fail_incoming(link: &Link, incoming: &mut Incoming, reason: &str) {
     discard_part(incoming);
     incoming.stage = Stage::Failed(reason.to_owned());
@@ -871,18 +1067,32 @@ fn discard_part(incoming: &mut Incoming) {
 }
 
 fn fail_all_live(state: &mut State, reason: &str) {
+    // A direct transfer does not go through the relay, so it carries on without it.
     for outgoing in state.sending.values_mut() {
-        if !outgoing.stage.finished() {
+        if !outgoing.stage.finished() && !outgoing.direct {
             outgoing.stage = Stage::Failed(reason.to_owned());
         }
     }
     for incoming in state.receiving.values_mut() {
-        if !incoming.stage.finished() {
+        if !incoming.stage.finished() && !incoming.direct {
             discard_part(incoming);
             incoming.stage = Stage::Failed(reason.to_owned());
         }
     }
     state.revision += 1;
+}
+
+/// Sends this device's signed answer to an offer.
+fn answer(link: &Link, id: &OfferId, accepted: bool, to: &str) -> Result<(), String> {
+    let body = Answer {
+        offer_id: *id,
+        from_device_id: link.device_id,
+        accepted,
+        reply_to: link.conn_id.clone().ok_or("Asli is not connected.")?,
+    }
+    .encode(&link.keys(), &link.room)
+    .map_err(|e| e.to_string())?;
+    send_msg(link, MsgKind::FileAnswer, body, to)
 }
 
 fn send_msg(link: &Link, kind: MsgKind, body: Vec<u8>, to: &str) -> Result<(), String> {
@@ -897,7 +1107,7 @@ fn send_msg(link: &Link, kind: MsgKind, body: Vec<u8>, to: &str) -> Result<(), S
 }
 
 /// The length piece `index` must have.
-fn expected_len(offer: &Offer, index: u32) -> usize {
+pub(crate) fn piece_len(offer: &Offer, index: u32) -> usize {
     let start = u64::from(index) * u64::from(offer.chunk_bytes);
     let len = offer
         .size
@@ -1134,9 +1344,10 @@ mod tests {
             ts_ms: 0,
             reply_to: String::new(),
             name: String::new(),
+            direct: None,
         };
-        assert_eq!(expected_len(&offer, 0), CHUNK_BYTES as usize);
-        assert_eq!(expected_len(&offer, 2), 10);
+        assert_eq!(piece_len(&offer, 0), CHUNK_BYTES as usize);
+        assert_eq!(piece_len(&offer, 2), 10);
         assert_eq!(offer.chunk_count(), 3);
     }
 }
