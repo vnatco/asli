@@ -1422,6 +1422,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 4 | Join decline | A meeting room |
 | 5 | Rekey | The account room |
 | 6 | Join where | A meeting room (section 18.5.1) |
+| 7 | About | The account room, to everyone or one connection (section 18.10) |
 | 16 | File offer | The account room, to one connection (section 18.8) |
 | 17 | File answer | The account room, to one connection |
 | 18 | File chunk | The account room, to one connection |
@@ -1429,7 +1430,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 20 | File cancel | The account room, to one connection |
 | 21 | Shelf list | The account room, to everyone or one connection (section 18.9) |
 | 22 | Shelf request | The account room, to one connection |
-| 7 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
+| 8 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
 
 Every signature in this section is Ed25519 over `label || room_id_bytes || body_without_signature`,
 so a signed body can be replayed neither as another kind nor into another room. Text fields are a
@@ -1684,4 +1685,18 @@ request = u8(1) || from_device_id[16] || u8(action) || item_id[16] || want_id[16
 
 An item expires 24 hours after it was shelved, by the clock of the device that holds it, and is
 then taken off its shelf and a new list sent.
+
+### 18.10 Which version each device runs
+
+```
+about = u8(1) || from_device_id[16] || u8(ask) || text(reply_to) || u32be(build)
+        || text(version) || signature, label "asli/v2/about"
+```
+
+A device sends one to the room when it connects, with `ask` set, and a device that hears `ask`
+answers with its own to `reply_to` alone. `build` is the number of commits the build was made from,
+which only grows on the main branch, so a higher number is a newer build; 0 means unknown. A
+receiver MUST ignore one not signed by the key pinned for `from_device_id`. It is informational: it
+lets each device show which version the others run and say when this one is behind. A device too
+old to send one shows as an older version.
 

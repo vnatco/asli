@@ -81,6 +81,10 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Same network only, in Settings. A device with it on approves a new device only when that device
   reaches it on the local network, so a join code is useless to anyone elsewhere, and sends and
   receives files only there, never through the relay. Clips still sync from anywhere.
+- Paired devices shows which Asli each device runs, with a build number that grows with every
+  change, and Status says when another device runs a newer one than this. `asli devices` and `asli
+  status` show it too. A dropped file that no device can receive now says why, naming the devices
+  that need updating, instead of offering only the shelf.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,
