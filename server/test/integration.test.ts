@@ -580,3 +580,56 @@ test('a spent daily transfer budget is refused, and the connection carries on', 
     { ROOM_TRANSFER_BYTES_PER_DAY: String(1024 * 1024) },
   );
 });
+
+function imageChunks(msgId: Buffer, count: number, bytes: number): Json[] {
+  return Array.from({ length: count }, (_, idx) => ({
+    v: 1,
+    type: idx === 0 ? 'clip_begin' : idx === count - 1 ? 'clip_end' : 'clip_chunk',
+    room: ROOM,
+    epoch: 0,
+    msg_id: msgId.toString('base64'),
+    idx,
+    chunk_count: count,
+    n: Buffer.alloc(24, 0x44 + idx).toString('base64'),
+    ct: Buffer.alloc(bytes, 0x67).toString('base64'),
+  }));
+}
+
+test('the pieces of a large image travel on the bulk allowance, not the clipboard one', async () => {
+  await withRelay(
+    async (port) => {
+      const a = await TestClient.open(port);
+      const b = await TestClient.open(port);
+      await a.handshake();
+      await b.handshake();
+      // Twelve pieces at once: past a clip allowance of two frames and 64 KiB, inside the bulk one.
+      const pieces = imageChunks(randomBytes(16), 12, 48 * 1024);
+      for (const piece of pieces) a.send(piece);
+      assert.equal((await b.nextOfType('clip_begin'))['idx'], 0);
+      for (let i = 1; i < 11; i += 1) assert.equal((await b.nextOfType('clip_chunk'))['idx'], i);
+      assert.equal((await b.nextOfType('clip_end'))['idx'], 11);
+      a.close();
+      b.close();
+    },
+    { MSG_BURST: '2', MSGS_PER_SEC: '1', BYTE_BURST: String(64 * 1024), BYTES_PER_SEC: String(16 * 1024) },
+  );
+});
+
+test('an image past the daily bulk budget is refused, and the connection carries on', async () => {
+  await withRelay(
+    async (port) => {
+      const a = await TestClient.open(port);
+      const b = await TestClient.open(port);
+      await a.handshake();
+      await b.handshake();
+      for (const piece of imageChunks(randomBytes(16), 4, 400 * 1024)) a.send(piece);
+      const err = await a.nextOfType('error');
+      assert.equal(err['code'], 'QUOTA_EXCEEDED');
+      a.send({ v: 1, type: 'ping', t: 7 });
+      assert.equal((await a.nextOfType('pong'))['t'], 7);
+      a.close();
+      b.close();
+    },
+    { ROOM_TRANSFER_BYTES_PER_DAY: String(1024 * 1024) },
+  );
+});

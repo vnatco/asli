@@ -94,14 +94,19 @@ type Session = {
  * Whether a frame announces itself as a `msg`, judged from its first bytes, before it is parsed.
  *
  * Rate limits are applied before parsing, so that a flood costs the relay as little as possible,
- * and `msg` frames, which carry files, have a larger allowance than clips. A frame that claims to
- * be a `msg` here and turns out not to be one when parsed has lied to get the larger allowance, and
- * the connection is closed. One that is a `msg` without saying so first is only held to the
- * smaller allowance, which harms nobody but its sender.
+ * and bulk frames, which carry files (`msg`) and the pieces of an image (`clip_begin`,
+ * `clip_chunk`, `clip_end`), have a larger allowance than clips. A frame that claims to be one of
+ * those here and turns out not to be when parsed has lied to get the larger allowance, and the
+ * connection is closed. One that is without saying so first is only held to the smaller
+ * allowance, which harms nobody but its sender.
  */
 export function looksLikeMsg(raw: NodeBuffer): boolean {
-  return raw.subarray(0, 48).toString('latin1').includes('"type":"msg"');
+  const head = raw.subarray(0, 48).toString('latin1');
+  return BULK_TYPES.some((type) => head.includes(`"type":"${type}"`));
 }
+
+/** Frame types that travel on the bulk allowance and budget rather than the clipboard's. */
+const BULK_TYPES = ['msg', 'clip_begin', 'clip_chunk', 'clip_end'] as const;
 
 /** The room key for a room id as written in a frame, or null if it does not decode. */
 function roomKeyOf(roomText: string): string | null {
@@ -136,6 +141,30 @@ export function createRelay(config: Config): Relay {
   const ipLimiter = new IpLimiter(config.maxConnsPerIp, config.newConnBurst, config.newConnRefillMs);
   const roomQuotas = new Map<string, RollingQuota>();
   const roomTransferQuotas = new Map<string, RollingQuota>();
+
+  /**
+   * Charges a bulk frame, a file piece or an image piece, to the room's and the relay's daily bulk
+   * budgets. Answers QUOTA_EXCEEDED and returns false when either has run out.
+   */
+  function chargeBulk(session: Session, bytes: number): boolean {
+    const now = Date.now();
+    let quota = roomTransferQuotas.get(session.conn.roomId);
+    if (quota === undefined) {
+      quota = new RollingQuota(config.roomTransferBytesPerDay, 24 * 60 * 60 * 1000, now);
+      roomTransferQuotas.set(session.conn.roomId, quota);
+    }
+    if (!globalTransferQuota.charge(bytes, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, code: 'global_transfer' });
+      sendError(session, 'QUOTA_EXCEEDED', 'relay transfer budget exhausted', globalTransferQuota.retryAfterMs(now));
+      return false;
+    }
+    if (!quota.charge(bytes, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
+      sendError(session, 'QUOTA_EXCEEDED', 'room daily transfer quota exhausted', quota.retryAfterMs(now));
+      return false;
+    }
+    return true;
+  }
   const globalTransferQuota = new RollingQuota(
     config.globalTransferBytesPerDay,
     24 * 60 * 60 * 1000,
@@ -404,18 +433,12 @@ export function createRelay(config: Config): Relay {
       return;
     }
 
-    // Charged as it arrives. Charging at the end would let a partial upload spend the room's whole
-    // daily allowance and then abandon the message.
-    let quota = roomQuotas.get(session.conn.roomId);
-    if (quota === undefined) {
-      quota = new RollingQuota(config.roomBytesPerDay, 24 * 60 * 60 * 1000, now);
-      roomQuotas.set(session.conn.roomId, quota);
-    }
-    if (!quota.charge(raw.length, now)) {
-      log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
-      sendError(session, 'QUOTA_EXCEEDED', 'room daily quota exhausted', quota.retryAfterMs(now));
+    // Charged as it arrives, to the bulk budget that files use: an image can be many megabytes,
+    // which the clipboard's daily allowance was never sized for. Charging at the end would let a
+    // partial upload spend the allowance and then abandon the message. Refused without closing,
+    // so the clipboard keeps syncing text.
+    if (!chargeBulk(session, raw.length)) {
       session.assembly = null;
-      session.ws.close(4008, 'QUOTA_EXCEEDED');
       return;
     }
 
@@ -582,24 +605,7 @@ export function createRelay(config: Config): Relay {
       return;
     }
 
-    // Charged against a budget of its own, per room and for the whole relay. Refused rather than
-    // closed when it runs out: the sender learns why at once, and its clipboard keeps syncing.
-    const now = Date.now();
-    let quota = roomTransferQuotas.get(session.conn.roomId);
-    if (quota === undefined) {
-      quota = new RollingQuota(config.roomTransferBytesPerDay, 24 * 60 * 60 * 1000, now);
-      roomTransferQuotas.set(session.conn.roomId, quota);
-    }
-    if (!globalTransferQuota.charge(raw.length, now)) {
-      log.warn('quota_exceeded', { conn: session.conn.id, code: 'global_transfer' });
-      sendError(session, 'QUOTA_EXCEEDED', 'relay transfer budget exhausted', globalTransferQuota.retryAfterMs(now));
-      return;
-    }
-    if (!quota.charge(raw.length, now)) {
-      log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
-      sendError(session, 'QUOTA_EXCEEDED', 'room daily transfer quota exhausted', quota.retryAfterMs(now));
-      return;
-    }
+    if (!chargeBulk(session, raw.length)) return;
 
     if (registry.isDuplicate(session.conn.roomId, fields.msgIdText)) return;
 
@@ -777,7 +783,7 @@ export function createRelay(config: Config): Relay {
       }
 
       const type = parsed.message.type;
-      if (transfer && type !== 'msg') {
+      if (transfer && !(BULK_TYPES as readonly string[]).includes(type)) {
         session.ws.close(4005, 'frame claimed to be a msg');
         return;
       }
