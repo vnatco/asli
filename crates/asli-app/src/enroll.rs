@@ -11,7 +11,7 @@
 //! connections would be lost. The new device therefore asks again every few seconds until it is
 //! answered, and the approving device recognises a repeat by its request id.
 //!
-//! With Same network only on, the approving device also listens on its local network and says
+//! With Same Network Only on, the approving device also listens on its local network and says
 //! where in the meeting room. It then takes a request only when it arrives over that connection,
 //! sealed under a key only the code makes, and answers over it too: someone elsewhere with the
 //! code, even with the approval, cannot join.
@@ -351,7 +351,7 @@ fn listen_nearby(
 ) -> Result<Vec<u8>, InviteOutcome> {
     let failed = |why: &str| InviteOutcome::Failed(why.to_owned());
     let (listener, addrs) = crate::direct::local_listener()
-        .ok_or_else(|| failed("this device is on no local network, and Same network only is on"))?;
+        .ok_or_else(|| failed("this device is on no local network, and Same Network Only is on"))?;
     let body = enroll::where_body(&addrs).map_err(|_| failed("too many local addresses"))?;
     if let Ok(mut view) = view.lock() {
         view.nearby_only = true;

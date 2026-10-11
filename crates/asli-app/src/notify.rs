@@ -132,7 +132,7 @@ pub fn clip_received(enabled: bool, bytes: usize) {
         return;
     }
     send(
-        "Clipboard updated",
+        "Clipboard Updated",
         &format!("{bytes} bytes from another device"),
     );
 }
@@ -146,7 +146,7 @@ pub fn image_received(enabled: bool, bytes: usize) {
         return;
     }
     send(
-        "Clipboard updated",
+        "Clipboard Updated",
         &format!("An image of {bytes} bytes from another device"),
     );
 }
@@ -156,7 +156,7 @@ pub fn image_received(enabled: bool, bytes: usize) {
 /// Always notified, regardless of the setting.
 pub fn clip_too_large(bytes: usize, limit: usize) {
     send(
-        "Clipboard not synced",
+        "Clipboard Not Synced",
         &format!(
             "That copy is {bytes} bytes, over the {limit} byte limit, so it stayed on this machine"
         ),
@@ -169,7 +169,7 @@ pub fn clip_too_large(bytes: usize, limit: usize) {
 /// behaviour is deliberate rather than broken.
 pub fn clip_sensitive() {
     send(
-        "Clipboard not synced",
+        "Clipboard Not Synced",
         "The application that copied this marked it as a password, so it was not read or sent",
     );
 }
@@ -188,7 +188,7 @@ fn action(summary: &str, body: &str) {
 /// The join token was copied to the clipboard.
 pub fn token_copied(clear_after_secs: u64) {
     action(
-        "Join token copied",
+        "Join Token Copied",
         &format!(
             "It is marked so clipboard history and cloud sync skip it, and it clears in {clear_after_secs} seconds"
         ),
@@ -197,13 +197,13 @@ pub fn token_copied(clear_after_secs: u64) {
 
 /// The join token could not be copied.
 pub fn token_copy_failed(reason: &str) {
-    action("Could not copy the join token", reason);
+    action("Could Not Copy the Join Token", reason);
 }
 
 /// The reveal window was opened.
 pub fn token_shown() {
     action(
-        "Join string opened",
+        "Join String Opened",
         "Scan the QR on your other device. Anyone who sees it has your clipboard",
     );
 }
@@ -211,26 +211,26 @@ pub fn token_shown() {
 /// Diagnostics were copied to the clipboard.
 pub fn diagnostics_copied() {
     action(
-        "Diagnostics copied",
+        "Diagnostics Copied",
         "Paste them into a bug report. They contain no clipboard content",
     );
 }
 
 /// Diagnostics could not be copied.
 pub fn diagnostics_failed(reason: &str) {
-    action("Could not copy diagnostics", reason);
+    action("Could Not Copy Diagnostics", reason);
 }
 
 /// Syncing was paused or resumed from the menu.
 pub fn sync_paused(paused: bool) {
     if paused {
         action(
-            "Sync paused",
+            "Sync Paused",
             "Copies stay on this machine until you resume",
         );
     } else {
         action(
-            "Sync resumed",
+            "Sync Resumed",
             "Copies are shared with your other devices again",
         );
     }
@@ -239,15 +239,15 @@ pub fn sync_paused(paused: bool) {
 /// The stored clip was requested from the relay.
 pub fn retained_requested() {
     action(
-        "Fetching the last synced clip",
-        "It will land on your clipboard shortly",
+        "Fetching the Last Synced Clip",
+        "It will land on your clipboard shortly.",
     );
 }
 
 /// The stored clip that was asked for is now on the clipboard.
 pub fn retained_pasted(bytes: usize) {
     action(
-        "Pasted the last synced clip",
+        "Pasted the Last Synced Clip",
         &format!("{bytes} bytes are on your clipboard now"),
     );
 }
@@ -263,13 +263,13 @@ pub fn retained_nothing_new(reason: &str) {
         "too_old" => "The last synced clip is older than the relay keeps clips for.",
         _ => "The last synced clip could not be used on this device.",
     };
-    action("Nothing new to paste", why);
+    action("Nothing New to Paste", why);
 }
 
 /// There was no stored clip to fetch.
 pub fn retained_unavailable() {
     action(
-        "Nothing stored to paste",
+        "Nothing Stored to Paste",
         "The relay is not holding a clip for this account",
     );
 }
@@ -280,7 +280,7 @@ pub fn retained_unavailable() {
 /// disappearance reads as a crash rather than as the thing the person just asked for.
 pub fn joined(room_id: &str) {
     action(
-        "Joined the account",
+        "Joined the Account",
         &format!("Room {room_id}. Reconnecting on the new account now."),
     );
 }
@@ -290,7 +290,7 @@ pub fn joined(room_id: &str) {
 /// The reason comes from the token parser, which distinguishes a wrong prefix from a bad checksum
 /// from a truncated string, so this shows that rather than a generic failure.
 pub fn join_failed(reason: &str) {
-    action("Could not join", reason);
+    action("Could Not Join", reason);
 }
 
 /// This device's clock is far enough from the relay's that clips are close to being dropped.
@@ -300,7 +300,7 @@ pub fn join_failed(reason: &str) {
 pub fn clock_skew(skew_ms: i64) {
     let hours = skew_ms.unsigned_abs().div_ceil(60 * 60 * 1000);
     send(
-        "This computer's clock is wrong",
+        "This Computer's Clock is Wrong",
         &format!(
             "It is about {hours} hours {} the internet's time. Past a day, clips to and from it \
              will be dropped. Turn on setting the time and time zone automatically.",
@@ -318,7 +318,7 @@ pub fn action_failed(what: &str, reason: &str) {
 /// arrives unless the person accepts it, so they have to know it is waiting.
 pub fn file_offered(from: &str, name: &str, bytes: u64) {
     send(
-        &format!("{from} wants to send you a file"),
+        &format!("{from} Wants to Send You a File"),
         &format!(
             "{name}, {}. Open Asli to accept or decline it.",
             human(bytes)
@@ -326,14 +326,22 @@ pub fn file_offered(from: &str, name: &str, bytes: u64) {
     );
 }
 
+/// A device asks to join through the code on show here.
+pub fn join_requested(name: &str) {
+    send(
+        &format!("{name} Wants to Join"),
+        "Open Asli and approve it only if both devices show the same six digits.",
+    );
+}
+
 /// A file finished arriving and was kept.
 pub fn file_received(name: &str, folder: &str) {
-    send("File received", &format!("{name} is in {folder}."));
+    send("File Received", &format!("{name} is in {folder}."));
 }
 
 /// A file that was sending or arriving did not make it.
 pub fn file_failed(name: &str, reason: &str) {
-    send("A file transfer stopped", &format!("{name}: {reason}"));
+    send("A File Transfer Stopped", &format!("{name}: {reason}"));
 }
 
 fn human(bytes: u64) -> String {
@@ -355,7 +363,7 @@ pub fn connection_lost(enabled: bool) {
     if !enabled {
         return;
     }
-    send("Asli is offline", "Reconnecting to the relay");
+    send("Asli is Offline", "Reconnecting to the relay.");
 }
 
 #[cfg(test)]

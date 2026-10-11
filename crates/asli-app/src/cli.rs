@@ -35,13 +35,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new account on this device. Add other devices with `asli add`.
+    /// Create a New Account on this device. Add other devices with `asli add`.
     Create {
         /// Replace an existing account instead of refusing.
         #[arg(long)]
         force: bool,
     },
-    /// Join an account that already exists, with the code `asli add` (or Add a device in the
+    /// Join an account that already exists, with the code `asli add` (or Add a Device in the
     /// window) shows on a device already on it. Reads the code from stdin, never from the command
     /// line, and waits for that device to approve this one.
     Join {
@@ -168,7 +168,7 @@ pub fn main() {
         // binary has no stderr at all, so a failure to start would otherwise be completely
         // invisible: the app would simply never appear.
         if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-            notify::action_failed("Asli could not start", &err.to_string());
+            notify::action_failed("Asli Could Not Start", &err.to_string());
         }
         std::process::exit(1);
     }
@@ -223,7 +223,7 @@ fn create(paths: &Paths, force: bool) -> Result<()> {
     println!("Room id:       {}", identity.room_id());
     println!("Relay:         {}", config.relay_url);
     println!();
-    println!("To add another device, run 'asli add' here, or choose Add a device in the window,");
+    println!("To add another device, run 'asli add' here, or choose Add a Device in the window,");
     println!("and type the code it shows on the new device.");
     Ok(())
 }
@@ -343,8 +343,8 @@ fn known_devices(paths: &Paths) -> Result<Vec<crate::devices::Listed>> {
         online: false,
         this_device: true,
         keyed: keys.device.is_some(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        build: crate::build_number(),
+        version: crate::VERSION.to_owned(),
+        build: 0,
     }))
 }
 
@@ -364,7 +364,7 @@ fn devices(paths: &Paths) -> Result<()> {
         let version = if device.version.is_empty() {
             "unknown".to_owned()
         } else {
-            crate::describe_build(&device.version, device.build)
+            device.version.clone()
         };
         println!(
             "{}  {:<24} {:<18} {:<18} {seen}{note}",
@@ -709,10 +709,10 @@ fn add(paths: &Paths) -> Result<()> {
     println!("  {}", invitation.code());
     println!();
     if config.same_network_only {
-        println!("Same network only is on: only a device on this network can use this code.");
+        println!("Same Network Only is on: only a device on this network can use this code.");
         println!();
     }
-    println!("On the new device, choose Join an existing account (or run 'asli join') and type");
+    println!("On the new device, choose Join an Existing Account (or run 'asli join') and type");
     println!("this code. It works once, for ten minutes, and only with your approval here.");
     println!();
 
@@ -759,7 +759,7 @@ fn status(paths: &Paths) -> Result<()> {
     println!("Config:        {}", paths.config_file().display());
     println!("Relay:         {}", config.relay_url);
     println!("Device id:     {}", config.device_id);
-    println!("Asli:          {}", crate::build_label());
+    println!("Asli:          {}", crate::VERSION);
     println!("Size cap:      {} bytes", config.max_content_bytes);
     println!(
         "History:       {}",
@@ -1264,7 +1264,7 @@ fn start_daemon(
                     current.state = format!("Stopped: {err}");
                     current.peers = 0;
                     status.set(current);
-                    crate::notify::action_failed("Asli stopped syncing", &err.to_string());
+                    crate::notify::action_failed("Asli Stopped Syncing", &err.to_string());
                 }
             }
         })
@@ -1355,7 +1355,11 @@ fn start_tray(
 
             loop {
                 let status = controls.status.get();
-                tray.refresh(&status, asli_net::client::now_ms());
+                tray.refresh(
+                    &status,
+                    asli_net::client::now_ms(),
+                    daemon::waiting_for_person(&controls),
+                );
 
                 // Both channels are drained on a short tick. Blocking on the menu channel for a
                 // whole interval, which is what this did before, would leave a click on the icon
@@ -1472,7 +1476,11 @@ fn start_tray(
                     };
                     if refreshed_at.is_none_or(|at| at.elapsed() >= tray::Tray::refresh_interval())
                     {
-                        tray.refresh(&controls.status.get(), asli_net::client::now_ms());
+                        tray.refresh(
+                            &controls.status.get(),
+                            asli_net::client::now_ms(),
+                            daemon::waiting_for_person(&controls),
+                        );
                         refreshed_at = Some(std::time::Instant::now());
                     }
                     let mut commands = Vec::new();

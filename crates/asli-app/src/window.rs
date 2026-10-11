@@ -322,7 +322,7 @@ thread_local! {
     /// The refresh timer, which only ticks while a window exists.
     static TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
 
-    /// The join code on show in Add a device, and the conversation behind it. Main thread only.
+    /// The join code on show in Add a Device, and the conversation behind it. Main thread only.
     static INVITE: RefCell<Option<Invitation>> = const { RefCell::new(None) };
 
     /// This device asking to join, and the device key it will keep if approved. Main thread only.
@@ -422,7 +422,7 @@ pub fn open(screen: Screen) {
             "{}",
             log_line("window_failed", "the event loop is not running")
         );
-        notify::action_failed("Could not open the window", "the display is not available");
+        notify::action_failed("Could Not Open the Window", "the display is not available");
     }
 }
 
@@ -502,7 +502,7 @@ fn show(screen: Screen) {
                 Ok(window) => *slot = Some(window),
                 Err(err) => {
                     eprintln!("{}", log_line("window_failed", &err.to_string()));
-                    notify::action_failed("Could not open the window", &err.to_string());
+                    notify::action_failed("Could Not Open the Window", &err.to_string());
                 }
             }
         }
@@ -752,7 +752,7 @@ fn wire_account(window: &AppWindow) {
     wire_removal(window);
 }
 
-/// Attaches the callbacks of Add a device: making a join code, and answering who asks.
+/// Attaches the callbacks of Add a Device: making a join code, and answering who asks.
 fn wire_invite(window: &AppWindow) {
     let handle = window.as_weak();
     window.on_open_invite(move || {
@@ -775,6 +775,22 @@ fn wire_invite(window: &AppWindow) {
         INVITE.with_borrow_mut(Option::take);
         if let Some(window) = handle.upgrade() {
             window.set_invite_state(InviteState::Idle);
+            nobody_asking(&window);
+        }
+    });
+
+    window.on_copy_invite_code(|| {
+        let Some(context) = CONTEXT.get() else {
+            return;
+        };
+        let code = INVITE.with_borrow(|slot| slot.as_ref().map(|i| i.code().to_owned()));
+        let Some(code) = code else {
+            return;
+        };
+        // Written here only: the code is for one new device, not every device on the account.
+        match context.io.write_text(&code) {
+            Ok(()) => toast("Join Code Copied", true),
+            Err(err) => toast(&format!("Couldn't copy the code: {err}"), false),
         }
     });
 
@@ -836,14 +852,14 @@ fn wire_removal(window: &AppWindow) {
             return;
         };
         let stranded = stranded_names(&[]);
-        window.set_confirm_title("Replace the account key?".into());
+        window.set_confirm_title("Replace the Account Key?".into());
         window.set_confirm_body(
             format!(
                 "Every device that is online now moves to a new key, and any copy of the old one, in an old join string or anywhere else, stops working.{stranded}"
             )
             .into(),
         );
-        window.set_confirm_action("Replace the key".into());
+        window.set_confirm_action("Replace the Key".into());
         CONFIRM.with_borrow_mut(|slot| *slot = Some(Confirm::ReplaceKey));
     });
 
@@ -1062,7 +1078,7 @@ fn wire_switches(window: &AppWindow) {
         let Some(context) = CONTEXT.get() else {
             return;
         };
-        toast("Leaving the account…", true);
+        toast("Leaving the Account…", true);
         let paths = context.paths.clone();
         let controls = context.controls.clone();
         std::thread::spawn(move || crate::daemon::leave_account(&paths, &controls));
@@ -1146,6 +1162,14 @@ fn refresh_invite(window: &AppWindow) {
             comparison: asking.comparison.clone().into(),
         })
         .collect();
+    let asking = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    let before = JOIN_REQUESTS.swap(asking, std::sync::atomic::Ordering::Relaxed);
+    if asking > before {
+        if let Some(newest) = view.asking.last() {
+            crate::notify::join_requested(&newest.name);
+            show(Screen::Token);
+        }
+    }
     set_rows(&window.get_invite_asking(), rows, |model| {
         window.set_invite_asking(model);
     });
@@ -1163,6 +1187,13 @@ fn refresh_invite(window: &AppWindow) {
     window.set_invite_good(good);
     window.set_invite_state(InviteState::Finished);
     INVITE.with_borrow_mut(Option::take);
+    nobody_asking(window);
+}
+
+/// The code is gone, so nobody waits to join any more: the list, the count and the marks clear.
+fn nobody_asking(window: &AppWindow) {
+    JOIN_REQUESTS.store(0, std::sync::atomic::Ordering::Relaxed);
+    window.set_invite_asking(ModelRc::new(VecModel::from(Vec::<AskRow>::new())));
 }
 
 /// Attaches the title bar's controls. The window has no frame from the desktop, so moving,
@@ -1250,6 +1281,7 @@ fn build() -> Result<AppWindow> {
     HISTORY_DRAWN.set(None);
     watch_for_dropped_files(&window);
     wire_files(&window);
+    window.set_app_version(crate::VERSION.into());
     wire_shelf(&window);
 
     let handle = window.as_weak();
@@ -1408,7 +1440,7 @@ fn present(status: &Status, paused: bool, relay_host: &str, now_ms: u64) -> Pres
     {
         return Presented {
             state: SyncState::Error,
-            label: "Stopped syncing".to_owned(),
+            label: "Stopped Syncing".to_owned(),
             detail: format!("{reason}. Restart Asli after fixing this."),
             connections: devices(0),
         };
@@ -1423,7 +1455,7 @@ fn present(status: &Status, paused: bool, relay_host: &str, now_ms: u64) -> Pres
     });
     Presented {
         state: SyncState::Error,
-        label: "Connection failed".to_owned(),
+        label: "Connection Failed".to_owned(),
         detail: format!("Couldn't reach {relay_host}.{retry}"),
         connections: devices(0),
     }
@@ -1447,13 +1479,15 @@ fn refresh_status(window: &AppWindow) {
     window.set_state_label(shown.label.into());
     window.set_state_detail(shown.detail.into());
     window.set_paused(paused);
-    window.set_stat_connections(shown.connections.into());
-    window.set_stat_last_sync(tray::relative_time(status.last_sync_ms, now).into());
+    window.set_stat_connections(crate::title_case(&shown.connections).into());
+    window.set_stat_last_sync(
+        crate::title_case(&tray::relative_time(status.last_sync_ms, now)).into(),
+    );
     window.set_stat_skipped(
         match status.skipped {
             0 => "0".to_owned(),
-            1 => "1 clip".to_owned(),
-            n => format!("{n} clips"),
+            1 => "1 Clip".to_owned(),
+            n => format!("{n} Clips"),
         }
         .into(),
     );
@@ -1472,8 +1506,8 @@ fn refresh_status(window: &AppWindow) {
         online: connected,
         this_device: true,
         keyed: true,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        build: crate::build_number(),
+        version: crate::VERSION.to_owned(),
+        build: 0,
     };
     let listed = context.controls.devices.list(&this);
     DEVICE_ROWS.with_borrow_mut(|rows| rows.clone_from(&listed));
@@ -1487,17 +1521,21 @@ fn refresh_status(window: &AppWindow) {
     }
     window.set_rekey_note(REKEY_NOTE.with_borrow(Clone::clone).into());
     window.set_update_note(update_note(&listed).into());
-    let newest = listed.iter().map(|d| d.build).max().unwrap_or(0);
+    let newest = listed
+        .iter()
+        .map(|d| crate::version_key(&d.version))
+        .max()
+        .unwrap_or_default();
     let rows: Vec<DeviceRow> = listed
         .into_iter()
         .map(|device| DeviceRow {
             version: if device.version.is_empty() {
-                "older Asli".to_owned()
+                "Older Asli".to_owned()
             } else {
-                crate::describe_build(&device.version, device.build)
+                device.version.clone()
             }
             .into(),
-            outdated: device.build < newest,
+            outdated: crate::version_key(&device.version) < newest,
             forgettable: !device.this_device && !device.keyed,
             can_send: !device.this_device && device.keyed && device.online,
             removable: !device.this_device && device.keyed,
@@ -1505,11 +1543,11 @@ fn refresh_status(window: &AppWindow) {
             os: device.os.into(),
             id: short(&device.id).into(),
             seen: if device.online {
-                "now".to_owned()
+                "Now".to_owned()
             } else if device.this_device {
-                "offline".to_owned()
+                "Offline".to_owned()
             } else {
-                tray::relative_time(device.last_seen_ms, now)
+                crate::title_case(&tray::relative_time(device.last_seen_ms, now))
             }
             .into(),
             online: device.online,
@@ -1558,22 +1596,27 @@ fn drop_note() -> String {
 
 /// Says so when another device runs a newer Asli than this one, and which.
 fn update_note(listed: &[crate::devices::Listed]) -> String {
-    let ours = crate::build_number();
-    let Some(newest) = listed.iter().map(|d| d.build).max() else {
+    let ours = crate::version_key(crate::VERSION);
+    let Some(newest) = listed.iter().map(|d| crate::version_key(&d.version)).max() else {
         return String::new();
     };
-    if ours == 0 || newest <= ours {
+    if newest <= ours {
         return String::new();
     }
     let names: Vec<&str> = listed
         .iter()
-        .filter(|d| d.build == newest)
+        .filter(|d| crate::version_key(&d.version) == newest)
         .map(|d| d.name.as_str())
         .collect();
+    let version = listed
+        .iter()
+        .find(|d| crate::version_key(&d.version) == newest)
+        .map_or("", |d| d.version.as_str());
     format!(
-        "{} {} build {newest}; this device runs build {ours}. Update Asli here to keep up.",
+        "{} {} Asli {version}; this device runs {}. Update Asli here to keep up.",
         names.join(", "),
-        if names.len() == 1 { "runs" } else { "run" }
+        if names.len() == 1 { "runs" } else { "run" },
+        crate::VERSION
     )
 }
 
@@ -1584,9 +1627,9 @@ fn refresh_shelf(window: &AppWindow, transfers: &crate::transfer::Transfers, now
         let size = human_bytes(usize::try_from(item.size).unwrap_or(usize::MAX));
         let hours = item.expires_ms.saturating_sub(now) / 3_600_000;
         let left = match hours {
-            0 => "under an hour left".to_owned(),
-            1 => "1 hour left".to_owned(),
-            n => format!("{n} hours left"),
+            0 => "Under an Hour Left".to_owned(),
+            1 => "1 Hour Left".to_owned(),
+            n => format!("{n} Hours Left"),
         };
         match item.device_id {
             Some(_) => format!("{}  ·  {size}  ·  {left}", item.device),
@@ -1635,7 +1678,7 @@ fn shelve_file(path: &std::path::Path) {
 
 /// Attaches the callbacks of the Shelf screen.
 fn wire_shelf(window: &AppWindow) {
-    window.on_add_to_shelf(|| pick_then(false, |path| shelve_file(&path)));
+    window.on_add_to_shelf(|| pick_then(Pick::File, |path| shelve_file(&path)));
 
     window.on_unshelve(|index| {
         let item = SHELF_MINE.with_borrow(|ids| {
@@ -1693,6 +1736,7 @@ fn wire_shelf(window: &AppWindow) {
 fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
     use crate::transfer::{Direction, Stage};
 
+    window.set_status_badge(i32::try_from(transfers.offers_waiting()).unwrap_or(i32::MAX));
     let listed = transfers.list();
     let offer = listed
         .iter()
@@ -1704,10 +1748,6 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
         window.set_offer_name(offer.name.clone().into());
         window
             .set_offer_size(human_bytes(usize::try_from(offer.size).unwrap_or(usize::MAX)).into());
-        let folder = OFFER_FOLDER
-            .with_borrow(Clone::clone)
-            .unwrap_or_else(crate::transfer::default_folder);
-        window.set_offer_folder(folder.display().to_string().into());
     }
 
     let shown: Vec<&crate::transfer::Listed> = listed
@@ -1726,16 +1766,16 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
                 _ => 0.0,
             };
             let detail = match &t.stage {
-                Stage::Offered => format!("{size}, waiting for them to accept"),
-                Stage::Moving(_) => format!("{size}, {}%", (progress * 100.0).round()),
+                Stage::Offered => format!("{size}  ·  Waiting for Them to Accept"),
+                Stage::Moving(_) => format!("{size}  ·  {}%", (progress * 100.0).round()),
                 Stage::Done(Some(path)) => format!(
-                    "{size}, saved in {}",
+                    "{size}  ·  Saved in {}",
                     path.parent()
                         .map_or_else(String::new, |p| p.display().to_string())
                 ),
-                Stage::Done(None) => format!("{size}, sent"),
-                Stage::Declined => "Turned down".to_owned(),
-                Stage::Cancelled => "Called off".to_owned(),
+                Stage::Done(None) => format!("{size}  ·  Sent"),
+                Stage::Declined => "Turned Down".to_owned(),
+                Stage::Cancelled => "Called Off".to_owned(),
                 Stage::Failed(why) => format!("Stopped: {why}"),
             };
             FileRow {
@@ -1748,6 +1788,7 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
                 detail: detail.into(),
                 progress,
                 live: !t.stage.finished(),
+                can_show: matches!(&t.stage, Stage::Done(Some(path)) if path.exists()),
                 good: matches!(t.stage, Stage::Done(_) | Stage::Declined | Stage::Cancelled),
             }
         })
@@ -1757,7 +1798,15 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
 
 /// Opens the system's own dialog to pick a file or a folder, on a thread of its own so the
 /// window stays responsive, and hands the result back on the window's thread.
-fn pick_then(folder: bool, then: impl FnOnce(std::path::PathBuf) + Send + 'static) {
+/// What a file dialog asks for.
+enum Pick {
+    /// A file to send or shelve.
+    File,
+    /// Where to save a file: starting in a folder, with a name filled in.
+    Save(std::path::PathBuf, String),
+}
+
+fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static) {
     let spawned = std::thread::Builder::new()
         .name("asli-pick".to_owned())
         .spawn(move || {
@@ -1766,10 +1815,16 @@ fn pick_then(folder: bool, then: impl FnOnce(std::path::PathBuf) + Send + 'stati
             };
             let picked = runtime.block_on(async {
                 let dialog = rfd::AsyncFileDialog::new();
-                if folder {
-                    dialog.pick_folder().await
-                } else {
-                    dialog.pick_file().await
+                match pick {
+                    Pick::File => dialog.pick_file().await,
+                    Pick::Save(folder, name) => {
+                        dialog
+                            .set_title("Save the File As")
+                            .set_directory(folder)
+                            .set_file_name(name)
+                            .save_file()
+                            .await
+                    }
                 }
             });
             if let Some(handle) = picked {
@@ -1793,6 +1848,74 @@ fn offer_file(path: &std::path::Path, to: [u8; 16]) {
     }
 }
 
+/// Shows a kept file in its folder, from its row in the list.
+fn show_file(index: i32) {
+    let id = FILE_ROWS.with_borrow(|rows| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| rows.get(i).copied())
+    });
+    let (Some(context), Some(id)) = (CONTEXT.get(), id) else {
+        return;
+    };
+    let kept = context
+        .controls
+        .transfers
+        .list()
+        .into_iter()
+        .find(|t| t.id == id)
+        .and_then(|t| match t.stage {
+            crate::transfer::Stage::Done(path) => path,
+            _ => None,
+        });
+    match kept {
+        Some(path) => {
+            if let Err(why) = crate::reveal::show_in_folder(&path) {
+                toast(&format!("Couldn't open the folder: {why}"), false);
+            }
+        }
+        None => toast("That File is No Longer There", false),
+    }
+}
+
+/// Accepting asks where to keep the file, every time, starting where the last one went.
+fn accept_offer() {
+    let (Some(context), Some(id)) = (CONTEXT.get(), OFFER_SHOWN.with_borrow(Clone::clone)) else {
+        return;
+    };
+    let Some(name) = context
+        .controls
+        .transfers
+        .list()
+        .into_iter()
+        .find(|t| t.id == id)
+        .map(|t| t.name)
+    else {
+        return;
+    };
+    let folder = OFFER_FOLDER
+        .with_borrow(Clone::clone)
+        .unwrap_or_else(crate::transfer::default_folder);
+    pick_then(Pick::Save(folder, name), move |path| {
+        let Some(context) = CONTEXT.get() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            OFFER_FOLDER.with_borrow_mut(|slot| *slot = Some(parent.to_path_buf()));
+        }
+        // The dialog has already asked about replacing a file of that name.
+        let replace = path.exists();
+        match context
+            .controls
+            .transfers
+            .accept_as(&id, path.clone(), replace)
+        {
+            Ok(()) => toast(&format!("Saving to {}", path.display()), true),
+            Err(why) => toast(&why, false),
+        }
+    });
+}
+
 /// Attaches the callbacks of the file controls on Status.
 fn wire_files(window: &AppWindow) {
     window.on_send_file(|index| {
@@ -1804,32 +1927,10 @@ fn wire_files(window: &AppWindow) {
         let Some(to) = device.and_then(|d| crate::devices::id_bytes(&d.id)) else {
             return;
         };
-        pick_then(false, move |path| offer_file(&path, to));
+        pick_then(Pick::File, move |path| offer_file(&path, to));
     });
 
-    window.on_change_offer_folder(|| {
-        pick_then(true, |folder| {
-            OFFER_FOLDER.with_borrow_mut(|slot| *slot = Some(folder));
-            WINDOW.with_borrow(|window| {
-                if let Some(window) = window.as_ref() {
-                    refresh_status(window);
-                }
-            });
-        });
-    });
-
-    window.on_accept_offer(|| {
-        let (Some(context), Some(id)) = (CONTEXT.get(), OFFER_SHOWN.with_borrow(Clone::clone))
-        else {
-            return;
-        };
-        let folder = OFFER_FOLDER
-            .with_borrow(Clone::clone)
-            .unwrap_or_else(crate::transfer::default_folder);
-        if let Err(why) = context.controls.transfers.accept(&id, &folder) {
-            toast(&why, false);
-        }
-    });
+    window.on_accept_offer(accept_offer);
 
     window.on_decline_offer(|| {
         if let (Some(context), Some(id)) = (CONTEXT.get(), OFFER_SHOWN.with_borrow(Clone::clone)) {
@@ -1847,6 +1948,8 @@ fn wire_files(window: &AppWindow) {
             context.controls.transfers.cancel(&id);
         }
     });
+
+    window.on_show_file(show_file);
 
     window.on_clear_files(|| {
         if let Some(context) = CONTEXT.get() {
@@ -1883,7 +1986,7 @@ fn wire_files(window: &AppWindow) {
 /// Watches for files dragged onto the window and dropped there.
 ///
 /// Through the platform window's own events, which winit reports on Windows, macOS and X11. On
-/// Wayland winit reports none, so there a file is sent with Send file on a device instead.
+/// Wayland winit reports none, so there a file is sent with Send File on a device instead.
 fn watch_for_dropped_files(window: &AppWindow) {
     use slint::winit_030::winit::event::WindowEvent;
     use slint::winit_030::{EventResult, WinitWindowAccessor as _};
@@ -1953,6 +2056,9 @@ fn set_rows<T: Clone + PartialEq + 'static>(
         replace(ModelRc::new(VecModel::from(rows)));
     }
 }
+
+/// How many devices are asking to join through the code on show, for the tray to mark itself.
+pub static JOIN_REQUESTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 thread_local! {
     /// The history revision the list was last drawn from, and when. Main thread only.
@@ -2430,7 +2536,7 @@ fn check_token(raw: &str) -> TokenCheck {
         return TokenCheck {
             valid: false,
             invalid: true,
-            message: "This is an old style join string, which carried the account key itself and is no longer accepted. On the other device, open Add a device and make a join code.".into(),
+            message: "This is an old style join string, which carried the account key itself and is no longer accepted. On the other device, open Add a Device and make a join code.".into(),
         };
     }
     match JoinCode::parse(trimmed) {
@@ -2502,7 +2608,7 @@ fn put_back(index: i32, everywhere: bool) {
         .and_then(|history| history.restore(index));
 
     let Some(clip) = clip else {
-        toast("That entry is no longer there", false);
+        toast("That Entry is No Longer There", false);
         return;
     };
 
@@ -2536,9 +2642,9 @@ fn put_back(index: i32, everywhere: bool) {
             let paused = context.controls.is_paused();
             toast(
                 match (everywhere, paused) {
-                    (true, false) => "Sent to your devices",
+                    (true, false) => "Sent to Your Devices",
                     (true, true) => "Copied here. Sync is paused, so it went nowhere else.",
-                    (false, _) => "Copied on this device",
+                    (false, _) => "Copied on This Device",
                 },
                 true,
             );
@@ -2573,7 +2679,7 @@ fn clear_history() {
             refresh_history(window);
         }
     });
-    toast("History cleared", true);
+    toast("History Cleared", true);
 }
 
 /// Pauses or resumes syncing.
@@ -2615,7 +2721,7 @@ fn retry_now() {
         .settings
         .reconnect
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    toast("Retrying now", true);
+    toast("Retrying Now", true);
 }
 
 /// Asks the daemon for the clip the relay is holding.
@@ -2626,7 +2732,7 @@ fn request_retained() {
     if context.controls.status.get().has_retained {
         context.controls.request_retained();
         eprintln!("{}", log_line("paste_retained", "requested from the relay"));
-        toast("Fetching the stored clip", true);
+        toast("Fetching the Stored Clip", true);
     } else {
         toast("The relay has nothing new for this device", false);
     }
@@ -2646,7 +2752,7 @@ fn copy_diagnostics() {
         eprintln!("{}", log_line("diagnostics_failed", &err.to_string()));
         toast(&format!("Couldn't copy diagnostics: {err}"), false);
     } else {
-        toast("Diagnostics copied", true);
+        toast("Diagnostics Copied", true);
     }
 }
 
@@ -2682,7 +2788,7 @@ pub fn welcome_after_restart() {
     let (screen, text, good) = match reason.to_str() {
         Some("created") => (
             Screen::Status,
-            "Account created. Add your other devices from Add a device.",
+            "Account created. Add your other devices from Add a Device.",
             true,
         ),
         Some("joined") => (
@@ -2771,7 +2877,7 @@ fn restart_self(welcome: Welcome) {
         Ok(_) => crate::cli::exit_removing_tray(0),
         Err(err) => {
             eprintln!("{}", log_line("restart_failed", &err.to_string()));
-            notify::action_failed("Restart Asli to use the new account", &err.to_string());
+            notify::action_failed("Restart Asli to Use the New Account", &err.to_string());
         }
     }
 }
@@ -2894,7 +3000,7 @@ mod tests {
         assert!(check.invalid && !check.valid);
         assert!(check.message.contains("old style"), "got {}", check.message);
         assert!(
-            check.message.contains("Add a device"),
+            check.message.contains("Add a Device"),
             "got {}",
             check.message
         );
@@ -3063,7 +3169,7 @@ mod tests {
         offline.retry_at_ms = Some(now + 23_500);
         let shown = present(&offline, false, "asli.vnat.dev", now);
         assert_eq!(shown.state, SyncState::Error);
-        assert_eq!(shown.label, "Connection failed");
+        assert_eq!(shown.label, "Connection Failed");
         assert!(shown.detail.contains("Retrying in 24s"), "{}", shown.detail);
 
         let stopped = present(

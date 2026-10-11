@@ -164,11 +164,11 @@ fn main() {
             "08d-status-offer",
             Box::new(|ui: &AppWindow| {
                 ui.set_screen(Screen::Status);
+                ui.set_status_badge(1);
                 ui.set_offer_waiting(true);
                 ui.set_offer_from("MacBook-Air".into());
                 ui.set_offer_name("Quarterly report final.pdf".into());
                 ui.set_offer_size("3.4 MB".into());
-                ui.set_offer_folder("~/Downloads".into());
                 sample_files(ui);
             }),
         ),
@@ -231,7 +231,7 @@ fn main() {
             "08h-status-update",
             Box::new(|ui: &AppWindow| {
                 ui.set_screen(Screen::Status);
-                ui.set_update_note("MacBook Pro runs build 131; this device runs build 129. Update Asli here to keep up.".into());
+                ui.set_update_note("MacBook Pro runs Asli 0.1.2; this device runs 0.1.1. Update Asli here to keep up.".into());
             }),
         ),
         (
@@ -363,6 +363,7 @@ fn sample_files(ui: &AppWindow) {
             detail: "212 MB · 41%".into(),
             progress: 0.41,
             live: true,
+            can_show: false,
             good: false,
         },
         FileRow {
@@ -371,6 +372,7 @@ fn sample_files(ui: &AppWindow) {
             detail: "4 KB · saved to Downloads".into(),
             progress: 1.0,
             live: false,
+            can_show: true,
             good: true,
         },
         FileRow {
@@ -379,12 +381,14 @@ fn sample_files(ui: &AppWindow) {
             detail: "1.2 GB · declined".into(),
             progress: 0.0,
             live: false,
+            can_show: false,
             good: false,
         },
     ])));
 }
 
 fn sample(ui: &AppWindow) {
+    ui.set_app_version("0.1.1".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
@@ -414,7 +418,7 @@ fn sample(ui: &AppWindow) {
             this_device: true,
             removable: false,
             can_send: false,
-            version: "0.1.0 (build 129)".into(),
+            version: "0.1.1".into(),
             outdated: false,
             forgettable: false,
         },
@@ -427,7 +431,7 @@ fn sample(ui: &AppWindow) {
             this_device: false,
             removable: true,
             can_send: true,
-            version: "0.1.0 (build 131)".into(),
+            version: "0.1.2".into(),
             outdated: false,
             forgettable: false,
         },
@@ -440,7 +444,7 @@ fn sample(ui: &AppWindow) {
             this_device: false,
             removable: true,
             can_send: false,
-            version: "0.1.0 (build 118)".into(),
+            version: "0.1.0".into(),
             outdated: true,
             forgettable: false,
         },

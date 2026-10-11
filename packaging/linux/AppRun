@@ -38,6 +38,6 @@ if bash "$INSTALLER" "$@" >"$LOG_DIR/install.log" 2>&1; then
     exit 0
 fi
 if command -v notify-send >/dev/null 2>&1; then
-    notify-send --app-name=Asli "Asli could not be installed" "What went wrong is in $LOG_DIR/install.log"
+    notify-send --app-name=Asli "Asli Could Not Be Installed" "What went wrong is in $LOG_DIR/install.log"
 fi
 exit 1

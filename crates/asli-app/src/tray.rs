@@ -196,7 +196,7 @@ pub struct Tray {
     retained_item: MenuItem,
     paused: Arc<AtomicBool>,
     /// The state the icon currently shows, so it is only redrawn when it actually changes.
-    icon_state: Mutex<(IconState, bool)>,
+    icon_state: Mutex<(IconState, bool, bool)>,
 }
 
 impl Tray {
@@ -212,7 +212,7 @@ impl Tray {
         // Disabled items are labels: this protocol has no separate label concept, and an enabled
         // item that does nothing when clicked is worse than one that cannot be clicked.
         let status_item = MenuItem::new("Starting", false, None);
-        let last_sync_item = MenuItem::new("Last Sync: never", false, None);
+        let last_sync_item = MenuItem::new("Last Sync: Never", false, None);
         let pause_item = MenuItem::with_id(id::PAUSE, "Pause Sync", true, None);
         let retained_item =
             MenuItem::with_id(id::PASTE_RETAINED, "Paste Last Synced Clip", true, None);
@@ -253,7 +253,7 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Asli")
-            .with_icon(icon_for(IconState::Offline, false)?)
+            .with_icon(icon_for(IconState::Offline, false, false)?)
             // A left click opens the window and a right click opens the menu, as on every other
             // tray application. The default on Windows and macOS is the menu for both.
             .with_menu_on_left_click(false)
@@ -267,7 +267,7 @@ impl Tray {
             pause_item,
             retained_item,
             paused,
-            icon_state: Mutex::new((IconState::Offline, false)),
+            icon_state: Mutex::new((IconState::Offline, false, false)),
         })
     }
 
@@ -277,7 +277,10 @@ impl Tray {
     ///
     /// Panics only if another thread panicked while holding the icon state lock, which is already
     /// fatal for the tray thread.
-    pub fn refresh(&self, status: &Status, now_ms: u64) {
+    /// `waiting` is how many things wait for the person: files offered here, devices asking to
+    /// join. While above zero the icon carries a red dot in its upper corner, and it goes the moment
+    /// nothing waits.
+    pub fn refresh(&self, status: &Status, now_ms: u64, waiting: u32) {
         let paused = self.paused.load(Ordering::Relaxed);
 
         self.status_item.set_text(if paused {
@@ -287,7 +290,7 @@ impl Tray {
         });
         self.last_sync_item.set_text(format!(
             "Last Sync: {}",
-            relative_time(status.last_sync_ms, now_ms)
+            crate::title_case(&relative_time(status.last_sync_ms, now_ms))
         ));
         self.pause_item
             .set_text(if paused { "Resume Sync" } else { "Pause Sync" });
@@ -300,10 +303,18 @@ impl Tray {
         // Connecting alternates its badge on every refresh, which is the only state that
         // redraws without changing.
         let blink = state == IconState::Connecting && !current.1;
-        let wanted = (state, blink);
+        let attention = waiting > 0;
+        let wanted = (state, blink, attention);
         if *current != wanted {
-            if let Ok(icon) = icon_for(state, blink) {
+            if let Ok(icon) = icon_for(state, blink, attention) {
                 let _ = self.icon.set_icon(Some(icon));
+                if current.2 != attention {
+                    let _ = self.icon.set_tooltip(Some(if attention {
+                        format!("Asli: {waiting} Waiting for You")
+                    } else {
+                        "Asli".to_owned()
+                    }));
+                }
                 *current = wanted;
             }
         }
@@ -411,12 +422,12 @@ const ICON_SIZE: u32 = 32;
 ///
 /// Returns [`Error::ConfigDir`] if the buffer does not match the dimensions, which would be an
 /// arithmetic mistake in the drawing loop rather than anything environmental.
-pub fn icon_for(state: IconState, blink: bool) -> Result<Icon> {
+pub fn icon_for(state: IconState, blink: bool, attention: bool) -> Result<Icon> {
     let badge = badge_colour(state, blink);
     let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
     for y in 0..ICON_SIZE {
         for x in 0..ICON_SIZE {
-            rgba.extend_from_slice(&draw_pixel(x, y, badge));
+            rgba.extend_from_slice(&draw_pixel(x, y, badge, attention));
         }
     }
     Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
@@ -438,13 +449,16 @@ const fn badge_colour(state: IconState, blink: bool) -> Option<[u8; 3]> {
 ///
 /// Split out so the shape is testable without constructing an [`Icon`], and so the loop above
 /// stays readable. Coordinates below are the design's 16 unit grid.
-fn draw_pixel(x: u32, y: u32, badge: Option<[u8; 3]>) -> [u8; 4] {
+fn draw_pixel(x: u32, y: u32, badge: Option<[u8; 3]>, attention: bool) -> [u8; 4] {
+    /// The red of a notification count, the same as the window's.
+    const ATTENTION: [u8; 3] = [0xF2, 0x55, 0x5A];
     const SAMPLES: u32 = 4;
     #[allow(clippy::cast_precision_loss)]
     let unit =
         |p: u32, s: u32| (p as f32 + (s as f32 + 0.5) / SAMPLES as f32) * 16.0 / ICON_SIZE as f32;
 
     let (mut back, mut front, mut hole, mut dot) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut alert_hole, mut alert) = (0.0f32, 0.0f32);
     for sy in 0..SAMPLES {
         for sx in 0..SAMPLES {
             let (ux, uy) = (unit(x, sx), unit(y, sy));
@@ -455,14 +469,24 @@ fn draw_pixel(x: u32, y: u32, badge: Option<[u8; 3]>) -> [u8; 4] {
             let badge_distance = (ux - 12.5).hypot(uy - 12.5);
             hole += f32::from(u8::from(badge.is_some() && badge_distance <= 3.5));
             dot += f32::from(u8::from(badge.is_some() && badge_distance <= 2.25));
+            // Upper right, where a notification count sits on every platform.
+            let alert_distance = (ux - 13.0).hypot(uy - 3.0);
+            alert_hole += f32::from(u8::from(attention && alert_distance <= 3.5));
+            alert += f32::from(u8::from(attention && alert_distance <= 2.75));
         }
     }
     #[allow(clippy::cast_precision_loss)]
     let total = (SAMPLES * SAMPLES) as f32;
     let (back, front, hole, dot) = (back / total, front / total, hole / total, dot / total);
+    let (alert_hole, alert) = (alert_hole / total, alert / total);
 
     // White sheets: the front solid, the back at 55 %, behind it.
-    let sheets = (front + back * 0.55 * (1.0 - front)) * (1.0 - hole);
+    let sheets = (front + back * 0.55 * (1.0 - front)) * (1.0 - hole) * (1.0 - alert_hole);
+    let (badge, dot) = if alert > 0.0 {
+        (Some(ATTENTION), alert)
+    } else {
+        (badge, dot)
+    };
     let (colour, alpha) = match badge {
         Some(badge) if dot > 0.0 => {
             let alpha = dot + sheets * (1.0 - dot);
@@ -671,7 +695,10 @@ mod tests {
             IconState::Offline,
         ] {
             for blink in [false, true] {
-                icon_for(state, blink).unwrap_or_else(|e| panic!("{state:?} must be valid: {e}"));
+                for attention in [false, true] {
+                    icon_for(state, blink, attention)
+                        .unwrap_or_else(|e| panic!("{state:?} must be valid: {e}"));
+                }
             }
         }
     }
@@ -683,7 +710,7 @@ mod tests {
         let pixels = |state: IconState, blink: bool| -> Vec<u8> {
             let badge = badge_colour(state, blink);
             (0..ICON_SIZE)
-                .flat_map(|y| (0..ICON_SIZE).flat_map(move |x| draw_pixel(x, y, badge)))
+                .flat_map(|y| (0..ICON_SIZE).flat_map(move |x| draw_pixel(x, y, badge, false)))
                 .collect()
         };
         let connected = pixels(IconState::Connected, false);

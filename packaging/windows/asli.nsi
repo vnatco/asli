@@ -37,7 +37,7 @@ VIProductVersion "${VIVERSION}"
 VIAddVersionKey "ProductName" "Asli"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"
-VIAddVersionKey "FileDescription" "Asli installer"
+VIAddVersionKey "FileDescription" "Asli Installer"
 VIAddVersionKey "CompanyName" "vnatco"
 VIAddVersionKey "LegalCopyright" "MIT licensed"
 
@@ -53,7 +53,7 @@ VIAddVersionKey "LegalCopyright" "MIT licensed"
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW WelcomeShow
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_TITLE "Asli is running"
+!define MUI_FINISHPAGE_TITLE "Asli is Running"
 !define MUI_FINISHPAGE_TEXT "Look for its icon in the notification area at the right of the taskbar. It may be under the ^ arrow.$\r$\n$\r$\nClick the icon to create an account, or to join one you already have on another computer."
 !insertmacro MUI_PAGE_FINISH
 
@@ -91,7 +91,7 @@ Section "Asli" SecMain
   SetShellVarContext current
   SetOutPath "$INSTDIR"
 
-  DetailPrint "Stopping any running copy of Asli"
+  DetailPrint "Stopping Any Running Copy of Asli"
   !insertmacro StopAsli
 
   File "${SRCDIR}\asli.exe"
@@ -105,7 +105,7 @@ Section "Asli" SecMain
   ; on Windows 11 it wrote a link whose environment variable block named the target as
   ; %USERPROFILE%\..., which Windows could not resolve, so the entry failed to start and had no
   ; icon. The link starts the windowed asliw.exe, so no console opens, and takes its icon from it.
-  DetailPrint "Adding the Start menu entry"
+  DetailPrint "Adding the Start Menu Entry"
   nsExec::ExecToLog '"$INSTDIR\asli.exe" shortcut create "${STARTMENU_LINK}"'
   Pop $0
   ${If} $0 != 0
@@ -116,7 +116,7 @@ Section "Asli" SecMain
   ; beside it, which is the same code that checks the entry every time Asli starts. The Run key
   ; is deliberately not used: Explorer ignored it at logon on the owner's machine. A failure here
   ; does not fail the install, because Asli works without it and the tray retries at every start.
-  DetailPrint "Turning on start at login"
+  DetailPrint "Turning On Start at Login"
   nsExec::ExecToLog '"$INSTDIR\asli.exe" autostart on'
   Pop $0
   ${If} $0 != 0
@@ -141,7 +141,7 @@ Section "Asli" SecMain
   ; Every shortcut this install made, read back the way Explorer will use it: no environment
   ; variable block, and a target and icon that are on disk. A link that fails this is exactly the
   ; kind that shipped broken once, so the install stops rather than finishing with it.
-  DetailPrint "Checking the shortcuts"
+  DetailPrint "Checking the Shortcuts"
   StrCpy $1 '"${STARTMENU_LINK}"'
   ${If} ${FileExists} "${STARTUP_LINK}"
     StrCpy $1 '$1 "${STARTUP_LINK}"'

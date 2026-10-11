@@ -208,6 +208,8 @@ struct Incoming {
     moved: Instant,
     /// Coming straight from the sender on the local network, not through the relay.
     direct: bool,
+    /// The person chose this exact name and agreed to replace a file already there.
+    replace: bool,
 }
 
 impl Transfers {
@@ -386,6 +388,19 @@ impl Transfers {
         out.into_iter().map(|(_, listed)| listed).collect()
     }
 
+    /// How many files offered to this device wait for an answer.
+    #[must_use]
+    pub fn offers_waiting(&self) -> u32 {
+        self.0.lock().map_or(0, |state| {
+            let count = state
+                .receiving
+                .values()
+                .filter(|i| i.stage == Stage::Offered)
+                .count();
+            u32::try_from(count).unwrap_or(u32::MAX)
+        })
+    }
+
     /// A number that changes whenever anything shown does.
     #[must_use]
     pub fn revision(&self) -> u64 {
@@ -499,7 +514,7 @@ impl Transfers {
             });
         if direct.is_none() && state.same_network_only {
             return Err(format!(
-                "{peer} can't be reached on this network, and Same network only is on."
+                "{peer} can't be reached on this network, and Same Network Only is on."
             ));
         }
         let offer = Offer {
@@ -547,6 +562,33 @@ impl Transfers {
     /// Returns a sentence for the person when there is no such offer waiting, or the folder cannot
     /// be written to.
     pub fn accept(&self, id: &OfferId, folder: &Path) -> Result<(), String> {
+        let name = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|state| state.receiving.get(id).map(|i| safe_name(&i.offer.name)))
+            .ok_or("That file is no longer waiting.")?;
+        self.accept_as(id, unique_path(folder, &name), false)
+    }
+
+    /// Accepts an offered file under the exact path the person chose in a save dialog. With
+    /// `replace`, a file already there is replaced once this one has arrived and checked out,
+    /// which the dialog asked them about.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sentence for the person when there is no such offer waiting, or the folder cannot
+    /// be written to.
+    pub fn accept_as(
+        &self,
+        id: &OfferId,
+        final_path: PathBuf,
+        replace: bool,
+    ) -> Result<(), String> {
+        let folder = final_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         let mut state = self
             .0
             .lock()
@@ -562,7 +604,6 @@ impl Transfers {
             .get_mut(id)
             .filter(|i| i.stage == Stage::Offered)
             .ok_or("That file is no longer waiting.")?;
-        let final_path = unique_path(folder, &safe_name(&incoming.offer.name));
         let part_path = part_path_for(&final_path);
         let file = fs::OpenOptions::new()
             .write(true)
@@ -579,7 +620,7 @@ impl Transfers {
             drop(file);
             let _ = fs::remove_file(&part_path);
             return Err(
-                "It can only come through the relay, and Same network only is on.".to_owned(),
+                "It can only come through the relay, and Same Network Only is on.".to_owned(),
             );
         }
         if direct.is_none() {
@@ -589,6 +630,7 @@ impl Transfers {
             }
         }
         incoming.part = Some((file, part_path, final_path));
+        incoming.replace = replace;
         incoming.stage = Stage::Moving(0);
         incoming.moved = Instant::now();
         state.revision += 1;
@@ -627,7 +669,7 @@ impl Transfers {
             return;
         }
         if *same_network_only {
-            let reason = "it couldn't be reached on this network, and Same network only is on";
+            let reason = "it couldn't be reached on this network, and Same Network Only is on";
             match link.as_ref() {
                 Some(link) => fail_incoming(link, incoming, reason),
                 None => give_up_incoming(incoming, reason),
@@ -926,6 +968,7 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<Offered> {
             stage: Stage::Offered,
             moved: Instant::now(),
             direct: false,
+            replace: false,
         },
     );
     Some(if wanted {
@@ -966,7 +1009,7 @@ fn on_answer(state: &mut State, body: &[u8]) {
     }
     if state.same_network_only {
         outgoing.stage = Stage::Failed(
-            "it couldn't be reached on this network, and Same network only is on.".to_owned(),
+            "it couldn't be reached on this network, and Same Network Only is on.".to_owned(),
         );
         let cancel = Cancel {
             offer_id: answer.offer_id,
@@ -1131,7 +1174,7 @@ fn finish_incoming(incoming: &mut Incoming) -> AckState {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    let target = if final_path.exists() {
+    let target = if final_path.exists() && !incoming.replace {
         unique_path(&folder, &safe_name(&incoming.offer.name))
     } else {
         final_path

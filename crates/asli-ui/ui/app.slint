@@ -78,6 +78,8 @@ export struct FileRow {
     progress: float,
     // Still under way, so it can be called off.
     live: bool,
+    // Kept on this device, so its folder can be shown.
+    can-show: bool,
     // Over, and it went well.
     good: bool,
 }
@@ -156,6 +158,8 @@ component NavItem inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     in property <bool> selected: false;
+    // How many things on this screen wait for the person. Shown as a count while above zero.
+    in property <int> badge: 0;
     callback clicked();
 
     height: 34px;
@@ -203,6 +207,22 @@ component NavItem inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
             animate color { duration: 120ms; }
+        }
+
+        if root.badge > 0: Rectangle {
+            width: max(18px, badge-text.preferred-width + 10px);
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 9px;
+            background: Theme.error;
+            badge-text := Text {
+                text: root.badge;
+                color: #FFFFFF;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 
@@ -505,11 +525,13 @@ export component AppWindow inherits Window {
     in property <string> offer-from: "";
     in property <string> offer-name: "";
     in property <string> offer-size: "";
-    in property <string> offer-folder: "";
     in property <string> drop-name: "";
     in property <[string]> drop-targets: [];
     in property <bool> drop-hover: false;
     in property <string> update-note: "";
+    in property <string> app-version: "";
+    // Things on Status that wait for the person: a file offered to this device.
+    in property <int> status-badge: 0;
     in property <string> drop-note: "";
     in property <[ShelfRow]> shelf-mine: [];
     in property <[ShelfRow]> shelf-theirs: [];
@@ -581,8 +603,9 @@ export component AppWindow inherits Window {
     callback send-file(int);
     callback accept-offer();
     callback decline-offer();
-    callback change-offer-folder();
     callback cancel-file(int);
+    callback show-file(int);
+    callback copy-invite-code();
     callback clear-files();
     callback send-dropped(int);
     callback cancel-drop();
@@ -725,7 +748,7 @@ export component AppWindow inherits Window {
                             spacing: 0px;
                             CaptionButton {
                                 icon: Icons.win-minimize;
-                                label: "Minimize to tray";
+                                label: "Minimize to Tray";
                                 clicked => { root.minimize-window(); }
                             }
                             CaptionButton {
@@ -807,6 +830,7 @@ export component AppWindow inherits Window {
 
                                 NavItem {
                                     text: "Status";
+                                    badge: root.status-badge;
                                     icon: Icons.shield;
                                     selected: root.screen == Screen.Status;
                                     clicked => { root.open-screen(Screen.Status); }
@@ -824,7 +848,8 @@ export component AppWindow inherits Window {
                                     clicked => { root.open-screen(Screen.Shelf); }
                                 }
                                 NavItem {
-                                    text: "Add a device";
+                                    text: "Add a Device";
+                                    badge: root.invite-asking.length;
                                     icon: Icons.key;
                                     selected: root.screen == Screen.Token;
                                     clicked => { root.open-screen(Screen.Token); }
@@ -864,6 +889,12 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                         overflow: elide;
+                                    }
+                                    Text {
+                                        text: "v" + root.app-version;
+                                        color: Theme.text-4;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
                                     }
                                 }
                             }
@@ -945,7 +976,7 @@ export component AppWindow inherits Window {
                                     Banner {
                                         width: min(480px, parent.width);
                                         kind: BannerKind.error;
-                                        title: "Couldn't create the account";
+                                        title: "Couldn't Create the Account";
                                         body: root.create-error;
                                     }
                                 }
@@ -959,7 +990,7 @@ export component AppWindow inherits Window {
                                         ChoiceCard {
                                             primary: true;
                                             icon: Icons.plus;
-                                            title: "Create a new account";
+                                            title: "Create a New Account";
                                             body: "Start fresh on this device and invite the others.";
                                             enabled: !root.creating;
                                             busy: root.creating;
@@ -967,8 +998,8 @@ export component AppWindow inherits Window {
                                         }
                                         ChoiceCard {
                                             icon: Icons.key;
-                                            title: "Join an existing account";
-                                            body: "Paste a join string from another device.";
+                                            title: "Join an Existing Account";
+                                            body: "Type a join code from another device.";
                                             enabled: !root.creating;
                                             clicked => { root.open-screen(Screen.Join); }
                                         }
@@ -985,7 +1016,7 @@ export component AppWindow inherits Window {
                                         y: (parent.height - self.height) / 2;
                                     }
                                     Text {
-                                        text: "Keys never leave your devices";
+                                        text: "Keys Never Leave Your Devices";
                                         color: Theme.text-4;
                                         font-size: 11.5px;
                                         vertical-alignment: center;
@@ -1052,10 +1083,10 @@ export component AppWindow inherits Window {
                                             width: min(440px, parent.width);
                                             spacing: 0px;
 
-                                            Title { text: root.join-waiting ? "Approve this device" : "Join an existing account"; }
+                                            Title { text: root.join-waiting ? "Approve This Device" : "Join an Existing Account"; }
                                             Rectangle { height: 5px; }
                                             if !root.join-waiting: StyledText {
-                                                text: @markdown("On a device that is already set up, open <font color=\"#E9EDF6\">Add a device</font> and make a join code, then type it here.");
+                                                text: @markdown("On a device that is already set up, open <font color=\"#E9EDF6\">Add a Device</font> and make a join code, then type it here.");
                                                 default-color: Theme.text-2;
                                                 default-font-size: 13px;
                                             }
@@ -1082,7 +1113,7 @@ export component AppWindow inherits Window {
                                                 HorizontalLayout {
                                                     spacing: 8px;
                                                     Text {
-                                                        text: "Waiting for approval…";
+                                                        text: "Waiting for Approval…";
                                                         color: Theme.text-3;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
@@ -1095,7 +1126,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             if !root.join-waiting: Rectangle { height: 20px; }
-                                            if !root.join-waiting: Label { text: "Join code"; }
+                                            if !root.join-waiting: Label { text: "Join Code"; }
                                             if !root.join-waiting: Rectangle { height: 6px; }
                                             join-field := JoinArea {
                                                 visible: !root.join-waiting;
@@ -1155,7 +1186,7 @@ export component AppWindow inherits Window {
                                             if !root.join-waiting: HorizontalLayout {
                                                 spacing: 8px;
                                                 Button {
-                                                    text: root.join-busy ? "Joining…" : "Join account";
+                                                    text: root.join-busy ? "Joining…" : "Join Account";
                                                     kind: ButtonKind.primary;
                                                     busy: root.join-busy;
                                                     enabled: root.join-check.valid;
@@ -1176,7 +1207,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // ─────────────────────────── Add a device ────────────────────────
+                        // ─────────────────────────── Add a Device ────────────────────────
                         if root.screen == Screen.Token: ScreenFrame {
                             Scroller {
                                 content-height: invite-screen.preferred-height;
@@ -1189,7 +1220,7 @@ export component AppWindow inherits Window {
                                     spacing: 0px;
                                     alignment: start;
 
-                                    Title { text: "Add a device"; }
+                                    Title { text: "Add a Device"; }
                                     Rectangle { height: 4px; }
                                     Subtitle {
                                         text: "Make a join code here, type it on the new device, then approve it here.";
@@ -1202,7 +1233,7 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {
                                             alignment: start;
                                             Button {
-                                                text: "Create a join code";
+                                                text: "Create a Join Code";
                                                 kind: ButtonKind.primary;
                                                 pad-x: 14px;
                                                 clicked => { root.open-invite(); }
@@ -1228,7 +1259,6 @@ export component AppWindow inherits Window {
 
                                     if root.invite-state == InviteState.waiting: HorizontalLayout {
                                         spacing: 20px;
-                                        alignment: start;
 
                                         // The QR plate is white whatever the theme: a symbol
                                         // inverted by a dark theme is unreadable to most cameras.
@@ -1301,6 +1331,13 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                 }
                                                 Button {
+                                                    text: "Copy Code";
+                                                    small: true;
+                                                    icon: Icons.copy;
+                                                    show-icon: true;
+                                                    clicked => { root.copy-invite-code(); }
+                                                }
+                                                Button {
                                                     text: "Cancel";
                                                     small: true;
                                                     clicked => { root.close-invite(); }
@@ -1309,7 +1346,7 @@ export component AppWindow inherits Window {
                                             Rectangle { height: 16px; }
 
                                             if root.invite-asking.length == 0: Caption {
-                                                text: "On the new device, choose Join an existing account and type this code. Its request appears here.";
+                                                text: "On the new device, choose Join an Existing Account and type this code. Its request appears here.";
                                                 wrap: word-wrap;
                                             }
 
@@ -1324,7 +1361,7 @@ export component AppWindow inherits Window {
                                                         padding-right: 16px;
                                                         spacing: 0px;
                                                         Text {
-                                                            text: ask.name + " wants to join";
+                                                            text: ask.name + " Wants to Join";
                                                             color: Theme.text;
                                                             font-size: 13.5px;
                                                             font-weight: 600;
@@ -1381,7 +1418,7 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {
                                             alignment: start;
                                             Button {
-                                                text: "Add another device";
+                                                text: "Add Another Device";
                                                 pad-x: 14px;
                                                 clicked => { root.open-invite(); }
                                             }
@@ -1414,7 +1451,7 @@ export component AppWindow inherits Window {
                                         if root.history.length > 0 && !root.confirm-clear: VerticalLayout {
                                             alignment: start;
                                             Button {
-                                                text: "Clear all";
+                                                text: "Clear All";
                                                 icon: Icons.trash;
                                                 show-icon: true;
                                                 kind: ButtonKind.destructive;
@@ -1510,7 +1547,7 @@ export component AppWindow inherits Window {
                                         }
                                         Rectangle { height: 16px; }
                                         Text {
-                                            text: "History is off";
+                                            text: "History is Off";
                                             color: Theme.text;
                                             font-size: 15px;
                                             font-weight: 620;
@@ -1581,7 +1618,7 @@ export component AppWindow inherits Window {
                                         }
                                         Rectangle { height: 16px; }
                                         Text {
-                                            text: "Nothing copied yet";
+                                            text: "Nothing Copied Yet";
                                             color: Theme.text;
                                             font-size: 15px;
                                             font-weight: 620;
@@ -1604,7 +1641,7 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {
                                             alignment: center;
                                             Button {
-                                                text: "Add another device";
+                                                text: "Add Another Device";
                                                 small: true;
                                                 clicked => { root.open-screen(Screen.Token); }
                                             }
@@ -1717,7 +1754,7 @@ export component AppWindow inherits Window {
                                                     spacing: 2px;
                                                     IconButton {
                                                         icon: Icons.copy;
-                                                        label: "Copy on this device only";
+                                                        label: "Copy on This Device Only";
                                                         y: (parent.height - self.height) / 2;
                                                         clicked => { root.copy-entry(index); }
                                                     }
@@ -1818,7 +1855,7 @@ export component AppWindow inherits Window {
                                                 padding-right: 16px;
                                                 spacing: 0px;
                                                 Text {
-                                                    text: root.offer-from + " wants to send you a file";
+                                                    text: root.offer-from + " Wants to Send You a File";
                                                     color: Theme.text;
                                                     font-size: 13.5px;
                                                     font-weight: 600;
@@ -1848,29 +1885,14 @@ export component AppWindow inherits Window {
                                                         vertical-alignment: center;
                                                     }
                                                 }
-                                                Rectangle { height: 8px; }
-                                                HorizontalLayout {
-                                                    spacing: 8px;
-                                                    Caption {
-                                                        text: "Save to " + root.offer-folder;
-                                                        overflow: elide;
-                                                        horizontal-stretch: 1;
-                                                        vertical-alignment: center;
-                                                    }
-                                                    Button {
-                                                        text: "Change";
-                                                        small: true;
-                                                        clicked => { root.change-offer-folder(); }
-                                                    }
-                                                }
                                                 Rectangle { height: 12px; }
                                                 HorizontalLayout {
                                                     spacing: 8px;
                                                     alignment: start;
                                                     Button {
-                                                        text: "Accept";
+                                                        text: "Accept and Save As…";
                                                         kind: ButtonKind.primary;
-                                                        icon: Icons.check;
+                                                        icon: Icons.download;
                                                         show-icon: true;
                                                         clicked => { root.accept-offer(); }
                                                     }
@@ -1881,7 +1903,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 Rectangle { height: 8px; }
                                                 Caption {
-                                                    text: "Only accept files you expect. Asli never opens them.";
+                                                    text: "You choose where it is saved. Only accept files you expect; Asli never opens them.";
                                                 }
                                             }
                                         }
@@ -1900,8 +1922,8 @@ export component AppWindow inherits Window {
                                                 spacing: 0px;
                                                 Text {
                                                     text: root.drop-targets.length > 0
-                                                        ? "Send " + root.drop-name + " to"
-                                                        : "No device can receive " + root.drop-name + " right now";
+                                                        ? "Send " + root.drop-name + " To"
+                                                        : "No Device Can Receive " + root.drop-name + " Right Now";
                                                     color: Theme.text;
                                                     font-size: 13.5px;
                                                     font-weight: 600;
@@ -1927,7 +1949,7 @@ export component AppWindow inherits Window {
                                                         clicked => { root.send-dropped(t); }
                                                     }
                                                     Button {
-                                                        text: "Put on the shelf";
+                                                        text: "Put on the Shelf";
                                                         icon: Icons.shelf;
                                                         show-icon: true;
                                                         clicked => { root.shelve-dropped(); }
@@ -1954,7 +1976,7 @@ export component AppWindow inherits Window {
                                         padding-bottom: 14px;
                                         Banner {
                                             kind: BannerKind.warning;
-                                            title: "This device is not on the latest Asli";
+                                            title: "This Device is Not on the Latest Asli";
                                             body: root.update-note;
                                         }
                                     }
@@ -1966,13 +1988,13 @@ export component AppWindow inherits Window {
                                         spacing: 8px;
                                         Banner {
                                             kind: BannerKind.warning;
-                                            title: "Replace this account's key";
+                                            title: "Replace This Account's Key";
                                             body: "An earlier version showed it as a join string, which may still be in a screenshot or a chat. A new key leaves any old copy useless. Devices that are offline when you do it will need to join again.";
                                         }
                                         HorizontalLayout {
                                             alignment: start;
                                             Button {
-                                                text: "Replace the key";
+                                                text: "Replace the Key";
                                                 busy: root.rekey-busy;
                                                 clicked => { root.ask-replace-key(); }
                                             }
@@ -2047,7 +2069,7 @@ export component AppWindow inherits Window {
                                                     Button {
                                                         pad-x: 16px;
                                                         text: root.paused ? "Resume"
-                                                            : root.sync-state == SyncState.error ? "Retry now" : "Pause";
+                                                            : root.sync-state == SyncState.error ? "Retry Now" : "Pause";
                                                         icon: root.paused ? Icons.play
                                                             : root.sync-state == SyncState.error ? Icons.refresh : Icons.pause;
                                                         show-icon: true;
@@ -2112,12 +2134,12 @@ export component AppWindow inherits Window {
                                         Banner {
                                             kind: BannerKind.info;
                                             icon: Icons.download;
-                                            title: "The relay is holding a clip";
+                                            title: "The Relay is Holding a Clip";
                                             body: "Something was copied while this device was away. It isn't written automatically, because that would overwrite what you copied here since.";
                                             VerticalLayout {
                                                 alignment: center;
                                                 Button {
-                                                    text: "Paste it here";
+                                                    text: "Paste It Here";
                                                     small: true;
                                                     clicked => { root.request-retained(); }
                                                 }
@@ -2135,7 +2157,7 @@ export component AppWindow inherits Window {
                                             }
                                             Rectangle { horizontal-stretch: 1; }
                                             Button {
-                                                text: "Clear finished";
+                                                text: "Clear Finished";
                                                 small: true;
                                                 clicked => { root.clear-files(); }
                                             }
@@ -2185,6 +2207,12 @@ export component AppWindow inherits Window {
                                                             small: true;
                                                             y: (parent.height - self.height) / 2;
                                                             clicked => { root.cancel-file(f); }
+                                                        }
+                                                        if file.can-show: Button {
+                                                            text: "Show in Folder";
+                                                            small: true;
+                                                            y: (parent.height - self.height) / 2;
+                                                            clicked => { root.show-file(f); }
                                                         }
                                                     }
                                                     if f < root.files.length - 1: Rectangle {
@@ -2306,7 +2334,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                     if device.can-send: Button {
-                                                        text: "Send file";
+                                                        text: "Send File";
                                                         small: true;
                                                         icon: Icons.send;
                                                         show-icon: true;
@@ -2356,7 +2384,7 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 alignment: start;
                                                 Button {
-                                                    text: "Copy diagnostics";
+                                                    text: "Copy Diagnostics";
                                                     icon: Icons.copy;
                                                     show-icon: true;
                                                     kind: ButtonKind.ghost;
@@ -2397,7 +2425,7 @@ export component AppWindow inherits Window {
                                         VerticalLayout {
                                             alignment: start;
                                             Button {
-                                                text: "Add a file";
+                                                text: "Add a File";
                                                 icon: Icons.plus;
                                                 show-icon: true;
                                                 kind: ButtonKind.primary;
@@ -2415,7 +2443,7 @@ export component AppWindow inherits Window {
                                             if root.shelf-mine.length == 0: HorizontalLayout {
                                                 padding: 14px;
                                                 Caption {
-                                                    text: "Nothing yet. Add a file, or drop one on this window.";
+                                                    text: "Nothing yet. Add a File, or drop one on this window.";
                                                     wrap: word-wrap;
                                                 }
                                             }
@@ -2554,7 +2582,7 @@ export component AppWindow inherits Window {
                                             padding-right: 16px;
                                             spacing: 0px;
 
-                                            Label { text: "Relay address"; }
+                                            Label { text: "Relay Address"; }
                                             Rectangle { height: 6px; }
                                             TextField {
                                                 placeholder: "wss://asli.vnat.dev/v1";
@@ -2581,7 +2609,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             Rectangle { height: 14px; }
-                                            Label { text: "Largest clip to sync"; }
+                                            Label { text: "Largest Clip to Sync"; }
                                             Rectangle { height: 6px; }
                                             Select {
                                                 options: ["256 KB", "700 KB", "1 MB", "4 MB"];
@@ -2605,14 +2633,14 @@ export component AppWindow inherits Window {
                                                 padding-right: 16px;
                                                 spacing: 0px;
                                                 Text {
-                                                    text: "Device name";
+                                                    text: "Device Name";
                                                     color: Theme.text;
                                                     font-size: 13px;
                                                     font-weight: 500;
                                                 }
                                                 Rectangle { height: 6px; }
                                                 TextField {
-                                                    placeholder: "This computer";
+                                                    placeholder: "This Computer";
                                                     text <=> root.device-name;
                                                 }
                                                 Rectangle { height: 6px; }
@@ -2626,20 +2654,20 @@ export component AppWindow inherits Window {
                                                 toggled(on) => { root.set-notifications(on); }
                                             }
                                             SettingRow {
-                                                title: "Start at login";
+                                                title: "Start at Login";
                                                 detail: root.autostart-detail;
                                                 mono-detail: true;
                                                 checked <=> root.autostart;
                                                 toggled(on) => { root.set-autostart(on); }
                                             }
                                             SettingRow {
-                                                title: "Same network only";
+                                                title: "Same Network Only";
                                                 detail: "Approve a new device, and send or receive a file, only when the other device is on this network. Clips still sync from anywhere.";
                                                 checked <=> root.same-network-only;
                                                 toggled(on) => { root.set-same-network-only(on); }
                                             }
                                             SettingRow {
-                                                title: "Keep history";
+                                                title: "Keep History";
                                                 detail: "Stored on this device only, encrypted with your account key. Anything marked as a password is never recorded.";
                                                 checked <=> root.keep-history;
                                                 toggled(on) => { root.set-keep-history(on); }
@@ -2651,7 +2679,7 @@ export component AppWindow inherits Window {
                                                 padding-right: 16px;
                                                 spacing: 0px;
                                                 Text {
-                                                    text: "Keep at most";
+                                                    text: "Keep at Most";
                                                     color: root.keep-history ? Theme.text : Theme.text-4;
                                                     font-size: 13px;
                                                     font-weight: 500;
@@ -2696,8 +2724,8 @@ export component AppWindow inherits Window {
                                                 y: (parent.height - self.height) / 2;
                                             }
                                             Text {
-                                                text: root.settings-dirty ? "Unsaved changes"
-                                                    : root.settings-saved-flash ? "Saved" : "All changes saved";
+                                                text: root.settings-dirty ? "Unsaved Changes"
+                                                    : root.settings-saved-flash ? "Saved" : "All Changes Saved";
                                                 color: root.settings-dirty ? Theme.warning
                                                     : root.settings-saved-flash ? Theme.success : Theme.text-4;
                                                 font-size: 11.5px;
@@ -2732,7 +2760,7 @@ export component AppWindow inherits Window {
                                             Text {
                                                 text: root.confirm-leave
                                                     ? "Leave the account on this device? Its account key, device list, history and shelf are deleted here. Your other devices take it off their lists and keep working."
-                                                    : "Leave this account signs this device out: its account key, device list, history and shelf are deleted here, and your other devices take it off their lists. Joining another account does the same, then joins the new one.";
+                                                    : "Leave This Account signs this device out: its account key, device list, history and shelf are deleted here, and your other devices take it off their lists. Joining another account does the same, then joins the new one.";
                                                 color: root.confirm-leave ? Theme.text : Theme.text-2;
                                                 font-size: 12px;
                                                 wrap: word-wrap;
@@ -2741,12 +2769,12 @@ export component AppWindow inherits Window {
                                                 alignment: start;
                                                 spacing: 8px;
                                                 Button {
-                                                    text: "Leave this account";
+                                                    text: "Leave This Account";
                                                     kind: ButtonKind.danger;
                                                     clicked => { root.confirm-leave = true; }
                                                 }
                                                 Button {
-                                                    text: "Join another account";
+                                                    text: "Join Another Account";
                                                     kind: ButtonKind.destructive;
                                                     clicked => { root.confirm-join-other = true; }
                                                 }
@@ -2797,7 +2825,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     Text {
-                                        text: "Drop to send it to another device";
+                                        text: "Drop to Send It to Another Device";
                                         color: Theme.text;
                                         font-size: 15px;
                                         font-weight: 600;
@@ -2857,7 +2885,7 @@ export component AppWindow inherits Window {
                         padding: 20px;
                         spacing: 0px;
                         Text {
-                            text: "Join another account?";
+                            text: "Join Another Account?";
                             color: Theme.text;
                             font-size: 15px;
                             font-weight: 620;

@@ -34,26 +34,90 @@
 
 #![forbid(unsafe_code)]
 
-/// This build's number: how many commits its source had. Higher is newer; 0 is unknown.
+/// Words that stay lower case inside a Title Case label, unless first or last.
+const MINOR_WORDS: [&str; 19] = [
+    "a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet", "as", "at", "by", "in", "of",
+    "on", "to", "up", "via",
+];
+
+/// A short label in Title Case, the house style for every label, button and status in the
+/// interface: each word capitalised except short minor words, which are capitalised only first or
+/// last. Words that already hold a capital (names, `MB`) are left as they are.
 #[must_use]
-pub fn build_number() -> u32 {
-    env!("ASLI_BUILD").parse().unwrap_or(0)
+pub fn title_case(text: &str) -> String {
+    let words: Vec<&str> = text.split(' ').collect();
+    let last = words.len().saturating_sub(1);
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, word)| {
+            let bare = word
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            let minor = bare == "is" || MINOR_WORDS.contains(&bare.as_str());
+            if word.chars().any(char::is_uppercase) || (minor && i != 0 && i != last) {
+                (*word).to_owned()
+            } else {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().chain(chars).collect()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// This build, as a person reads it: the version, and the build number when there is one.
-#[must_use]
-pub fn build_label() -> String {
-    describe_build(env!("CARGO_PKG_VERSION"), build_number())
-}
+#[cfg(test)]
+mod title_case_tests {
+    use super::title_case;
 
-/// A version and build number as a person reads them.
-#[must_use]
-pub fn describe_build(version: &str, build: u32) -> String {
-    if build == 0 {
-        version.to_owned()
-    } else {
-        format!("{version} (build {build})")
+    #[test]
+    fn labels_follow_the_house_style() {
+        for (given, wanted) in [
+            ("offline, retrying", "Offline, Retrying"),
+            ("17 minutes ago", "17 Minutes Ago"),
+            ("never", "Never"),
+            ("add a device", "Add a Device"),
+            ("history is off", "History is Off"),
+            ("a minute ago", "A Minute Ago"),
+            ("saved in ~/Downloads", "Saved in ~/Downloads"),
+            ("show in folder", "Show in Folder"),
+            ("3.4 MB sent", "3.4 MB Sent"),
+            ("waiting for them to accept", "Waiting for Them to Accept"),
+            ("what is this up to", "What is This up To"),
+        ] {
+            assert_eq!(title_case(given), wanted);
+        }
     }
+
+    #[test]
+    fn versions_compare_as_numbers() {
+        use super::version_key;
+        assert!(version_key("0.1.10") > version_key("0.1.9"));
+        assert!(version_key("0.2.0") > version_key("0.1.99"));
+        assert_eq!(version_key("v1.2.3"), (1, 2, 3));
+        assert_eq!(version_key(""), (0, 0, 0));
+    }
+}
+
+/// This Asli's version, bumped with every change. Devices compare it to say which is newest.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A version as numbers, for comparing: `0.1.12` is `(0, 1, 12)`. Unreadable parts count as 0,
+/// so an empty or garbled version sorts as the oldest.
+#[must_use]
+pub fn version_key(version: &str) -> (u64, u64, u64) {
+    let mut parts = version
+        .trim()
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 pub mod autostart;
@@ -72,6 +136,7 @@ pub mod macos;
 pub mod notify;
 pub mod qr;
 pub mod replay_store;
+pub mod reveal;
 pub mod secrets;
 pub mod shortcut;
 pub mod transfer;

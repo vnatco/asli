@@ -18,8 +18,8 @@ pub(super) fn announce(state: &State, ask: bool, to: Option<&str>) {
         from_device_id: link.device_id,
         ask,
         reply_to,
-        build: crate::build_number(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        build: 0,
+        version: crate::VERSION.to_owned(),
     };
     let Ok(body) = about.encode(&link.keys(), &link.room) else {
         return;

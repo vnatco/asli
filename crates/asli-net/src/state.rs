@@ -102,12 +102,12 @@ impl State {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Disconnected => "Offline, retrying",
+            Self::Disconnected => "Offline, Retrying",
             // Dialling and handshaking are one thing to a person watching a tray icon.
             Self::Connecting | Self::Authenticating => "Connecting",
             Self::Synced => "Synced",
             Self::Paused => "Paused",
-            Self::RateLimited => "Rate limited, retrying",
+            Self::RateLimited => "Rate Limited, Retrying",
             Self::Fatal(_) => "Stopped",
         }
     }

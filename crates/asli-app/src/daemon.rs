@@ -1177,13 +1177,23 @@ fn on_account_event(
             }
             controls.devices.clear();
             notify::action_failed(
-                "This device was removed from your Asli account",
+                "This Device Was Removed From Your Asli Account",
                 &format!("{who} removed it. Join again with a code if that was a mistake."),
             );
             crate::window::restart_for(crate::window::Welcome::Removed);
         }
         _ => {}
     }
+}
+
+/// How many things wait for the person: files offered here and devices asking to join. The tray
+/// marks its icon while there are any.
+#[must_use]
+pub fn waiting_for_person(controls: &Controls) -> u32 {
+    controls
+        .transfers
+        .offers_waiting()
+        .saturating_add(crate::window::JOIN_REQUESTS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Takes this device off the account: tells the others, forgets the account key, the devices, the
@@ -1195,7 +1205,7 @@ pub fn leave_account(paths: &Paths, controls: &Controls) {
         .say_leaving(std::time::Duration::from_secs(3));
     if let Err(err) = crate::secrets::wipe(paths) {
         eprintln!("{}", log_line("wipe_failed", &err.to_string()));
-        notify::action_failed("Asli could not forget the account key", &err.to_string());
+        notify::action_failed("Asli Could Not Forget the Account Key", &err.to_string());
         return;
     }
     forget_account_files(paths);
@@ -1236,7 +1246,7 @@ fn move_to_new_key(
 ) {
     if let Err(err) = crate::secrets::store(&keys.paths, new_secret, &keys.device_secret) {
         eprintln!("{}", log_line("key_store_failed", &err.to_string()));
-        notify::action_failed("Asli could not save the new account key", &err.to_string());
+        notify::action_failed("Asli Could Not Save the New Account Key", &err.to_string());
         return;
     }
     // A key made by a device and handed over sealed has never been in an old style token.
@@ -1535,7 +1545,7 @@ fn stop_with(controls: &Controls, status: &mut Status, reason: &str) {
     reason.clone_into(&mut status.state);
     status.peers = 0;
     controls.status.set(status.clone());
-    notify::action_failed("Asli stopped syncing", reason);
+    notify::action_failed("Asli Stopped Syncing", reason);
 }
 
 /// Decides what a finished connection means. Returns true when syncing has stopped for good.
