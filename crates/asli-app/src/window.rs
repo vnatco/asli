@@ -433,14 +433,15 @@ pub fn open_from_any_thread(screen: Screen) {
     let _ = slint::invoke_from_event_loop(move || show(screen));
 }
 
-/// Opens the window where a person most likely wants it, which is the list of what they copied.
+/// Opens the window where a person most likely wants it: Status, the main page, with the
+/// connection, the devices, and anything waiting for them.
 ///
-/// Raised by clicking the tray icon rather than by a menu item, so it names no screen of its own
-/// beyond that. It does not check whether an account exists either: [`show`] already sends
+/// Raised by clicking the tray icon, or launching Asli again while it runs, rather than by a menu
+/// item, so it names no screen of its own beyond that. It does not check whether an account exists either: [`show`] already sends
 /// everything to first run while there is none, and duplicating that rule here would mean two
 /// places to disagree.
 pub fn open_default() {
-    open(Screen::History);
+    open(Screen::Status);
 }
 
 /// Which screen a tray menu item leads to.

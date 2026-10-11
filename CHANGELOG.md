@@ -106,6 +106,8 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Device, file and shelf rows, the sidebar foot, and every icon, dot, badge and button that sits in
   a row are centred to the pixel. Centring by position was ignored inside layouts and left items
   2 to 3 pixels high.
+- Clicking the tray icon, or launching Asli again while it runs, opens Status, the main page,
+  instead of History.
 - Every label, button, title and menu item is in Title Case.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list, history and shelf, tells the other devices so they take it off their lists, and
