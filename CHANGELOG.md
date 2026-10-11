@@ -44,7 +44,7 @@ Nothing is tagged yet and there are no downloads. What exists today:
 
 ### Added
 
-- Joining with a code and an approval, in place of the join string. **Add a device** makes a code
+- Joining with a code and an approval, in place of the join string. **Add a Device** makes a code
   that works once, for ten minutes, and carries no key. The new device types it, both devices show
   the same six digits, and the account key crosses only once the person approves, sealed to the new
   device alone. Someone who glimpses a code can neither join with it nor trick the new device into
@@ -78,17 +78,26 @@ Nothing is tagged yet and there are no downloads. What exists today:
   where it is on disk and is never stored anywhere else; any device can take it off the shelf, and
   that never deletes it. `asli shelf`, `asli shelf take` and `asli shelf remove` do the rest from a
   terminal. The tray menu has a Shelf item.
-- Same network only, in Settings. A device with it on approves a new device only when that device
+- Same Network Only, in Settings. A device with it on approves a new device only when that device
   reaches it on the local network, so a join code is useless to anyone elsewhere, and sends and
   receives files only there, never through the relay. Clips still sync from anywhere.
-- Paired devices shows which Asli each device runs, with a build number that grows with every
-  change, and Status says when another device runs a newer one than this. `asli devices` and `asli
-  status` show it too. A dropped file that no device can receive now says why, naming the devices
+- Paired devices shows which version of Asli each device runs, and Status says when another device
+  runs a newer one than this. `asli devices` and `asli status` show it too, and the window shows its
+  own version at the foot of the sidebar. The version goes up with every change. A dropped file that no device can receive now says why, naming the devices
   that need updating, instead of offering only the shelf.
 - A device that joins another account says goodbye first, and the devices of the account it left
   take it off their lists. A machine that joins again with its own key replaces its old keyless
   entry, and an entry that cannot be removed the usual way has a Forget button.
-- Leave this account, in Settings, and `asli leave`: signs the device out, deleting its account key,
+- Accepting a file asks where to save it, in the system's Save dialog, starting where the last one
+  went. A received file has Show in Folder, which opens its folder with the file selected and never
+  opens the file itself.
+- Add a Device has Copy Code, which copies the join code on this device only, and a request to join
+  has room to read.
+- Something waiting for you shows everywhere until it is dealt with: a count on Status for a file
+  offered here, a count on Add a Device for a device asking to join, a red dot on the tray icon, and
+  a notification when a device asks to join. All of them clear as soon as it is answered.
+- Every label, button, title and menu item is in Title Case.
+- Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list, history and shelf, tells the other devices so they take it off their lists, and
   returns to the first screen.
 

@@ -1518,7 +1518,7 @@ shown as a section 5 token.
 **Decline**: `u8(1) || request_id[16] || approver_sign_pub[32]`, signed with label
 `"asli/v2/join-decline"`, honoured under the same `fp` and `request_id` checks.
 
-#### 18.5.1 Same network only
+#### 18.5.1 Same Network Only
 
 A device MAY be set to approve a new device only when that device reaches it on the local network.
 While its code is open it then listens on a port of its own and says where in the meeting room,
@@ -1641,7 +1641,7 @@ sender MUST NOT read a frame longer than a piece plus 16 bytes, or a hello longe
 address answers in time, the receiver sends its answer through the relay and the transfer goes as
 above. A direct transfer does not depend on the relay connection and survives it dropping.
 
-A device set to Same network only (section 18.5.1) makes an offer only when it can name a local
+A device set to Same Network Only (section 18.5.1) makes an offer only when it can name a local
 address, and accepts one only if it reaches the sender directly, cancelling it otherwise rather than
 answering through the relay. As a sender, it cancels a transfer whose receiver answered through the
 relay.
@@ -1695,8 +1695,8 @@ about = u8(1) || from_device_id[16] || u8(ask) || text(reply_to) || u32be(build)
 ```
 
 A device sends one to the room when it connects, with `ask` set, and a device that hears `ask`
-answers with its own to `reply_to` alone. `build` is the number of commits the build was made from,
-which only grows on the main branch, so a higher number is a newer build; 0 means unknown. A
+answers with its own to `reply_to` alone. `version` is compared as three numbers, major, minor and
+patch, and the reference client raises it with every change. `build` is reserved and sent as 0. A
 receiver MUST ignore one not signed by the key pinned for `from_device_id`. It is informational: it
 lets each device show which version the others run and say when this one is behind. A device too
 old to send one shows as an older version.

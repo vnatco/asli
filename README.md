@@ -40,7 +40,7 @@ locally, which `--with-server` sets up.
 
 1. On the first machine you pick **Create**. Asli generates a 32 byte secret and keeps it in your
    OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service). It is never shown.
-2. To add another machine, open **Add a device** on one that is set up. It makes a join code that
+2. To add another machine, open **Add a Device** on one that is set up. It makes a join code that
    works once, for ten minutes, and carries no key. Type it on the new machine under **Join an
    existing account**. Both machines show the same six digits; if they match, approve the new one,
    and the key crosses to it sealed so that only it can open it.
@@ -48,7 +48,7 @@ locally, which `--with-server` sets up.
    through a relay server to your other machines, which decrypt it and put it on their clipboard.
 4. To take a machine off the account, remove it on Status. Every other machine gets a new key, and
    the removed one can read nothing sent after.
-5. To send a file, drop it on the window, or use **Send file** beside a device on Status (`asli send
+5. To send a file, drop it on the window, or use **Send File** beside a device on Status (`asli send
    <device> <file>` in a terminal). The other machine asks before taking it. On the same network the
    file goes straight between the two machines; otherwise it goes through the relay encrypted like
    everything else, without being stored there.
@@ -56,7 +56,7 @@ locally, which `--with-server` sets up.
    <file>`). It stays on that machine for a day, and the others can fetch it from their own Shelf
    screen whenever both are on.
 
-**Same network only**, in Settings, makes a machine approve a new device only when that device
+**Same Network Only**, in Settings, makes a machine approve a new device only when that device
 reaches it on the local network, and send and receive files only there. Clips still sync from
 anywhere.
 
@@ -112,7 +112,7 @@ either way, is read your clipboard.
 | Linux, river | Not supportable: it implements no clipboard manager protocol |
 
 Dropping a file on the window works on Windows, macOS and X11. Wayland gives the windowing library
-Asli uses no drop events yet, so there it is **Send file** on Status instead.
+Asli uses no drop events yet, so there it is **Send File** on Status instead.
 
 Details and the reasoning are in [docs/PLATFORM_NOTES.md](docs/PLATFORM_NOTES.md).
 
