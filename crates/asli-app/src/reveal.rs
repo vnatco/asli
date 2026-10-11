@@ -1,4 +1,5 @@
-//! Showing a received file in the system's file manager, selected, without opening the file.
+//! Showing a received file in the system's file manager, selected, without opening the file, and
+//! opening a web page in the default browser.
 //!
 //! Asli never opens a file another device sent. Showing its folder is the safe way to hand it to
 //! the person: the file manager shows it, and what happens next is their choice.
@@ -17,6 +18,34 @@ pub fn show_in_folder(path: &Path) -> Result<(), String> {
         return Err("the file is no longer there".to_owned());
     }
     reveal(path)
+}
+
+/// Opens a web address in the default browser. Only ever called with addresses Asli itself names,
+/// never one that arrived from another device.
+///
+/// # Errors
+///
+/// Returns a sentence when no browser could be started.
+pub fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.spawn().map(drop).map_err(|err| err.to_string())
 }
 
 #[cfg(target_os = "windows")]

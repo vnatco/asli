@@ -610,6 +610,7 @@ export component AppWindow inherits Window {
     callback cancel-file(int);
     callback show-file(int);
     callback copy-invite-code();
+    callback open-releases();
     callback clear-files();
     callback send-dropped(int);
     callback cancel-drop();
@@ -2010,6 +2011,17 @@ export component AppWindow inherits Window {
                                             kind: BannerKind.warning;
                                             title: "This Device is Not on the Latest Asli";
                                             body: root.update-note;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Button {
+                                                    text: "Download New Version";
+                                                    small: true;
+                                                    kind: ButtonKind.primary;
+                                                    icon: Icons.download;
+                                                    show-icon: true;
+                                                    clicked => { root.open-releases(); }
+                                                }
+                                            }
                                         }
                                     }
 

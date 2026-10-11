@@ -83,7 +83,9 @@ Nothing is tagged yet and there are no downloads. What exists today:
   receives files only there, never through the relay. Clips still sync from anywhere.
 - Paired devices shows which version of Asli each device runs, and Status says when another device
   runs a newer one than this. `asli devices` and `asli status` show it too, and the window shows its
-  own version at the foot of the sidebar. The version goes up with every change. A dropped file that no device can receive now says why, naming the devices
+  own version at the foot of the sidebar. The version goes up with every change. When this device is
+  behind, the warning on Status has Download New Version, which opens the latest release in the
+  browser. A dropped file that no device can receive now says why, naming the devices
   that need updating, instead of offering only the shelf.
 - A device that joins another account says goodbye first, and the devices of the account it left
   take it off their lists. A machine that joins again with its own key replaces its old keyless

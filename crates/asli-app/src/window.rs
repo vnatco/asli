@@ -779,6 +779,12 @@ fn wire_invite(window: &AppWindow) {
         }
     });
 
+    window.on_open_releases(|| {
+        if let Err(why) = crate::reveal::open_in_browser(crate::RELEASES_URL) {
+            toast(&format!("Couldn't open the browser: {why}"), false);
+        }
+    });
+
     window.on_copy_invite_code(|| {
         let Some(context) = CONTEXT.get() else {
             return;

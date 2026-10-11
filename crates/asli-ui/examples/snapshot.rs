@@ -388,7 +388,7 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.2".into());
+    ui.set_app_version("0.1.3".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());

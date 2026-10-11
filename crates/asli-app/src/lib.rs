@@ -101,6 +101,9 @@ mod title_case_tests {
     }
 }
 
+/// Where every release of Asli is published, the newest first.
+pub const RELEASES_URL: &str = "https://github.com/vnatco/asli/releases/latest";
+
 /// This Asli's version, bumped with every change. Devices compare it to say which is newest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
