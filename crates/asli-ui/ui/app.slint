@@ -2668,62 +2668,6 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    if root.has-account: VerticalLayout {
-                                        padding-top: 18px;
-                                        Overline { text: "ACCOUNT"; }
-                                        Rectangle { height: 8px; }
-                                        Card {
-                                            height: leave-body.preferred-height;
-                                            leave-body := HorizontalLayout {
-                                                padding: 14px;
-                                                padding-left: 16px;
-                                                spacing: 12px;
-                                                VerticalLayout {
-                                                    horizontal-stretch: 1;
-                                                    alignment: center;
-                                                    spacing: 3px;
-                                                    Text {
-                                                        text: root.confirm-leave ? "Leave the account on this device?" : "Leave this account";
-                                                        color: Theme.text;
-                                                        font-size: 13px;
-                                                        font-weight: 500;
-                                                    }
-                                                    Caption {
-                                                        text: "Signs this device out: its account key, device list, history and shelf are deleted here, and the other devices take it off their lists. They keep working. Afterwards you can create a new account or join one.";
-                                                        wrap: word-wrap;
-                                                    }
-                                                }
-                                                if !root.confirm-leave: VerticalLayout {
-                                                    alignment: center;
-                                                    Button {
-                                                        text: "Leave";
-                                                        kind: ButtonKind.destructive;
-                                                        clicked => { root.confirm-leave = true; }
-                                                    }
-                                                }
-                                                if root.confirm-leave: HorizontalLayout {
-                                                    spacing: 8px;
-                                                    VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Leave";
-                                                            kind: ButtonKind.danger;
-                                                            clicked => { root.leave-account(); }
-                                                        }
-                                                    }
-                                                    VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Cancel";
-                                                            kind: ButtonKind.ghost;
-                                                            clicked => { root.confirm-leave = false; }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
                                     Rectangle { height: 14px; }
                                     HorizontalLayout {
                                         spacing: 8px;
@@ -2786,17 +2730,42 @@ export component AppWindow inherits Window {
                                             padding-right: 16px;
                                             spacing: 12px;
                                             Text {
-                                                text: "Joining another account replaces the one on this device. A single device can't be removed from an account, so if a join string leaked, create a new account and re-join your other devices.";
-                                                color: Theme.text-2;
+                                                text: root.confirm-leave
+                                                    ? "Leave the account on this device? Its account key, device list, history and shelf are deleted here. Your other devices take it off their lists and keep working."
+                                                    : "Leave this account signs this device out: its account key, device list, history and shelf are deleted here, and your other devices take it off their lists. Joining another account does the same, then joins the new one.";
+                                                color: root.confirm-leave ? Theme.text : Theme.text-2;
                                                 font-size: 12px;
                                                 wrap: word-wrap;
                                             }
-                                            HorizontalLayout {
+                                            if !root.confirm-leave: HorizontalLayout {
                                                 alignment: start;
+                                                spacing: 8px;
+                                                Button {
+                                                    text: "Leave this account";
+                                                    kind: ButtonKind.danger;
+                                                    clicked => { root.confirm-leave = true; }
+                                                }
                                                 Button {
                                                     text: "Join another account";
-                                                    kind: ButtonKind.danger;
+                                                    kind: ButtonKind.destructive;
                                                     clicked => { root.confirm-join-other = true; }
+                                                }
+                                            }
+                                            if root.confirm-leave: HorizontalLayout {
+                                                alignment: start;
+                                                spacing: 8px;
+                                                Button {
+                                                    text: "Leave";
+                                                    kind: ButtonKind.danger;
+                                                    clicked => {
+                                                        root.confirm-leave = false;
+                                                        root.leave-account();
+                                                    }
+                                                }
+                                                Button {
+                                                    text: "Cancel";
+                                                    kind: ButtonKind.ghost;
+                                                    clicked => { root.confirm-leave = false; }
                                                 }
                                             }
                                         }

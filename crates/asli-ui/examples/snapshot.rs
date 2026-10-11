@@ -36,6 +36,15 @@ type Setup = Box<dyn Fn(&AppWindow)>;
 const WIDTH: u32 = 880;
 const HEIGHT: u32 = 600;
 
+/// The height to render at: the design's, or `ASLI_SNAPSHOT_HEIGHT` to see the foot of a long
+/// screen.
+fn height() -> u32 {
+    std::env::var("ASLI_SNAPSHOT_HEIGHT")
+        .ok()
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(HEIGHT)
+}
+
 fn main() {
     let out = std::env::args()
         .nth(1)
@@ -43,7 +52,7 @@ fn main() {
     std::fs::create_dir_all(&out).expect("output directory");
 
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
+    window.set_size(slint::PhysicalSize::new(WIDTH, height()));
     slint::platform::set_platform(Box::new(Offscreen {
         window: window.clone(),
     }))
@@ -234,6 +243,13 @@ fn main() {
             }),
         ),
         (
+            "12c-settings-confirm-leave",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Settings);
+                ui.set_confirm_leave(true);
+            }),
+        ),
+        (
             "14b-shelf-empty",
             Box::new(|ui: &AppWindow| ui.set_screen(Screen::Shelf)),
         ),
@@ -305,7 +321,7 @@ fn main() {
 
 fn render(window: &MinimalSoftwareWindow) -> Vec<PremultipliedRgbaColor> {
     slint::platform::update_timers_and_animations();
-    let mut buffer = vec![PremultipliedRgbaColor::default(); (WIDTH * HEIGHT) as usize];
+    let mut buffer = vec![PremultipliedRgbaColor::default(); (WIDTH * height()) as usize];
     window.request_redraw();
     window.draw_if_needed(|renderer| {
         renderer.render(&mut buffer, WIDTH as usize);
@@ -315,7 +331,7 @@ fn render(window: &MinimalSoftwareWindow) -> Vec<PremultipliedRgbaColor> {
 
 fn write_png(path: &str, pixels: &[PremultipliedRgbaColor]) {
     let file = std::fs::File::create(path).expect("png file");
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), WIDTH, HEIGHT);
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), WIDTH, height());
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().expect("png header");
