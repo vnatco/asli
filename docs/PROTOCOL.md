@@ -1116,10 +1116,10 @@ byte tag is 720912 bytes of ciphertext, which base64 encodes to 961216 character
 | Per connection, messages | burst 10, refill 2 per second | `error` `RATE_LIMITED`, then close 4007 on repetition. Strikes are forgotten after a minute without one |
 | Per connection, bytes | burst 2 MiB, refill 256 KiB per second | `error` `RATE_LIMITED`, then close 4007 on repetition. Strikes are forgotten after a minute without one |
 | Per room, daily bytes | 50 MiB per rolling 24 hours | close 4008 |
-| Per connection, `msg` frames | burst 128, refill 64 per second | as for messages above |
-| Per connection, `msg` bytes | burst 16 MiB, refill 8 MiB per second | as for bytes above |
-| Per room, daily `msg` bytes | 4 GiB per rolling 24 hours | `error` `QUOTA_EXCEEDED`, the connection stays open |
-| Global, daily `msg` bytes | 32 GiB per rolling 24 hours | `error` `QUOTA_EXCEEDED`, the connection stays open |
+| Per connection, bulk frames | burst 128, refill 64 per second | as for messages above |
+| Per connection, bulk bytes | burst 16 MiB, refill 8 MiB per second | as for bytes above |
+| Per room, daily bulk bytes | 4 GiB per rolling 24 hours | `error` `QUOTA_EXCEEDED`, the connection stays open |
+| Global, daily bulk bytes | 32 GiB per rolling 24 hours | `error` `QUOTA_EXCEEDED`, the connection stays open |
 | Per IP, concurrent connections | 20 | reject at upgrade, close 4009 |
 | Per IP, new connections | burst 10, refill 1 per 5 seconds | reject at upgrade |
 | Per room, concurrent connections | 16 | close 4009 |
@@ -1127,10 +1127,19 @@ byte tag is 720912 bytes of ciphertext, which base64 encodes to 961216 character
 
 A self hosted relay MAY set any of these higher and MUST announce the values it uses in `challenge`.
 
-`msg` frames (section 7.13) carry file transfers, so they are counted in their own buckets and do not
-use up the allowance for clips. The relay tells them apart before parsing by finding `"type":"msg"`
-within the first 48 bytes of the frame. A client MUST therefore write `type` first in a `msg` frame. A
-frame that matches the test but turns out not to be a `msg` is closed with 4005.
+Bulk frames are `msg` (section 7.13), which carries files, and `clip_begin`, `clip_chunk` and
+`clip_end` (section 7.11), which carry the pieces of an image. They are counted in their own buckets
+and charged to their own daily budget, so a large image or file neither uses up the allowance for
+clips nor closes the connection when the budget runs out. The relay tells them apart before parsing
+by finding `"type":"<type>"` within the first 48 bytes of the frame, so a client MUST write `type`
+first in a bulk frame. A frame that matches the test but turns out not to be a bulk frame is closed
+with 4005.
+
+`max_content_bytes` limits text, which travels in one frame. An image travels in pieces and is not
+held to it: the reference client sends and reassembles images of up to 32 MiB, paces their pieces at
+6 MiB a second after a 4 MiB burst, and a receiver MUST accept an image up to the size it sends.
+The client MUST ignore a `limits` field it does not know, so a relay can announce more limits later
+without stopping older clients from connecting.
 
 ### 11.5 Backpressure
 

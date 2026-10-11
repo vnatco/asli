@@ -96,6 +96,14 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Something waiting for you shows everywhere until it is dealt with: a count on Status for a file
   offered here, a count on Add a Device for a device asking to join, a red dot on the tray icon, and
   a notification when a device asks to join. All of them clear as soon as it is answered.
+- Full screen captures sync. Images up to 32 MB go, in paced pieces on the relay's bulk allowance,
+  where before anything over 700 KB was refused at both ends; text still syncs up to 700 KB, the
+  relay's limit for one message. Largest Clip to Sync offers 1, 4, 16 and 32 MB, and installs on
+  the old 700 KB default move to 32 MB. A copy too large to read is now notified instead of
+  vanishing without a word.
+- Device, file and shelf rows, the sidebar foot, and every icon, dot, badge and button that sits in
+  a row are centred to the pixel. Centring by position was ignored inside layouts and left items
+  2 to 3 pixels high.
 - Every label, button, title and menu item is in Title Case.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list, history and shelf, tells the other devices so they take it off their lists, and
