@@ -28,6 +28,12 @@ pub enum Error {
     ConnectionLost(String),
     /// Reading the current selection failed or timed out.
     Read(String),
+    /// The copy is larger than this device will read. Not routine like a failed read: the
+    /// person copied something and has to be told it did not go.
+    TooLarge {
+        /// The limit it passed, in bytes.
+        limit: usize,
+    },
     /// Taking ownership of the selection, or writing the clipboard, failed.
     Write(String),
     /// The clipboard held bytes that are not valid UTF-8, where text was expected.
@@ -54,6 +60,12 @@ impl fmt::Display for Error {
                 write!(f, "lost the display server connection: {detail}")
             }
             Self::Read(detail) => write!(f, "could not read the clipboard: {detail}"),
+            Self::TooLarge { limit } => {
+                write!(
+                    f,
+                    "the copy is over the {limit} byte limit, so it was skipped"
+                )
+            }
             Self::Write(detail) => write!(f, "could not write the clipboard: {detail}"),
             Self::NotUtf8 => f.write_str("the clipboard held text that is not valid UTF-8"),
             Self::Shutdown => f.write_str("the clipboard watcher was shut down"),

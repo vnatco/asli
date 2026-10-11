@@ -494,9 +494,7 @@ impl X11Clipboard {
                 .map_err(|e| Error::Read(format!("could not read the transfer property: {e}")))?;
 
             if value.len().saturating_add(reply.value.len()) > limit {
-                return Err(Error::Read(format!(
-                    "the clipboard content exceeds the {limit} byte limit"
-                )));
+                return Err(Error::TooLarge { limit });
             }
             value.extend_from_slice(&reply.value);
 
@@ -781,6 +779,7 @@ impl ClipboardWatcher for X11Clipboard {
                         // Either there was no text on the clipboard, or the read failed because
                         // the owner exited between the notification and our request. Both are
                         // routine and neither is worth stopping the watcher for.
+                        Err(Error::TooLarge { limit }) => sink(crate::too_large(limit)),
                         Ok(None) | Err(Error::Read(_) | Error::NotUtf8) => {}
                         Err(other) => return Err(other),
                     }

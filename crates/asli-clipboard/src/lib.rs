@@ -54,6 +54,12 @@ pub enum ClipContent {
     /// else. Deskflow carries BMP and that is why images pasted from macOS arrive corrupted on
     /// Windows, so this stays a single format on purpose.
     ImagePng(Vec<u8>),
+    /// Something was copied that is larger than this device reads, so its content was not read.
+    /// Reported so the person is told, not left wondering why it never arrived.
+    TooLarge {
+        /// The limit it passed, in bytes.
+        limit: usize,
+    },
 }
 
 impl ClipContent {
@@ -63,6 +69,7 @@ impl ClipContent {
         match self {
             Self::Text(text) => text.len(),
             Self::ImagePng(bytes) => bytes.len(),
+            Self::TooLarge { .. } => 0,
         }
     }
 
@@ -78,6 +85,7 @@ impl ClipContent {
         match self {
             Self::Text(_) => "text",
             Self::ImagePng(_) => "image/png",
+            Self::TooLarge { .. } => "too large",
         }
     }
 }
@@ -193,6 +201,15 @@ pub trait ClipboardWriter: Send {
         Err(Error::Write(
             "releasing the clipboard is not implemented on this platform".to_owned(),
         ))
+    }
+}
+
+/// The event for a copy too large to read, so the person is told rather than left wondering.
+#[must_use]
+pub const fn too_large(limit: usize) -> ClipEvent {
+    ClipEvent {
+        content: ClipContent::TooLarge { limit },
+        sensitive: false,
     }
 }
 

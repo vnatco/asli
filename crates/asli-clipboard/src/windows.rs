@@ -96,11 +96,9 @@ const CF_UNICODETEXT: u32 = 13;
 /// Returns [`Error::Read`] if the bitmap is malformed or cannot be re-encoded.
 fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
     if dib.len() > image_bytes::MAX_BITMAP_BYTES {
-        return Err(Error::Read(format!(
-            "bitmap is {} bytes, over the {} byte limit, so it was skipped",
-            dib.len(),
-            image_bytes::MAX_BITMAP_BYTES
-        )));
+        return Err(Error::TooLarge {
+            limit: image_bytes::MAX_BITMAP_BYTES,
+        });
     }
 
     let header = image_bytes::bmp_file_header_for_dib(dib)?;
@@ -670,10 +668,7 @@ fn no_markers() -> Error {
 /// the checks after the copy still apply.
 fn check_available(format: u32, limit: usize) -> Result<()> {
     match raw::size(format) {
-        Some(size) if size.get() > limit => Err(Error::Read(format!(
-            "clipboard data is {} bytes, over the {limit} byte limit, so it was skipped",
-            size.get()
-        ))),
+        Some(size) if size.get() > limit => Err(Error::TooLarge { limit }),
         _ => Ok(()),
     }
 }
@@ -740,6 +735,7 @@ impl ClipboardWatcher for WindowsClipboard {
                 Ok(Some(event)) => sink(event),
                 // Either there is no text on the clipboard, or the read lost the race for the
                 // lock. Both are routine and neither should stop the watcher.
+                Err(Error::TooLarge { limit }) => sink(crate::too_large(limit)),
                 Ok(None) | Err(Error::Read(_) | Error::NotUtf8) => {}
                 Err(other) => return Err(other),
             }

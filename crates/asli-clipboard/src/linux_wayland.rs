@@ -592,9 +592,7 @@ impl WaylandClipboard {
             .map_err(|e| Error::Read(format!("the source did not send the selection: {e}")))?;
 
         if buf.len() > limit {
-            return Err(Error::Read(format!(
-                "the clipboard content exceeds the {limit} byte limit"
-            )));
+            return Err(Error::TooLarge { limit });
         }
         Ok(buf)
     }
@@ -676,6 +674,7 @@ impl ClipboardWatcher for WaylandClipboard {
                 Pending::Offer(offer) => {
                     match self.read_offer(&offer) {
                         Ok(Some(event)) => sink(event),
+                        Err(Error::TooLarge { limit }) => sink(crate::too_large(limit)),
                         // Either there is no text on the clipboard, or the read failed because
                         // the source exited between announcing the selection and our request.
                         // Both are routine and neither should stop the watcher.

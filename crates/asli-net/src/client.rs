@@ -481,7 +481,13 @@ async fn send_local(
         };
         let frames = frames_for(session, event, on_event)?;
         let sent_something = !frames.is_empty();
+        // The pieces of an image go out paced, under the relay's bulk allowance: a piece over it
+        // is refused, and the receiver then never completes the image.
+        let mut pace = (frames.len() > 1).then(BulkPace::start);
         for frame in frames {
+            if let Some(pace) = pace.as_mut() {
+                pace.wait_for(frame.len()).await;
+            }
             socket
                 .send(WsMessage::Text(frame.into()))
                 .await
@@ -592,6 +598,36 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How often this side pings the relay.
 const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Paces the pieces of one image: a burst, then a steady rate, both under the relay's bulk
+/// allowance of 16 MiB and 8 MiB a second.
+struct BulkPace {
+    started: tokio::time::Instant,
+    sent: u64,
+}
+
+impl BulkPace {
+    const BURST: u64 = 4 * 1024 * 1024;
+    const PER_SEC: u64 = 6 * 1024 * 1024;
+
+    fn start() -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            sent: 0,
+        }
+    }
+
+    /// Waits until `bytes` more may go without passing the pace.
+    async fn wait_for(&mut self, bytes: usize) {
+        self.sent = self
+            .sent
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        let over = self.sent.saturating_sub(Self::BURST);
+        #[allow(clippy::cast_precision_loss)]
+        let due = std::time::Duration::from_secs_f64(over as f64 / Self::PER_SEC as f64);
+        tokio::time::sleep_until(self.started + due).await;
+    }
+}
 
 /// How long a connection may be silent before it is treated as gone. Two pings and some slack.
 const SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(70);

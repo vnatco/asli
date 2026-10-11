@@ -406,6 +406,7 @@ impl MacosClipboard {
         // before the content so a marked secret is never read at all.
         match Self::read_text(&pasteboard) {
             Ok(event) => Ok(event),
+            Err(Error::TooLarge { limit }) => Ok(Some(crate::too_large(limit))),
             Err(Error::Read(_) | Error::NotUtf8) => Ok(None),
             Err(other) => Err(other),
         }

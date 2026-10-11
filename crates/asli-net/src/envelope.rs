@@ -209,8 +209,10 @@ pub struct Hello {
 }
 
 /// Limits the relay announces, which the client honours in place of its own defaults.
+///
+/// Unknown fields are ignored rather than refused: a relay that announces a limit this version
+/// does not know of must not stop it connecting at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Limits {
     /// Largest accepted WebSocket frame, in bytes.
     pub max_frame_bytes: u64,

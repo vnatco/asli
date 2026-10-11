@@ -26,6 +26,11 @@ use crate::envelope::{
 };
 use crate::error::{Error, Result};
 
+/// Largest image this device sends or reassembles. Images travel in pieces on the relay's bulk
+/// allowance, so they are not held to the single frame limit that text is; this is room for a
+/// full screen capture of a large display, which as PNG runs to several megabytes.
+pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Default retention window to allow for a retained clip, until a relay announces its own.
 pub const DEFAULT_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -1146,7 +1151,7 @@ impl Session {
     /// for exactly the largest images that still ought to work. The sender compares raw content
     /// against the content cap, so the two sides have to agree about what is being measured.
     fn assembly_cap(&self) -> usize {
-        let content = self.max_content_bytes();
+        let content = self.max_content_bytes().max(MAX_IMAGE_BYTES);
         // Padding rounds up to at most one 64 KiB bucket past the body, and the body adds the
         // inner header on top of the content.
         content
@@ -1154,7 +1159,9 @@ impl Session {
             .saturating_add(64 * 1024)
     }
 
-    /// The content cap this relay announced, or a conservative default before `challenge`.
+    /// The content cap this relay announced, or a conservative default before `challenge`. It is
+    /// the limit for text, which travels in one frame; images travel in pieces and have their own,
+    /// [`MAX_IMAGE_BYTES`].
     fn max_content_bytes(&self) -> usize {
         self.limits.map_or(8 * 1024 * 1024, |limits| {
             usize::try_from(limits.max_content_bytes).unwrap_or(usize::MAX)
@@ -1178,11 +1185,10 @@ impl Session {
             return Ok(Vec::new());
         }
 
-        let limit = self.max_content_bytes();
-        if png.len() > limit {
+        if png.len() > MAX_IMAGE_BYTES {
             return Err(Error::ContentTooLarge {
                 got: png.len(),
-                limit,
+                limit: MAX_IMAGE_BYTES,
             });
         }
 
@@ -2250,10 +2256,14 @@ mod tests {
     }
 
     #[test]
-    fn an_image_beyond_the_content_cap_is_refused_before_sealing() {
+    fn an_image_may_pass_the_text_limit_but_not_the_image_one() {
         let (mut a, _) = ready_session(DEVICE_A);
+        // A full screen capture is larger than one message may be, and still goes, in pieces.
         let limit = a.limits().expect("limits announced").max_content_bytes;
-        let oversize = vec![0u8; usize::try_from(limit).unwrap_or(usize::MAX) + 1];
+        let past_text = vec![7u8; usize::try_from(limit).unwrap_or(usize::MAX) * 2];
+        assert!(a.observe_local_image(&past_text, NOW).expect("goes").len() > 1);
+
+        let oversize = vec![0u8; MAX_IMAGE_BYTES + 1];
         let err = a
             .observe_local_image(&oversize, NOW)
             .expect_err("must refuse");

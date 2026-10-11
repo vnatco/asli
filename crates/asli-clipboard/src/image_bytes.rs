@@ -18,10 +18,9 @@ use crate::error::{Error, Result};
 
 /// Largest image we will accept from the clipboard, before reading it.
 ///
-/// Sized to hold a full screenshot of a large display while still refusing anything that looks
-/// like a mistake. The relay caps content far lower than this, so a big image is skipped with a
-/// reason rather than silently failing later.
-pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Sized to hold a full screen capture of a 4K display as PNG while still refusing anything that
+/// looks like a mistake, and matched to the largest image a device sends.
+pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Largest uncompressed bitmap accepted for conversion to PNG.
 ///
@@ -52,9 +51,9 @@ pub fn is_png(bytes: &[u8]) -> bool {
 /// told why rather than left guessing.
 pub fn check_size(len: usize) -> Result<()> {
     if len > MAX_IMAGE_BYTES {
-        return Err(Error::Read(format!(
-            "image is {len} bytes, over the {MAX_IMAGE_BYTES} byte limit, so it was skipped"
-        )));
+        return Err(Error::TooLarge {
+            limit: MAX_IMAGE_BYTES,
+        });
     }
     Ok(())
 }
@@ -211,12 +210,12 @@ mod tests {
     fn the_cap_is_checked_before_anything_is_allocated() {
         assert!(check_size(0).is_ok());
         assert!(check_size(MAX_IMAGE_BYTES).is_ok());
+        // A distinct error naming the limit, so it reaches the person as a notification rather
+        // than being dropped like a routine failed read: a silently lost copy is the complaint
+        // every competitor in this space collects.
         let err = check_size(MAX_IMAGE_BYTES + 1).expect_err("over the cap");
-        // The message must name the sizes: a silently dropped copy is the complaint every
-        // competitor in this space collects.
-        let text = err.to_string();
-        assert!(text.contains(&(MAX_IMAGE_BYTES + 1).to_string()));
-        assert!(text.contains(&MAX_IMAGE_BYTES.to_string()));
+        assert!(matches!(err, Error::TooLarge { limit } if limit == MAX_IMAGE_BYTES));
+        assert!(err.to_string().contains(&MAX_IMAGE_BYTES.to_string()));
     }
 
     #[test]
