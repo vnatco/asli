@@ -190,12 +190,14 @@ component NavItem inherits Rectangle {
         padding-right: 10px;
         spacing: 10px;
 
-        Icon {
-            source: root.icon;
-            size: 16px;
-            tint: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
-            opacity: 0.9;
-            y: (parent.height - self.height) / 2;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                source: root.icon;
+                size: 16px;
+                tint: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
+                opacity: 0.9;
+            }
         }
 
         Text {
@@ -209,19 +211,21 @@ component NavItem inherits Rectangle {
             animate color { duration: 120ms; }
         }
 
-        if root.badge > 0: Rectangle {
-            width: max(18px, badge-text.preferred-width + 10px);
-            height: 18px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 9px;
-            background: Theme.error;
-            badge-text := Text {
-                text: root.badge;
-                color: #FFFFFF;
-                font-size: 11px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+        if root.badge > 0: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: max(18px, badge-text.preferred-width + 10px);
+                height: 18px;
+                border-radius: 9px;
+                background: Theme.error;
+                badge-text := Text {
+                    text: root.badge;
+                    color: #FFFFFF;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
     }
@@ -729,11 +733,13 @@ export component AppWindow inherits Window {
                         padding-left: 12px;
                         spacing: 8px;
 
-                        Image {
-                            source: Icons.mark;
-                            width: 15px;
-                            height: 15px;
-                            y: (parent.height - self.height) / 2;
+                        VerticalLayout {
+                            alignment: center;
+                            Image {
+                                source: Icons.mark;
+                                width: 15px;
+                                height: 15px;
+                            }
                         }
                         Text {
                             text: "Asli";
@@ -866,20 +872,26 @@ export component AppWindow inherits Window {
 
                             // The state repeated at the foot of the sidebar, so it is visible from
                             // every screen without going back to Status to check.
+                            // 49 high: the line on top takes a pixel, leaving an even 48 for the dot
+                            // to sit exactly in the middle of.
                             Rectangle {
-                                height: 48px;
+                                height: 49px;
                                 Rectangle {
                                     y: 0px;
                                     height: 1px;
                                     background: Theme.hairline;
                                 }
                                 HorizontalLayout {
+                                    y: 1px;
+                                    height: 48px;
                                     padding-left: 13px;
                                     padding-right: 16px;
                                     spacing: 6px;
-                                    StateDot {
-                                        state: root.sync-state;
-                                        y: (parent.height - self.height) / 2;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        StateDot {
+                                            state: root.sync-state;
+                                        }
                                     }
                                     Text {
                                         text: root.state-label;
@@ -1009,11 +1021,13 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     alignment: center;
                                     spacing: 7px;
-                                    Icon {
-                                        source: Icons.shield;
-                                        size: 13px;
-                                        tint: Theme.text-4;
-                                        y: (parent.height - self.height) / 2;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Icon {
+                                            source: Icons.shield;
+                                            size: 13px;
+                                            tint: Theme.text-4;
+                                        }
                                     }
                                     Text {
                                         text: "Keys Never Leave Your Devices";
@@ -1049,11 +1063,13 @@ export component AppWindow inherits Window {
                                             padding-left: 7px;
                                             padding-right: 10px;
                                             spacing: 5px;
-                                            Icon {
-                                                source: Icons.back;
-                                                size: 14px;
-                                                tint: back-touch.has-hover ? Theme.text : Theme.text-2;
-                                                y: (parent.height - self.height) / 2;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Icon {
+                                                    source: Icons.back;
+                                                    size: 14px;
+                                                    tint: back-touch.has-hover ? Theme.text : Theme.text-2;
+                                                }
                                             }
                                             Text {
                                                 text: "Back";
@@ -1242,11 +1258,13 @@ export component AppWindow inherits Window {
                                         Rectangle { height: 14px; }
                                         HorizontalLayout {
                                             spacing: 7px;
-                                            Icon {
-                                                source: Icons.shield;
-                                                size: 13px;
-                                                tint: Theme.text-3;
-                                                y: (parent.height - self.height) / 2;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Icon {
+                                                    source: Icons.shield;
+                                                    size: 13px;
+                                                    tint: Theme.text-3;
+                                                }
                                             }
                                             Caption {
                                                 text: "A code works once, for ten minutes, and lets nobody in until you approve them here. It does not contain your account key.";
@@ -1696,36 +1714,40 @@ export component AppWindow inherits Window {
                                                 // Type tile: blue for text, green for an image, and
                                                 // a different glyph for each, so the two are told
                                                 // apart by shape as well as by hue.
-                                                if !entry.has-thumb: Rectangle {
-                                                    width: 38px;
-                                                    height: 38px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    border-radius: 9px;
-                                                    border-width: 1px;
-                                                    background: entry.is-image ? #3DD68C1A : #4C8DFF1A;
-                                                    border-color: entry.is-image ? Theme.success-border : Theme.accent-border;
-                                                    Icon {
-                                                        source: entry.is-image ? Icons.image : Icons.text;
-                                                        size: 16px;
-                                                        tint: entry.is-image ? Theme.success : Theme.link;
+                                                if !entry.has-thumb: VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 38px;
+                                                        height: 38px;
+                                                        border-radius: 9px;
+                                                        border-width: 1px;
+                                                        background: entry.is-image ? #3DD68C1A : #4C8DFF1A;
+                                                        border-color: entry.is-image ? Theme.success-border : Theme.accent-border;
+                                                        Icon {
+                                                            source: entry.is-image ? Icons.image : Icons.text;
+                                                            size: 16px;
+                                                            tint: entry.is-image ? Theme.success : Theme.link;
+                                                        }
                                                     }
                                                 }
                                                 // The thumbnail arrives with its corners already
                                                 // rounded: this renderer cannot clip to a radius.
-                                                if entry.has-thumb: Rectangle {
-                                                    width: 50px;
-                                                    height: 50px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    Image {
-                                                        width: 100%;
-                                                        height: 100%;
-                                                        source: entry.thumb;
-                                                        image-fit: cover;
-                                                    }
+                                                if entry.has-thumb: VerticalLayout {
+                                                    alignment: center;
                                                     Rectangle {
-                                                        border-radius: 9px;
-                                                        border-width: 1px;
-                                                        border-color: Theme.border;
+                                                        width: 50px;
+                                                        height: 50px;
+                                                        Image {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            source: entry.thumb;
+                                                            image-fit: cover;
+                                                        }
+                                                        Rectangle {
+                                                            border-radius: 9px;
+                                                            border-width: 1px;
+                                                            border-color: Theme.border;
+                                                        }
                                                     }
                                                 }
 
@@ -1734,6 +1756,8 @@ export component AppWindow inherits Window {
                                                     alignment: center;
                                                     spacing: 2px;
                                                     Text {
+                                                        height: 20px;
+                                                        vertical-alignment: center;
                                                         text: entry.preview;
                                                         color: Theme.text;
                                                         font-size: entry.mono ? 12.5px : 13px;
@@ -1742,6 +1766,8 @@ export component AppWindow inherits Window {
                                                         overflow: elide;
                                                     }
                                                     Text {
+                                                        height: 16px;
+                                                        vertical-alignment: center;
                                                         text: entry.meta;
                                                         color: Theme.text-3;
                                                         font-size: 11.5px;
@@ -1752,18 +1778,22 @@ export component AppWindow inherits Window {
 
                                                 HorizontalLayout {
                                                     spacing: 2px;
-                                                    IconButton {
-                                                        icon: Icons.copy;
-                                                        label: "Copy on This Device Only";
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.copy-entry(index); }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        IconButton {
+                                                            icon: Icons.copy;
+                                                            label: "Copy on This Device Only";
+                                                            clicked => { root.copy-entry(index); }
+                                                        }
                                                     }
-                                                    IconButton {
-                                                        icon: Icons.trash;
-                                                        destructive: true;
-                                                        label: "Delete";
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.forget-entry(index); }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        IconButton {
+                                                            icon: Icons.trash;
+                                                            destructive: true;
+                                                            label: "Delete";
+                                                            clicked => { root.forget-entry(index); }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1864,11 +1894,13 @@ export component AppWindow inherits Window {
                                                 Rectangle { height: 8px; }
                                                 HorizontalLayout {
                                                     spacing: 8px;
-                                                    Icon {
-                                                        source: Icons.download;
-                                                        size: 15px;
-                                                        tint: Theme.link;
-                                                        y: (parent.height - self.height) / 2;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Icon {
+                                                            source: Icons.download;
+                                                            size: 15px;
+                                                            tint: Theme.link;
+                                                        }
                                                     }
                                                     Text {
                                                         text: root.offer-name;
@@ -2031,17 +2063,19 @@ export component AppWindow inherits Window {
                                                 padding-right: 18px;
                                                 spacing: 14px;
 
-                                                Rectangle {
-                                                    width: 40px;
-                                                    height: 40px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    border-radius: 12px;
-                                                    border-width: 1px;
-                                                    background: States.tint(root.sync-state).with-alpha(0.1);
-                                                    border-color: States.edge(root.sync-state);
-                                                    StateDot {
-                                                        state: root.sync-state;
-                                                        hero: true;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 40px;
+                                                        height: 40px;
+                                                        border-radius: 12px;
+                                                        border-width: 1px;
+                                                        background: States.tint(root.sync-state).with-alpha(0.1);
+                                                        border-color: States.edge(root.sync-state);
+                                                        StateDot {
+                                                            state: root.sync-state;
+                                                            hero: true;
+                                                        }
                                                     }
                                                 }
 
@@ -2166,53 +2200,64 @@ export component AppWindow inherits Window {
                                         Card {
                                             height: files-list.preferred-height;
                                             files-list := VerticalLayout {
+                                                padding-top: 1px;
+                                                padding-bottom: 1px;
                                                 for file[f] in root.files: Rectangle {
-                                                    height: file-row.preferred-height;
+                                                    height: f < root.files.length - 1 ? 57px : 56px;
                                                     file-row := HorizontalLayout {
-                                                        padding-top: 10px;
-                                                        padding-bottom: 10px;
+                                                        y: 0px;
+                                                        height: 56px;
                                                         padding-left: 14px;
                                                         padding-right: 14px;
                                                         spacing: 11px;
                                                         VerticalLayout {
                                                             horizontal-stretch: 1;
                                                             min-width: 0px;
-                                                            spacing: 3px;
+                                                            alignment: center;
+                                                            spacing: 2px;
                                                             Text {
+                                                                height: 20px;
+                                                                vertical-alignment: center;
                                                                 text: file.name;
                                                                 color: Theme.text;
                                                                 font-size: 13px;
                                                                 overflow: elide;
                                                             }
                                                             Text {
+                                                                height: 16px;
+                                                                vertical-alignment: center;
                                                                 text: file.peer + "  ·  " + file.detail;
                                                                 color: file.live || file.good ? Theme.text-3 : Theme.error;
                                                                 font-size: 11.5px;
                                                                 overflow: elide;
                                                             }
                                                             if file.live: Rectangle {
-                                                                height: 3px;
-                                                                border-radius: 1.5px;
+                                                                height: 4px;
+                                                                border-radius: 2px;
                                                                 background: Theme.hairline;
                                                                 Rectangle {
                                                                     x: 0px;
                                                                     width: parent.width * clamp(file.progress, 0, 1);
-                                                                    border-radius: 1.5px;
+                                                                    border-radius: 2px;
                                                                     background: Theme.link;
                                                                 }
                                                             }
                                                         }
-                                                        if file.live: Button {
-                                                            text: "Cancel";
-                                                            small: true;
-                                                            y: (parent.height - self.height) / 2;
-                                                            clicked => { root.cancel-file(f); }
+                                                        if file.live: VerticalLayout {
+                                                            alignment: center;
+                                                            Button {
+                                                                text: "Cancel";
+                                                                small: true;
+                                                                clicked => { root.cancel-file(f); }
+                                                            }
                                                         }
-                                                        if file.can-show: Button {
-                                                            text: "Show in Folder";
-                                                            small: true;
-                                                            y: (parent.height - self.height) / 2;
-                                                            clicked => { root.show-file(f); }
+                                                        if file.can-show: VerticalLayout {
+                                                            alignment: center;
+                                                            Button {
+                                                                text: "Show in Folder";
+                                                                small: true;
+                                                                clicked => { root.show-file(f); }
+                                                            }
                                                         }
                                                     }
                                                     if f < root.files.length - 1: Rectangle {
@@ -2231,8 +2276,15 @@ export component AppWindow inherits Window {
                                     Card {
                                         height: device-list.preferred-height;
                                         device-list := VerticalLayout {
+                                            // Inside the card's border, so a row's first pixel is not under it.
+                                            padding-top: 1px;
+                                            padding-bottom: 1px;
+                                            // Whole pixels throughout: a fixed row height, and lines of a fixed
+                                            // height inside it, so every centred item lands on a pixel rather
+                                            // than half way between two.
                                             for device[i] in root.devices: Rectangle {
-                                                height: device-row.preferred-height;
+                                                // 56 for the row, and a pixel below it for the line between rows.
+                                                height: i < root.devices.length - 1 ? 57px : 56px;
                                                 background: device-touch.has-hover ? Theme.raised-2 : transparent;
                                                 // Rounded where the card is. Clipping in the software
                                                 // renderer ignores the card's corners.
@@ -2248,24 +2300,26 @@ export component AppWindow inherits Window {
                                                 device-touch := TouchArea { }
 
                                                 device-row := HorizontalLayout {
-                                                    padding-top: 11px;
-                                                    padding-bottom: 11px;
+                                                    y: 0px;
+                                                    height: 56px;
                                                     padding-left: 14px;
                                                     padding-right: 14px;
                                                     spacing: 11px;
 
-                                                    Rectangle {
-                                                        width: 30px;
-                                                        height: 30px;
-                                                        y: (parent.height - self.height) / 2;
-                                                        border-radius: 9px;
-                                                        border-width: 1px;
-                                                        background: Theme.raised-2;
-                                                        border-color: Theme.border;
-                                                        Icon {
-                                                            source: Icons.device;
-                                                            size: 15px;
-                                                            tint: Theme.text-2;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 30px;
+                                                            height: 30px;
+                                                            border-radius: 9px;
+                                                            border-width: 1px;
+                                                            background: Theme.raised-2;
+                                                            border-color: Theme.border;
+                                                            Icon {
+                                                                source: Icons.device;
+                                                                size: 15px;
+                                                                tint: Theme.text-2;
+                                                            }
                                                         }
                                                     }
 
@@ -2273,8 +2327,9 @@ export component AppWindow inherits Window {
                                                         horizontal-stretch: 1;
                                                         min-width: 0px;
                                                         alignment: center;
-                                                        spacing: 1px;
+                                                        spacing: 2px;
                                                         HorizontalLayout {
+                                                            height: 20px;
                                                             spacing: 7px;
                                                             alignment: start;
                                                             Text {
@@ -2285,12 +2340,15 @@ export component AppWindow inherits Window {
                                                                 overflow: elide;
                                                                 vertical-alignment: center;
                                                             }
-                                                            if device.this-device: Pill {
-                                                                text: "THIS DEVICE";
-                                                                y: (parent.height - self.height) / 2;
+                                                            if device.this-device: VerticalLayout {
+                                                                alignment: center;
+                                                                Pill {
+                                                                    text: "THIS DEVICE";
+                                                                }
                                                             }
                                                         }
                                                         HorizontalLayout {
+                                                            height: 16px;
                                                             spacing: 0px;
                                                             alignment: start;
                                                             if device.os != "": Text {
@@ -2319,12 +2377,14 @@ export component AppWindow inherits Window {
                                                     HorizontalLayout {
                                                         spacing: 6px;
                                                         horizontal-stretch: 0;
-                                                        Rectangle {
-                                                            width: 7px;
-                                                            height: 7px;
-                                                            y: (parent.height - self.height) / 2;
-                                                            border-radius: 3.5px;
-                                                            background: device.online ? Theme.success : Theme.text-3;
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            Rectangle {
+                                                                width: 8px;
+                                                                height: 8px;
+                                                                border-radius: 4px;
+                                                                background: device.online ? Theme.success : Theme.text-3;
+                                                            }
                                                         }
                                                         Text {
                                                             text: device.seen;
@@ -2333,26 +2393,32 @@ export component AppWindow inherits Window {
                                                             vertical-alignment: center;
                                                         }
                                                     }
-                                                    if device.can-send: Button {
-                                                        text: "Send File";
-                                                        small: true;
-                                                        icon: Icons.send;
-                                                        show-icon: true;
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.send-file(i); }
+                                                    if device.can-send: VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Send File";
+                                                            small: true;
+                                                            icon: Icons.send;
+                                                            show-icon: true;
+                                                            clicked => { root.send-file(i); }
+                                                        }
                                                     }
-                                                    if device.removable: Button {
-                                                        text: "Remove";
-                                                        small: true;
-                                                        enabled: !root.rekey-busy;
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.ask-remove(i); }
+                                                    if device.removable: VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Remove";
+                                                            small: true;
+                                                            enabled: !root.rekey-busy;
+                                                            clicked => { root.ask-remove(i); }
+                                                        }
                                                     }
-                                                    if device.forgettable: Button {
-                                                        text: "Forget";
-                                                        small: true;
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.forget-device(i); }
+                                                    if device.forgettable: VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Forget";
+                                                            small: true;
+                                                            clicked => { root.forget-device(i); }
+                                                        }
                                                     }
                                                 }
 
@@ -2440,6 +2506,8 @@ export component AppWindow inherits Window {
                                     Card {
                                         height: mine-list.preferred-height;
                                         mine-list := VerticalLayout {
+                                            padding-top: 1px;
+                                            padding-bottom: 1px;
                                             if root.shelf-mine.length == 0: HorizontalLayout {
                                                 padding: 14px;
                                                 Caption {
@@ -2448,10 +2516,10 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             for item[m] in root.shelf-mine: Rectangle {
-                                                height: mine-row.preferred-height;
+                                                height: m < root.shelf-mine.length - 1 ? 57px : 56px;
                                                 mine-row := HorizontalLayout {
-                                                    padding-top: 10px;
-                                                    padding-bottom: 10px;
+                                                    y: 0px;
+                                                    height: 56px;
                                                     padding-left: 14px;
                                                     padding-right: 14px;
                                                     spacing: 11px;
@@ -2459,25 +2527,31 @@ export component AppWindow inherits Window {
                                                         horizontal-stretch: 1;
                                                         min-width: 0px;
                                                         alignment: center;
-                                                        spacing: 3px;
+                                                        spacing: 2px;
                                                         Text {
+                                                            height: 20px;
+                                                            vertical-alignment: center;
                                                             text: item.name;
                                                             color: Theme.text;
                                                             font-size: 13px;
                                                             overflow: elide;
                                                         }
                                                         Text {
+                                                            height: 16px;
+                                                            vertical-alignment: center;
                                                             text: item.detail;
                                                             color: Theme.text-3;
                                                             font-size: 11.5px;
                                                             overflow: elide;
                                                         }
                                                     }
-                                                    Button {
-                                                        text: "Remove";
-                                                        small: true;
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.unshelve(m); }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Remove";
+                                                            small: true;
+                                                            clicked => { root.unshelve(m); }
+                                                        }
                                                     }
                                                 }
                                                 if m < root.shelf-mine.length - 1: Rectangle {
@@ -2495,6 +2569,8 @@ export component AppWindow inherits Window {
                                     Card {
                                         height: theirs-list.preferred-height;
                                         theirs-list := VerticalLayout {
+                                            padding-top: 1px;
+                                            padding-bottom: 1px;
                                             if root.shelf-theirs.length == 0: HorizontalLayout {
                                                 padding: 14px;
                                                 Caption {
@@ -2503,10 +2579,10 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             for item[t] in root.shelf-theirs: Rectangle {
-                                                height: theirs-row.preferred-height;
+                                                height: t < root.shelf-theirs.length - 1 ? 57px : 56px;
                                                 theirs-row := HorizontalLayout {
-                                                    padding-top: 10px;
-                                                    padding-bottom: 10px;
+                                                    y: 0px;
+                                                    height: 56px;
                                                     padding-left: 14px;
                                                     padding-right: 14px;
                                                     spacing: 8px;
@@ -2514,34 +2590,42 @@ export component AppWindow inherits Window {
                                                         horizontal-stretch: 1;
                                                         min-width: 0px;
                                                         alignment: center;
-                                                        spacing: 3px;
+                                                        spacing: 2px;
                                                         Text {
+                                                            height: 20px;
+                                                            vertical-alignment: center;
                                                             text: item.name;
                                                             color: Theme.text;
                                                             font-size: 13px;
                                                             overflow: elide;
                                                         }
                                                         Text {
+                                                            height: 16px;
+                                                            vertical-alignment: center;
                                                             text: item.detail;
                                                             color: Theme.text-3;
                                                             font-size: 11.5px;
                                                             overflow: elide;
                                                         }
                                                     }
-                                                    Button {
-                                                        text: "Get";
-                                                        small: true;
-                                                        icon: Icons.download;
-                                                        show-icon: true;
-                                                        kind: ButtonKind.primary;
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.take-shelved(t); }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Get";
+                                                            small: true;
+                                                            icon: Icons.download;
+                                                            show-icon: true;
+                                                            kind: ButtonKind.primary;
+                                                            clicked => { root.take-shelved(t); }
+                                                        }
                                                     }
-                                                    Button {
-                                                        text: "Remove";
-                                                        small: true;
-                                                        y: (parent.height - self.height) / 2;
-                                                        clicked => { root.remove-shelved(t); }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Remove";
+                                                            small: true;
+                                                            clicked => { root.remove-shelved(t); }
+                                                        }
                                                     }
                                                 }
                                                 if t < root.shelf-theirs.length - 1: Rectangle {
@@ -2612,11 +2696,14 @@ export component AppWindow inherits Window {
                                             Label { text: "Largest Clip to Sync"; }
                                             Rectangle { height: 6px; }
                                             Select {
-                                                options: ["256 KB", "700 KB", "1 MB", "4 MB"];
+                                                options: ["1 MB", "4 MB", "16 MB", "32 MB"];
                                                 current <=> root.size-cap-index;
                                             }
                                             Rectangle { height: 6px; }
-                                            Caption { text: "Anything bigger is skipped rather than sent."; }
+                                            Caption {
+                                                text: "Images up to this size sync, full screen captures included; anything bigger is skipped. Text syncs up to 700 KB, the relay's limit for one message.";
+                                                wrap: word-wrap;
+                                            }
                                         }
                                     }
 
@@ -2717,11 +2804,13 @@ export component AppWindow inherits Window {
                                         Rectangle { horizontal-stretch: 1; }
                                         HorizontalLayout {
                                             spacing: 5px;
-                                            if root.settings-saved-flash && !root.settings-dirty: Icon {
-                                                source: Icons.check;
-                                                size: 13px;
-                                                tint: Theme.success;
-                                                y: (parent.height - self.height) / 2;
+                                            if root.settings-saved-flash && !root.settings-dirty: VerticalLayout {
+                                                alignment: center;
+                                                Icon {
+                                                    source: Icons.check;
+                                                    size: 13px;
+                                                    tint: Theme.success;
+                                                }
                                             }
                                             Text {
                                                 text: root.settings-dirty ? "Unsaved Changes"

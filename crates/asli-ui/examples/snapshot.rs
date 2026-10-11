@@ -388,13 +388,13 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.1".into());
+    ui.set_app_version("0.1.2".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
     ui.set_state_detail("2 devices online · last clip 17 minutes ago".into());
-    ui.set_stat_connections("2 devices".into());
-    ui.set_stat_last_sync("17 minutes ago".into());
+    ui.set_stat_connections("2 Devices".into());
+    ui.set_stat_last_sync("17 Minutes Ago".into());
     ui.set_stat_skipped("0".into());
     ui.set_relay_url_live("wss://asli.vnat.dev/v1".into());
     ui.set_room_id("QR8RDM70ZKES".into());
@@ -413,7 +413,7 @@ fn sample(ui: &AppWindow) {
             name: "ThinkPad X1".into(),
             os: "Arch Linux".into(),
             id: "1695e3615162".into(),
-            seen: "now".into(),
+            seen: "Now".into(),
             online: true,
             this_device: true,
             removable: false,
@@ -426,7 +426,7 @@ fn sample(ui: &AppWindow) {
             name: "MacBook Pro".into(),
             os: "macOS 15".into(),
             id: "a71c0be4d930".into(),
-            seen: "now".into(),
+            seen: "Now".into(),
             online: true,
             this_device: false,
             removable: true,
@@ -439,7 +439,7 @@ fn sample(ui: &AppWindow) {
             name: "fedora-desk".into(),
             os: "Windows 11".into(),
             id: "c02f19aa7714".into(),
-            seen: "2 days ago".into(),
+            seen: "2 Days Ago".into(),
             online: false,
             this_device: false,
             removable: true,

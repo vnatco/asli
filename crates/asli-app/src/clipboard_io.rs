@@ -183,6 +183,11 @@ pub enum Observed {
     Image(Vec<u8>),
     /// Someone copied content their application marked as a password, and it was not read.
     Sensitive,
+    /// Someone copied something larger than this device reads, so it was not read.
+    TooLarge {
+        /// The limit it passed, in bytes.
+        limit: usize,
+    },
 }
 
 /// Work handed to the writer thread.
@@ -460,6 +465,7 @@ fn to_observed(
             ClipContent::ImagePng(png) if own_writes.is_ours(&png) => return None,
             ClipContent::Text(text) => Observed::Text(text),
             ClipContent::ImagePng(png) => Observed::Image(png),
+            ClipContent::TooLarge { limit } => return Some(Observed::TooLarge { limit }),
             // ClipContent is non exhaustive. A content type added later is dropped here rather
             // than sent as something it is not.
             _ => return None,

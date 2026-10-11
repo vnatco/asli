@@ -163,6 +163,17 @@ pub fn clip_too_large(bytes: usize, limit: usize) {
     );
 }
 
+/// A local copy was too large to read at all, so it was not sent. Always notified.
+pub fn copy_too_large(limit: usize) {
+    send(
+        "Clipboard Not Synced",
+        &format!(
+            "That copy is over the {} limit for one copy, so it stayed on this machine.",
+            human(u64::try_from(limit).unwrap_or(u64::MAX))
+        ),
+    );
+}
+
 /// A local copy was not sent because its source marked it as a password.
 ///
 /// Always notified, regardless of the setting. Being told this once is how a person learns the

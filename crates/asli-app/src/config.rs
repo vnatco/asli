@@ -22,12 +22,16 @@ use crate::error::{Error, Result};
 /// The public relay the app ships pointed at.
 pub const DEFAULT_RELAY_URL: &str = "wss://asli.vnat.dev/v1";
 
-/// Largest clipboard payload this device will send, in bytes.
+/// Largest clipboard payload this device will send, in bytes: room for a full screen capture.
 ///
-/// The relay announces its own limit during the handshake and that one wins when it is smaller.
-/// This local cap exists so an enormous copy is skipped with an explanation before it is
-/// encrypted, rather than after.
-pub const DEFAULT_MAX_CONTENT_BYTES: usize = 700 * 1024;
+/// Text is also held to the limit the relay announces for one message, 700 KB on the public
+/// relay, since it travels in one frame; images travel in pieces and are not. This local cap exists
+/// so an enormous copy is skipped with an explanation before it is encrypted, rather than after.
+pub const DEFAULT_MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
+
+/// The default before images could be larger than one message, which kept every full screen
+/// capture from syncing. A configuration still holding it is moved to the new default.
+const OLD_DEFAULT_MAX_CONTENT_BYTES: usize = 700 * 1024;
 
 /// Settings, as stored in `config.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +221,12 @@ impl Paths {
             return Ok(config);
         }
         let raw = fs::read_to_string(&path)?;
-        serde_json::from_str(&raw).map_err(|e| Error::Parse(format!("{}: {e}", path.display())))
+        let mut config: Config = serde_json::from_str(&raw)
+            .map_err(|e| Error::Parse(format!("{}: {e}", path.display())))?;
+        if config.max_content_bytes == OLD_DEFAULT_MAX_CONTENT_BYTES {
+            config.max_content_bytes = DEFAULT_MAX_CONTENT_BYTES;
+        }
+        Ok(config)
     }
 
     /// Writes the settings.
@@ -406,6 +415,24 @@ mod tests {
         assert_eq!(config.device_id.len(), 32);
         assert!(config.device_id_bytes().is_ok());
         assert!(paths.config_file().exists());
+    }
+
+    #[test]
+    fn the_old_size_default_moves_to_the_new_one_and_a_chosen_size_stays() {
+        let (paths, _guard) = temp_paths();
+        let mut config = Config::new_with_random_device_id().expect("rng");
+        config.max_content_bytes = 700 * 1024;
+        paths.save_config(&config).expect("saves");
+        assert_eq!(
+            paths.load_config().expect("loads").max_content_bytes,
+            DEFAULT_MAX_CONTENT_BYTES
+        );
+        config.max_content_bytes = 4 * 1024 * 1024;
+        paths.save_config(&config).expect("saves");
+        assert_eq!(
+            paths.load_config().expect("loads").max_content_bytes,
+            4 * 1024 * 1024
+        );
     }
 
     #[test]

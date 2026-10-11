@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "asli-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "asli-clipboard",
  "asli-core",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "asli-clipboard"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "asli-core",
  "clipboard-win",
@@ -275,14 +275,14 @@ dependencies = [
 
 [[package]]
 name = "asli-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "sha2 0.11.0",
 ]
 
 [[package]]
 name = "asli-crypto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "asli-history"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "asli-crypto",
  "hkdf",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "asli-net"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "asli-core",
  "asli-crypto",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "asli-ui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "png",
  "slint",

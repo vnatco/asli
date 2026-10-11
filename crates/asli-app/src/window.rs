@@ -61,10 +61,10 @@ const REFRESH: Duration = Duration::from_millis(900);
 
 /// The size caps offered, as bytes and as the label beside them.
 const SIZE_CAPS: [(usize, &str); 4] = [
-    (256 * 1024, "256 KB"),
-    (700 * 1024, "700 KB"),
     (1024 * 1024, "1 MB"),
     (4 * 1024 * 1024, "4 MB"),
+    (16 * 1024 * 1024, "16 MB"),
+    (32 * 1024 * 1024, "32 MB"),
 ];
 
 /// The history lengths offered, matching the labels in the markup.
@@ -2403,7 +2403,7 @@ fn load_settings(window: &AppWindow) {
 fn save_settings(window: &AppWindow) {
     let relay = window.get_relay_url().trim().to_owned();
     let cap = SIZE_CAPS[usize::try_from(window.get_size_cap_index())
-        .unwrap_or(1)
+        .unwrap_or(3)
         .min(3)]
     .0;
     let retention_index = window.get_retention_index();
@@ -3122,7 +3122,7 @@ mod tests {
 
     #[test]
     fn a_size_the_list_cannot_express_is_reported_rather_than_rounded_silently() {
-        let (index, exact) = nearest_cap(700 * 1024);
+        let (index, exact) = nearest_cap(4 * 1024 * 1024);
         assert_eq!(index, 1);
         assert!(exact, "a value from the list is exact");
 

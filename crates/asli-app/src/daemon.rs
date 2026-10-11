@@ -1345,6 +1345,34 @@ impl SequenceWatch {
     }
 }
 
+/// Says why a copy was not sent: its source marked it as a password, or it was too large to read.
+/// Always notified, whatever the notification setting: being told once is how a person learns
+/// this is deliberate rather than a bug.
+fn report_skipped(skipped: &Observed) {
+    match skipped {
+        Observed::Sensitive => {
+            // Never recorded, and there is nothing to record: the watcher does not hand over the
+            // content of a clip the source marked as a password.
+            eprintln!(
+                "{}",
+                log_line(
+                    "clip_skipped_sensitive",
+                    "the source marked it as a password"
+                )
+            );
+            notify::clip_sensitive();
+        }
+        Observed::TooLarge { limit } => {
+            eprintln!(
+                "{}",
+                log_line("clip_skipped_too_large", &format!("over {limit} bytes"))
+            );
+            notify::copy_too_large(*limit);
+        }
+        Observed::Text(_) | Observed::Image(_) => {}
+    }
+}
+
 /// Bridges the blocking watcher thread into the async side, dropping what must not be sent.
 ///
 /// # Errors
@@ -1453,19 +1481,8 @@ fn spawn_clipboard_bridge(
                         }
                         eprintln!("{}", log_line("image_queued", &format!("{bytes} bytes")));
                     }
-                    Observed::Sensitive => {
-                        // Never recorded, and there is nothing to record: the watcher does not
-                        // hand over the content of a clip the source marked as a password.
-                        eprintln!(
-                            "{}",
-                            log_line(
-                                "clip_skipped_sensitive",
-                                "the source marked it as a password"
-                            )
-                        );
-                        // Always notified. Being told once is how a person learns this is
-                        // deliberate rather than a bug.
-                        notify::clip_sensitive();
+                    skipped @ (Observed::Sensitive | Observed::TooLarge { .. }) => {
+                        report_skipped(&skipped);
                     }
                 }
             }
