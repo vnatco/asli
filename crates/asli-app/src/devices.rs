@@ -245,6 +245,18 @@ impl DevicesHandle {
         }
     }
 
+    /// Whether a device has said which Asli it runs.
+    #[must_use]
+    pub fn knows_version(&self, device_id: &[u8; 16]) -> bool {
+        self.0.lock().is_ok_and(|registry| {
+            registry
+                .stored
+                .devices
+                .get(&hex(device_id))
+                .is_some_and(|device| device.build != 0 || !device.version.is_empty())
+        })
+    }
+
     /// Records which Asli a known device said it runs.
     pub fn heard_version(&self, device_id: &[u8; 16], version: &str, build: u32) {
         let Ok(mut registry) = self.0.lock() else {

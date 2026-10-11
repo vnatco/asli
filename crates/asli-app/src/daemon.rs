@@ -880,6 +880,8 @@ pub enum TransferRequest {
     },
     /// Say goodbye to the account, because this device is about to join another.
     Leave,
+    /// Leave the account altogether: goodbye, then forget it here and start over.
+    LeaveAccount,
     /// Fetch an item from another device's shelf.
     Take {
         /// The device, by id in hex.
@@ -973,6 +975,12 @@ fn act_on_transfer_request(request: TransferRequest, controls: &Controls, paths:
             (Some(device), Some(item)) => controls.transfers.take(device, item),
             _ => Err("no such item".to_owned()),
         },
+        TransferRequest::LeaveAccount => {
+            let controls = controls.clone();
+            let paths = paths.clone();
+            std::thread::spawn(move || leave_account(&paths, &controls));
+            Ok(())
+        }
         TransferRequest::Leave => {
             // Waits for the relay on a thread of its own: the confirmation arrives on this one.
             let transfers = controls.transfers.clone();
@@ -1150,6 +1158,14 @@ fn on_account_event(
                 crate::window::Welcome::KeyChangedElsewhere,
             );
         }
+        // Its version may have arrived before its card, when it could not be checked yet: ask again.
+        ClientEvent::Device(device) => {
+            if let Some(conn) = device.conn_id.as_deref() {
+                if !controls.devices.knows_version(&device.device_id) {
+                    controls.transfers.ask_version(conn);
+                }
+            }
+        }
         ClientEvent::RemovedBy { by } => {
             let who = controls
                 .devices
@@ -1167,6 +1183,44 @@ fn on_account_event(
             crate::window::restart_for(crate::window::Welcome::Removed);
         }
         _ => {}
+    }
+}
+
+/// Takes this device off the account: tells the others, forgets the account key, the devices, the
+/// history and the shelf here, and restarts at the first screen. Blocks for up to a few seconds
+/// while the goodbye reaches the relay, so it runs on a thread of its own.
+pub fn leave_account(paths: &Paths, controls: &Controls) {
+    let _ = controls
+        .transfers
+        .say_leaving(std::time::Duration::from_secs(3));
+    if let Err(err) = crate::secrets::wipe(paths) {
+        eprintln!("{}", log_line("wipe_failed", &err.to_string()));
+        notify::action_failed("Asli could not forget the account key", &err.to_string());
+        return;
+    }
+    forget_account_files(paths);
+    controls.devices.clear();
+    eprintln!(
+        "{}",
+        log_line("left_account", "forgot the account on this device")
+    );
+    crate::window::restart_for(crate::window::Welcome::Left);
+}
+
+/// Removes what this device kept about an account it no longer has.
+pub fn forget_account_files(paths: &Paths) {
+    crate::devices::wipe(paths);
+    if let Err(err) = crate::history_store::wipe(paths) {
+        eprintln!("{}", log_line("wipe_failed", &err.to_string()));
+    }
+    for name in [
+        "shelf.json",
+        "shelf-status.json",
+        "transfers.json",
+        "transfer-request.json",
+        "rekey-request.json",
+    ] {
+        let _ = std::fs::remove_file(paths.dir.join(name));
     }
 }
 

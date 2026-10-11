@@ -88,6 +88,9 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - A device that joins another account says goodbye first, and the devices of the account it left
   take it off their lists. A machine that joins again with its own key replaces its old keyless
   entry, and an entry that cannot be removed the usual way has a Forget button.
+- Leave this account, in Settings, and `asli leave`: signs the device out, deleting its account key,
+  device list, history and shelf, tells the other devices so they take it off their lists, and
+  returns to the first screen.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version
   and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,

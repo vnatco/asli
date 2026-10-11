@@ -253,6 +253,13 @@ impl Transfers {
         false
     }
 
+    /// Asks one device which Asli it runs, saying which this one is.
+    pub(crate) fn ask_version(&self, conn_id: &str) {
+        if let Ok(state) = self.0.lock() {
+            about::announce(&state, true, Some(conn_id));
+        }
+    }
+
     /// The relay read a message sent with `token`.
     pub(crate) fn sent(&self, token: u64) {
         if token == about::LEAVE_TOKEN {

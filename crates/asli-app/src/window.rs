@@ -1058,6 +1058,16 @@ fn wire_switches(window: &AppWindow) {
         refresh_history(&window);
     });
 
+    window.on_leave_account(|| {
+        let Some(context) = CONTEXT.get() else {
+            return;
+        };
+        toast("Leaving the account…", true);
+        let paths = context.paths.clone();
+        let controls = context.controls.clone();
+        std::thread::spawn(move || crate::daemon::leave_account(&paths, &controls));
+    });
+
     let handle = window.as_weak();
     window.on_set_same_network_only(move |on| {
         let Some(window) = handle.upgrade() else {
@@ -2654,6 +2664,8 @@ pub enum Welcome {
     KeyChangedElsewhere,
     /// Another device removed this one from the account.
     Removed,
+    /// This device left the account, by the person's choice.
+    Left,
 }
 
 /// Set on the restarted process, naming what just happened. Read once at startup.
@@ -2692,6 +2704,11 @@ pub fn welcome_after_restart() {
             Screen::FirstRun,
             "This device was removed from the account. Join again if that was a mistake.",
             false,
+        ),
+        Some("left") => (
+            Screen::FirstRun,
+            "This device left the account. Create a new one, or join one with a code.",
+            true,
         ),
         _ => return,
     };
@@ -2767,6 +2784,7 @@ impl Welcome {
             Self::Rekeyed => "rekeyed",
             Self::KeyChangedElsewhere => "key_changed_elsewhere",
             Self::Removed => "removed",
+            Self::Left => "left",
         }
     }
 }

@@ -100,6 +100,13 @@ enum Command {
         /// The start of its id. Omit when only one is waiting.
         offer: Option<String>,
     },
+    /// Sign this device out of its account: its account key, device list, history and shelf are
+    /// deleted here, and the other devices take it off their lists.
+    Leave {
+        /// Do it. Without this, only says what would happen.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List the shelves: files this device and the others keep on offer for a day. With an action,
     /// change them.
     Shelf {
@@ -193,6 +200,7 @@ fn dispatch() -> Result<()> {
         }
         Command::Decline { offer } => answer_offer(&paths, offer.as_deref(), OfferAnswer::Decline),
         Command::Shelf { action } => shelf_command(&paths, action),
+        Command::Leave { yes } => leave(&paths, yes),
         Command::Shortcut { action } => shortcut_command(&action),
     }
 }
@@ -626,6 +634,41 @@ fn request_rekey(paths: &Paths, remove: &[String]) -> Result<()> {
     }
     println!("It moves to the new key once the relay confirms the other devices have it, and");
     println!("restarts. Devices that are offline now will need to join again.");
+    Ok(())
+}
+
+/// Signs this device out of its account.
+fn leave(paths: &Paths, yes: bool) -> Result<()> {
+    if secrets::load(paths)?.is_none() {
+        println!("This device has no account to leave.");
+        return Ok(());
+    }
+    if !yes {
+        println!(
+            "This deletes the account key, the device list, the history and the shelf on this"
+        );
+        println!("device, and tells the other devices it left. They keep working. Run");
+        println!("'asli leave --yes' to do it.");
+        return Ok(());
+    }
+    if instance::is_running(paths) {
+        // The running Asli says goodbye, forgets the account and restarts at the first screen.
+        request_transfer(paths, &daemon::TransferRequest::LeaveAccount)?;
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if secrets::load(paths)?.is_none() {
+                println!("Left the account. Asli is back at its first screen.");
+                return Ok(());
+            }
+        }
+        return Err(Error::Parse(
+            "the running Asli did not finish leaving. Check its log".to_owned(),
+        ));
+    }
+    secrets::wipe(paths)?;
+    daemon::forget_account_files(paths);
+    println!("Left the account. Asli was not running, so the other devices still list this one");
+    println!("until someone presses Forget there.");
     Ok(())
 }
 
