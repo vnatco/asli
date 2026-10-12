@@ -132,6 +132,9 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - The welcome cards, the drop overlay and the Join Another Account question in the same look, and
   files waiting under Ready to Send have a file icon.
 - The tray menu's status line is in Title Case: Synced, 2 Connected.
+- The scrollbar keeps clear of the content pane's rounded corners and border: a slim thumb inset
+  from the edge, which shows while scrolling, when the pointer comes near, and briefly as a screen
+  opens, then fades. Dragging it now keeps the thumb under the pointer instead of running ahead.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and
   returns to the first screen.

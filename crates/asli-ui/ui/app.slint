@@ -133,37 +133,73 @@ component ScreenFrame inherits Rectangle {
     animate opacity, y { duration: 200ms; easing: cubic-bezier(0.05, 0.7, 0.1, 1); }
 }
 
-// A scrolling column with the design's overlay scrollbar: a 4 px thumb inset 3 px from the edge,
-// laid over the content rather than taking width from it.
+// A scrolling column with an overlay scrollbar that keeps clear of the pane's rounded corners and
+// border: a slim thumb inset from the edge and from the curve at each end. It shows while the
+// column scrolls, when the pointer comes near it, and briefly when the screen opens, then fades.
 component Scroller inherits Rectangle {
     in property <length> content-height;
     out property <length> scroll-y: -flick.content-y;
+    // The gap kept at each end of the track, clear of the pane's corner curve.
+    in property <length> end-inset: 18px;
+    property <bool> stirred: true;
 
     flick := Flickable {
         width: 100%;
         height: 100%;
         content-height: max(root.content-height, self.height);
+        changed viewport-y => {
+            root.stirred = true;
+            rest.running = false;
+            rest.running = true;
+        }
         @children
     }
 
-    if flick.content-height > flick.height + 1px: Rectangle {
-        property <length> track: flick.height - 6px;
-        property <length> span: max(28px, self.track * flick.height / flick.content-height);
-        x: parent.width - 7px;
-        width: 4px;
-        height: self.span;
-        y: 3px + (self.track - self.span) * (-flick.content-y) / (flick.content-height - flick.height);
-        border-radius: 2px;
-        background: thumb-touch.has-hover || thumb-touch.pressed ? Theme.border-strong : Theme.border;
+    rest := Timer {
+        interval: 1100ms;
+        running: true;
+        triggered => {
+            root.stirred = false;
+            self.running = false;
+        }
+    }
 
-        thumb-touch := TouchArea {
-            property <length> start;
-            moved => {
-                if (self.pressed) {
-                    flick.content-y = max(flick.height - flick.content-height, min(0px,
-                        flick.content-y - (self.mouse-y - self.pressed-y) * flick.content-height / flick.height));
+    if flick.content-height > flick.height + 1px: Rectangle {
+        property <length> track: flick.height - 2 * root.end-inset;
+        property <length> span: max(32px, self.track * flick.height / flick.content-height);
+        property <length> travel: flick.content-height - flick.height;
+        property <bool> near: gutter.has-hover || gutter.pressed;
+        x: parent.width - 16px;
+        width: 16px;
+        height: parent.height;
+
+        // Dragging moves the thumb with the pointer: the content goes as far, in proportion, as
+        // the thumb does along its track.
+        gutter := TouchArea {
+            property <length> start-y;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    self.start-y = flick.content-y;
                 }
             }
+            moved => {
+                if (self.pressed && parent.track > parent.span) {
+                    flick.content-y = max(-parent.travel, min(0px,
+                        self.start-y - (self.mouse-y - self.pressed-y) * parent.travel / (parent.track - parent.span)));
+                }
+            }
+        }
+
+        Rectangle {
+            x: parent.near ? 6px : 7px;
+            width: parent.near ? 5px : 3px;
+            height: parent.span;
+            y: root.end-inset + (parent.track - parent.span) * (-flick.content-y) / parent.travel;
+            border-radius: self.width / 2;
+            background: parent.near ? #FFFFFF59 : #FFFFFF33;
+            opacity: parent.near || root.stirred ? 1 : 0;
+            animate opacity { duration: 260ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+            animate x, width, background { duration: 160ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
         }
     }
 }
