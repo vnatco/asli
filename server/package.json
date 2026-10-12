@@ -1,6 +1,6 @@
 {
   "name": "asli-relay",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Zero knowledge WebSocket relay for Asli. Forwards ciphertext between a person's own devices and can read none of it.",

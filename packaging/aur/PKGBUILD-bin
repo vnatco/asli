@@ -4,7 +4,7 @@
 
 pkgname=asli-bin
 _pkgname=asli
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="One clipboard, every machine. Zero knowledge clipboard sync over an encrypted relay (binary release)"
 # x86_64 only: packaging/linux/build-installer.sh builds for the machine it runs on, and the

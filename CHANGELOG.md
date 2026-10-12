@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-10-12
 
 The first release. Asli runs on Linux, Windows 10 and 11, and macOS 11 or later, and is in daily
 use on Linux, Windows 11 and macOS against the public relay.
