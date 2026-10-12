@@ -1,0 +1,28 @@
+[package]
+name = "asli-dnd"
+description = "Files dropped on the Asli window under Wayland, where the windowing library does not implement drag and drop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+# The system libwayland backend, which winit already uses: it is what lets this join winit's
+# connection instead of opening a second one that the compositor would treat as another client.
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-sys = { version = "0.31", features = ["client"] }
+# Only to find winit's Wayland display behind the Slint window. Same features as the app, so no
+# second copy of anything is built.
+slint = { version = "1.18.0", default-features = false, features = [
+    "compat-1-18",
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "unstable-winit-030",
+] }
