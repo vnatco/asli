@@ -52,9 +52,6 @@ locally, which `--with-server` sets up.
    <device> <file>` in a terminal). The other machine asks before taking it. On the same network the
    file goes straight between the two machines; otherwise it goes through the relay encrypted like
    everything else, without being stored there.
-6. To leave a file where all your machines can get it, put it on the **Shelf** (`asli shelf add
-   <file>`). It stays on that machine for a day, and the others can fetch it from their own Shelf
-   screen whenever both are on.
 
 **Same Network Only**, in Settings, makes a machine approve a new device only when that device
 reaches it on the local network, and send and receive files only there. Clips still sync from

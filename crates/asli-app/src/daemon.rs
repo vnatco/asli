@@ -760,7 +760,6 @@ pub async fn run(
         room_bytes,
         controls.devices.clone(),
     );
-    controls.transfers.load_shelf(paths.dir.join("shelf.json"));
     controls
         .transfers
         .set_same_network_only(config.same_network_only);
@@ -866,58 +865,16 @@ pub enum TransferRequest {
         /// The offer, by id in hex.
         offer: String,
     },
-    /// Put a file on this device's shelf.
-    Shelve {
-        /// The file.
-        path: std::path::PathBuf,
-    },
-    /// Take an item off a shelf: this device's when `device` is absent.
-    Unshelve {
-        /// The device whose shelf it is on, by id in hex.
-        device: Option<String>,
-        /// The item, by id in hex.
-        item: String,
-    },
     /// Say goodbye to the account, because this device is about to join another.
     Leave,
     /// Leave the account altogether: goodbye, then forget it here and start over.
     LeaveAccount,
-    /// Fetch an item from another device's shelf.
-    Take {
-        /// The device, by id in hex.
-        device: String,
-        /// The item, by id in hex.
-        item: String,
-    },
 }
 
 /// Written by the running daemon once the relay has read its goodbye, for `asli join` to wait on.
 #[must_use]
 pub fn leave_done_path(paths: &Paths) -> std::path::PathBuf {
     paths.dir.join("leave-done")
-}
-
-/// Where the running daemon describes the shelves for `asli shelf`.
-#[must_use]
-pub fn shelf_status_path(paths: &Paths) -> std::path::PathBuf {
-    paths.dir.join("shelf-status.json")
-}
-
-/// One item as `asli shelf` prints it.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ShelfStatus {
-    /// The device it is on, in hex, or empty for this one.
-    pub device_id: String,
-    /// That device's name.
-    pub device: String,
-    /// The item, in hex.
-    pub item: String,
-    /// The file's name.
-    pub name: String,
-    /// Its size in bytes.
-    pub size: u64,
-    /// When it comes off the shelf, in milliseconds since the epoch.
-    pub expires_ms: u64,
 }
 
 /// One transfer as `asli transfers` prints it.
@@ -960,21 +917,6 @@ fn act_on_transfer_request(request: TransferRequest, controls: &Controls, paths:
             }
             Ok(())
         }
-        TransferRequest::Shelve { path } => controls.transfers.shelve(&path),
-        TransferRequest::Unshelve { device, item } => {
-            match (device.as_deref().map(offer), offer(&item)) {
-                (None, Some(item)) => {
-                    controls.transfers.unshelve(&item);
-                    Ok(())
-                }
-                (Some(Some(device)), Some(item)) => controls.transfers.take_off(device, item),
-                _ => Err("no such item".to_owned()),
-            }
-        }
-        TransferRequest::Take { device, item } => match (offer(&device), offer(&item)) {
-            (Some(device), Some(item)) => controls.transfers.take(device, item),
-            _ => Err("no such item".to_owned()),
-        },
         TransferRequest::LeaveAccount => {
             let controls = controls.clone();
             let paths = paths.clone();
@@ -1019,25 +961,6 @@ fn write_transfer_status(paths: &Paths, controls: &Controls) {
         .collect();
     if let Ok(bytes) = serde_json::to_vec_pretty(&list) {
         let _ = crate::config::write_atomically(&transfer_status_path(paths), &bytes, 0o600);
-    }
-    let (mine, theirs) = controls.transfers.shelf();
-    let shelf: Vec<ShelfStatus> = mine
-        .into_iter()
-        .chain(theirs)
-        .map(|item| ShelfStatus {
-            device_id: item
-                .device_id
-                .map(|id| crate::config::hex(&id))
-                .unwrap_or_default(),
-            device: item.device,
-            item: crate::config::hex(&item.item_id),
-            name: item.name,
-            size: item.size,
-            expires_ms: item.expires_ms,
-        })
-        .collect();
-    if let Ok(bytes) = serde_json::to_vec_pretty(&shelf) {
-        let _ = crate::config::write_atomically(&shelf_status_path(paths), &bytes, 0o600);
     }
 }
 
@@ -1197,7 +1120,7 @@ pub fn waiting_for_person(controls: &Controls) -> u32 {
 }
 
 /// Takes this device off the account: tells the others, forgets the account key, the devices, the
-/// history and the shelf here, and restarts at the first screen. Blocks for up to a few seconds
+/// history here, and restarts at the first screen. Blocks for up to a few seconds
 /// while the goodbye reaches the relay, so it runs on a thread of its own.
 pub fn leave_account(paths: &Paths, controls: &Controls) {
     let _ = controls

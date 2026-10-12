@@ -100,18 +100,12 @@ enum Command {
         /// The start of its id. Omit when only one is waiting.
         offer: Option<String>,
     },
-    /// Sign this device out of its account: its account key, device list, history and shelf are
+    /// Sign this device out of its account: its account key, device list and history are
     /// deleted here, and the other devices take it off their lists.
     Leave {
         /// Do it. Without this, only says what would happen.
         #[arg(long)]
         yes: bool,
-    },
-    /// List the shelves: files this device and the others keep on offer for a day. With an action,
-    /// change them.
-    Shelf {
-        #[command(subcommand)]
-        action: Option<ShelfAction>,
     },
     /// Write or check a Windows shortcut. For the installer and setup.ps1 rather than people, so
     /// every shortcut Asli makes comes from the same code.
@@ -119,27 +113,6 @@ enum Command {
     Shortcut {
         #[command(subcommand)]
         action: ShortcutAction,
-    },
-}
-
-/// What `asli shelf` does.
-#[derive(Debug, Subcommand)]
-enum ShelfAction {
-    /// Put a file on this device's shelf, for the other devices to fetch for the next day. The file
-    /// stays where it is.
-    Add {
-        /// The file.
-        file: std::path::PathBuf,
-    },
-    /// Take a file off a shelf, this device's or another's. The file itself is not deleted.
-    Remove {
-        /// Its name, or the start of its id as `asli shelf` shows it.
-        item: String,
-    },
-    /// Fetch a file from another device's shelf into Downloads.
-    Take {
-        /// Its name, or the start of its id as `asli shelf` shows it.
-        item: String,
     },
 }
 
@@ -199,7 +172,6 @@ fn dispatch() -> Result<()> {
             answer_offer(&paths, offer.as_deref(), OfferAnswer::Accept(into))
         }
         Command::Decline { offer } => answer_offer(&paths, offer.as_deref(), OfferAnswer::Decline),
-        Command::Shelf { action } => shelf_command(&paths, action),
         Command::Leave { yes } => leave(&paths, yes),
         Command::Shortcut { action } => shortcut_command(&action),
     }
@@ -465,102 +437,6 @@ fn list_transfers(paths: &Paths) {
     }
 }
 
-fn shelf_command(paths: &Paths, action: Option<ShelfAction>) -> Result<()> {
-    let Some(action) = action else {
-        list_shelf(paths);
-        return Ok(());
-    };
-    match action {
-        ShelfAction::Add { file } => {
-            let file = std::fs::canonicalize(&file)?;
-            request_transfer(
-                paths,
-                &daemon::TransferRequest::Shelve { path: file.clone() },
-            )?;
-            println!(
-                "Put {} on the shelf for a day. The other devices can fetch it while this one is on.",
-                file.display()
-            );
-        }
-        ShelfAction::Remove { item } => {
-            let item = find_shelved(paths, &item, |_| true)?;
-            request_transfer(
-                paths,
-                &daemon::TransferRequest::Unshelve {
-                    device: (!item.device_id.is_empty()).then(|| item.device_id.clone()),
-                    item: item.item.clone(),
-                },
-            )?;
-            println!("Took {} off the shelf of {}.", item.name, item.device);
-        }
-        ShelfAction::Take { item } => {
-            let item = find_shelved(paths, &item, |i| !i.device_id.is_empty())?;
-            request_transfer(
-                paths,
-                &daemon::TransferRequest::Take {
-                    device: item.device_id.clone(),
-                    item: item.item.clone(),
-                },
-            )?;
-            println!(
-                "Asked {} for {}. It goes to Downloads; 'asli transfers' shows how it is going.",
-                item.device, item.name
-            );
-        }
-    }
-    Ok(())
-}
-
-fn read_shelf(paths: &Paths) -> Vec<daemon::ShelfStatus> {
-    std::fs::read(daemon::shelf_status_path(paths))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
-}
-
-fn list_shelf(paths: &Paths) {
-    let shelf = read_shelf(paths);
-    if shelf.is_empty() {
-        println!("Nothing on any shelf. 'asli shelf add <file>' puts one on this device's.");
-    }
-    let now = asli_net::client::now_ms();
-    for item in shelf {
-        let hours = item.expires_ms.saturating_sub(now) / 3_600_000;
-        println!(
-            "{}  {:<16} {}  ({} bytes)  {}h left",
-            &item.item[..8],
-            item.device,
-            item.name,
-            item.size,
-            hours
-        );
-    }
-}
-
-/// The one shelved item a name or the start of an id points at.
-fn find_shelved(
-    paths: &Paths,
-    query: &str,
-    allowed: impl Fn(&daemon::ShelfStatus) -> bool,
-) -> Result<daemon::ShelfStatus> {
-    let lower = query.to_ascii_lowercase();
-    let found: Vec<daemon::ShelfStatus> = read_shelf(paths)
-        .into_iter()
-        .filter(|item| allowed(item))
-        .filter(|item| item.name == query || item.item.starts_with(&lower))
-        .collect();
-    match <[daemon::ShelfStatus; 1]>::try_from(found) {
-        Ok([item]) => Ok(item),
-        Err(rest) if rest.is_empty() => Err(Error::Parse(format!(
-            "nothing called '{query}' on a shelf. 'asli shelf' lists them"
-        ))),
-        Err(_) => Err(Error::Parse(
-            "more than one item matches. Name one by the start of its id, from 'asli shelf'"
-                .to_owned(),
-        )),
-    }
-}
-
 /// How to answer an offered file.
 enum OfferAnswer {
     /// Keep it, in this folder or in Downloads.
@@ -644,9 +520,7 @@ fn leave(paths: &Paths, yes: bool) -> Result<()> {
         return Ok(());
     }
     if !yes {
-        println!(
-            "This deletes the account key, the device list, the history and the shelf on this"
-        );
+        println!("This deletes the account key, the device list and the history on this");
         println!("device, and tells the other devices it left. They keep working. Run");
         println!("'asli leave --yes' to do it.");
         return Ok(());
@@ -1600,7 +1474,6 @@ fn handle_command(
         tray::Command::ShowToken
         | tray::Command::Join
         | tray::Command::History
-        | tray::Command::Shelf
         | tray::Command::Status
         | tray::Command::Settings => {}
     }

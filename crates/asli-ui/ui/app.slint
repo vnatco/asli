@@ -24,14 +24,6 @@ export enum Screen {
     History,
     Settings,
     Status,
-    Shelf,
-}
-
-// One file on a shelf, flattened for drawing.
-export struct ShelfRow {
-    name: string,
-    // The device it is on, its size, and how long it stays.
-    detail: string,
 }
 
 // One history entry, flattened for drawing. The identifier stays on the Rust side and is looked
@@ -537,8 +529,6 @@ export component AppWindow inherits Window {
     // Things on Status that wait for the person: a file offered to this device.
     in property <int> status-badge: 0;
     in property <string> drop-note: "";
-    in property <[ShelfRow]> shelf-mine: [];
-    in property <[ShelfRow]> shelf-theirs: [];
 
     // First run.
     in property <bool> creating: false;
@@ -614,11 +604,6 @@ export component AppWindow inherits Window {
     callback clear-files();
     callback send-dropped(int);
     callback cancel-drop();
-    callback shelve-dropped();
-    callback add-to-shelf();
-    callback unshelve(int);
-    callback take-shelved(int);
-    callback remove-shelved(int);
     callback restore-entry(int);
     callback copy-entry(int);
     callback forget-entry(int);
@@ -696,9 +681,8 @@ export component AppWindow inherits Window {
             if (event.modifiers.control && root.chrome) {
                 if (event.text == "1") { root.open-screen(Screen.Status); return accept; }
                 if (event.text == "2") { root.open-screen(Screen.History); return accept; }
-                if (event.text == "3") { root.open-screen(Screen.Shelf); return accept; }
-                if (event.text == "4") { root.open-screen(Screen.Token); return accept; }
-                if (event.text == "5") { root.open-screen(Screen.Settings); return accept; }
+                if (event.text == "3") { root.open-screen(Screen.Token); return accept; }
+                if (event.text == "4") { root.open-screen(Screen.Settings); return accept; }
             }
             return reject;
         }
@@ -847,12 +831,6 @@ export component AppWindow inherits Window {
                                     icon: Icons.history;
                                     selected: root.screen == Screen.History;
                                     clicked => { root.open-screen(Screen.History); }
-                                }
-                                NavItem {
-                                    text: "Shelf";
-                                    icon: Icons.shelf;
-                                    selected: root.screen == Screen.Shelf;
-                                    clicked => { root.open-screen(Screen.Shelf); }
                                 }
                                 NavItem {
                                     text: "Add a Device";
@@ -1965,7 +1943,7 @@ export component AppWindow inherits Window {
                                                 if root.drop-note != "": VerticalLayout {
                                                     padding-top: 6px;
                                                     Caption {
-                                                        text: root.drop-note + (root.drop-targets.length == 0 ? " You can put it on the shelf for them to fetch later." : "");
+                                                        text: root.drop-note;
                                                         color: Theme.text-2;
                                                         wrap: word-wrap;
                                                     }
@@ -1980,12 +1958,6 @@ export component AppWindow inherits Window {
                                                         icon: Icons.send;
                                                         show-icon: true;
                                                         clicked => { root.send-dropped(t); }
-                                                    }
-                                                    Button {
-                                                        text: "Put on the Shelf";
-                                                        icon: Icons.shelf;
-                                                        show-icon: true;
-                                                        clicked => { root.shelve-dropped(); }
                                                     }
                                                     Button {
                                                         text: "Cancel";
@@ -2477,181 +2449,6 @@ export component AppWindow inherits Window {
                         }
 
                         // ─────────────────────────── Settings ────────────────────────────
-                        if root.screen == Screen.Shelf: ScreenFrame {
-                            Scroller {
-                                content-height: shelf-screen.preferred-height;
-
-                                shelf-screen := VerticalLayout {
-                                    padding-top: 20px;
-                                    padding-bottom: 24px;
-                                    padding-left: 24px;
-                                    padding-right: 24px;
-                                    spacing: 0px;
-                                    alignment: start;
-
-                                    HorizontalLayout {
-                                        spacing: 16px;
-                                        VerticalLayout {
-                                            horizontal-stretch: 1;
-                                            spacing: 4px;
-                                            Title { text: "Shelf"; }
-                                            Subtitle {
-                                                text: "Files kept on offer to your other devices for a day. They stay where they are; taking one off the shelf never deletes it.";
-                                                wrap: word-wrap;
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            alignment: start;
-                                            Button {
-                                                text: "Add a File";
-                                                icon: Icons.plus;
-                                                show-icon: true;
-                                                kind: ButtonKind.primary;
-                                                clicked => { root.add-to-shelf(); }
-                                            }
-                                        }
-                                    }
-                                    Rectangle { height: 16px; }
-
-                                    Overline { text: "ON THIS DEVICE"; }
-                                    Rectangle { height: 8px; }
-                                    Card {
-                                        height: mine-list.preferred-height;
-                                        mine-list := VerticalLayout {
-                                            padding-top: 1px;
-                                            padding-bottom: 1px;
-                                            if root.shelf-mine.length == 0: HorizontalLayout {
-                                                padding: 14px;
-                                                Caption {
-                                                    text: "Nothing yet. Add a File, or drop one on this window.";
-                                                    wrap: word-wrap;
-                                                }
-                                            }
-                                            for item[m] in root.shelf-mine: Rectangle {
-                                                height: m < root.shelf-mine.length - 1 ? 57px : 56px;
-                                                mine-row := HorizontalLayout {
-                                                    y: 0px;
-                                                    height: 56px;
-                                                    padding-left: 14px;
-                                                    padding-right: 14px;
-                                                    spacing: 11px;
-                                                    VerticalLayout {
-                                                        horizontal-stretch: 1;
-                                                        min-width: 0px;
-                                                        alignment: center;
-                                                        spacing: 2px;
-                                                        Text {
-                                                            height: 20px;
-                                                            vertical-alignment: center;
-                                                            text: item.name;
-                                                            color: Theme.text;
-                                                            font-size: 13px;
-                                                            overflow: elide;
-                                                        }
-                                                        Text {
-                                                            height: 16px;
-                                                            vertical-alignment: center;
-                                                            text: item.detail;
-                                                            color: Theme.text-3;
-                                                            font-size: 11.5px;
-                                                            overflow: elide;
-                                                        }
-                                                    }
-                                                    VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Remove";
-                                                            small: true;
-                                                            clicked => { root.unshelve(m); }
-                                                        }
-                                                    }
-                                                }
-                                                if m < root.shelf-mine.length - 1: Rectangle {
-                                                    y: parent.height - 1px;
-                                                    height: 1px;
-                                                    background: Theme.border-subtle;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Rectangle { height: 18px; }
-
-                                    Overline { text: "ON YOUR OTHER DEVICES"; }
-                                    Rectangle { height: 8px; }
-                                    Card {
-                                        height: theirs-list.preferred-height;
-                                        theirs-list := VerticalLayout {
-                                            padding-top: 1px;
-                                            padding-bottom: 1px;
-                                            if root.shelf-theirs.length == 0: HorizontalLayout {
-                                                padding: 14px;
-                                                Caption {
-                                                    text: "Nothing on their shelves. A device shows its shelf while it is on.";
-                                                    wrap: word-wrap;
-                                                }
-                                            }
-                                            for item[t] in root.shelf-theirs: Rectangle {
-                                                height: t < root.shelf-theirs.length - 1 ? 57px : 56px;
-                                                theirs-row := HorizontalLayout {
-                                                    y: 0px;
-                                                    height: 56px;
-                                                    padding-left: 14px;
-                                                    padding-right: 14px;
-                                                    spacing: 8px;
-                                                    VerticalLayout {
-                                                        horizontal-stretch: 1;
-                                                        min-width: 0px;
-                                                        alignment: center;
-                                                        spacing: 2px;
-                                                        Text {
-                                                            height: 20px;
-                                                            vertical-alignment: center;
-                                                            text: item.name;
-                                                            color: Theme.text;
-                                                            font-size: 13px;
-                                                            overflow: elide;
-                                                        }
-                                                        Text {
-                                                            height: 16px;
-                                                            vertical-alignment: center;
-                                                            text: item.detail;
-                                                            color: Theme.text-3;
-                                                            font-size: 11.5px;
-                                                            overflow: elide;
-                                                        }
-                                                    }
-                                                    VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Get";
-                                                            small: true;
-                                                            icon: Icons.download;
-                                                            show-icon: true;
-                                                            kind: ButtonKind.primary;
-                                                            clicked => { root.take-shelved(t); }
-                                                        }
-                                                    }
-                                                    VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Remove";
-                                                            small: true;
-                                                            clicked => { root.remove-shelved(t); }
-                                                        }
-                                                    }
-                                                }
-                                                if t < root.shelf-theirs.length - 1: Rectangle {
-                                                    y: parent.height - 1px;
-                                                    height: 1px;
-                                                    background: Theme.border-subtle;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
                         if root.screen == Screen.Settings: ScreenFrame {
                             Scroller {
                                 content-height: settings-screen.preferred-height;
@@ -2860,8 +2657,8 @@ export component AppWindow inherits Window {
                                             spacing: 12px;
                                             Text {
                                                 text: root.confirm-leave
-                                                    ? "Leave the account on this device? Its account key, device list, history and shelf are deleted here. Your other devices take it off their lists and keep working."
-                                                    : "Leave This Account signs this device out: its account key, device list, history and shelf are deleted here, and your other devices take it off their lists. Joining another account does the same, then joins the new one.";
+                                                    ? "Leave the account on this device? Its account key, device list and history are deleted here. Your other devices take it off their lists and keep working."
+                                                    : "Leave This Account signs this device out: its account key, device list and history are deleted here, and your other devices take it off their lists. Joining another account does the same, then joins the new one.";
                                                 color: root.confirm-leave ? Theme.text : Theme.text-2;
                                                 font-size: 12px;
                                                 wrap: word-wrap;

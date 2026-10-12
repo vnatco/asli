@@ -94,7 +94,7 @@ pub(super) fn say_leaving(state: &State) -> bool {
         .is_ok()
 }
 
-/// Another device left the account: it comes off the list, and its shelf with it.
+/// Another device left the account: it comes off the list.
 pub(super) fn on_leave(state: &mut State, body: &[u8]) {
     let Some(link) = state.link.as_ref() else {
         return;
@@ -118,5 +118,4 @@ pub(super) fn on_leave(state: &mut State, body: &[u8]) {
         crate::clipboard_io::log_line("device_left", &pinned.name)
     );
     state.devices.forget(&from);
-    state.shelf.forget_device(&from);
 }

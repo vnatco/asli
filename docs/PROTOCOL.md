@@ -1438,8 +1438,7 @@ plaintext = u8(1) || u8(kind) || u32be(len) || body[len] || zero bytes to a mult
 | 18 | File chunk | The account room, to one connection |
 | 19 | File acknowledgement | The account room, to one connection |
 | 20 | File cancel | The account room, to one connection |
-| 21 | Shelf list | The account room, to everyone or one connection (section 18.9) |
-| 22 | Shelf request | The account room, to one connection |
+| 21, 22 | Reserved | Used by an early build for a shared shelf, since removed; never to be reused |
 | 9 to 15, 23 to 255 | Unassigned | A receiver MUST ignore a kind it does not know |
 
 Every signature in this section is Ed25519 over `label || room_id_bytes || body_without_signature`,
@@ -1665,36 +1664,10 @@ device names (`CON`, `COM1` and the like) prefixed with `_`, and a number added 
 It marks the kept file as downloaded the way the system expects (Mark of the Web on Windows, the
 quarantine attribute on macOS) and never opens or runs it.
 
-### 18.9 The shelf
+### 18.9 Reserved
 
-A device can keep files on offer to the account's other devices: its shelf. The files stay on that
-device and are never sent anywhere until another device asks for one, and then only as an ordinary
-transfer (section 18.8).
-
-```
-list    = u8(1) || from_device_id[16] || u64be(ts_ms) || u8(ask) || text(reply_to) || u8(count)
-          || count * ( item_id[16] || u64be(size) || u64be(expires_ms) || u16be(name_len) || name )
-          || signature, label "asli/v2/shelf-list"
-request = u8(1) || from_device_id[16] || u8(action) || item_id[16] || want_id[16]
-          || text(reply_to) || signature, label "asli/v2/shelf-request"
-```
-
-- **List.** What is on the sender's shelf, at most 32 items, each with a name of at most 255 bytes
-  that the receiver treats as untrusted, as in an offer. A device sends its list to the room when
-  it connects, with `ask` set, and whenever its shelf changes. A device that hears a list with
-  `ask` set answers with its own list, `ask` clear, to `reply_to` alone. A receiver keeps the
-  newest list per device by `ts_ms`, and MUST ignore a list not signed by the key pinned for
-  `from_device_id`. A list is shown only while its device is connected, since only then can an
-  item be fetched.
-- **Request.** `action` 1 asks for the item to be sent, under the offer id `want_id`; `action` 2 asks
-  for it to be taken off the shelf, and `want_id` is zero. The owner of the shelf MUST ignore a
-  request not signed by a pinned device, or for an item that is not on its shelf or has expired.
-  For `action` 1 it offers the file to the asker under `offer_id = want_id`; the asker accepts an
-  offer under an id it asked for, from the device it asked, without asking the person again. Taking
-  an item off the shelf never deletes the file.
-
-An item expires 24 hours after it was shelved, by the clock of the device that holds it, and is
-then taken off its shelf and a new list sent.
+Kinds 21 and 22 carried a shared shelf in early builds, since removed. A receiver ignores them like any
+unknown kind, and they are never to be given another meaning.
 
 ### 18.10 Which version each device runs
 
@@ -1716,7 +1689,7 @@ leave = u8(1) || from_device_id[16] || u64be(ts_ms) || signature, label "asli/v2
 
 A device about to join another account sends a `leave` to the room it is leaving and waits briefly
 for the relay to have read it. A device that hears one, signed by the key pinned for that device,
-takes it off its list and forgets its shelf. It is a courtesy, not a security step: the leaving
+takes it off its list. It is a courtesy, not a security step: the leaving
 device keeps nothing of the old account, and one that has to be shut out is removed instead
 (section 18.6). A device offline at the time never hears it, so clients also drop an entry with no
 device key once a keyed device with the same name and operating system appears, and let the person

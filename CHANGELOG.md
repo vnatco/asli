@@ -73,11 +73,6 @@ Nothing is tagged yet and there are no downloads. What exists today:
   they cannot reach each other, the file goes through the relay instead. The first time it sends a
   file, Windows may ask whether Asli may accept connections on private networks; saying no leaves
   files going through the relay.
-- The shelf. Put a file on it, from the Shelf screen, by dropping it on the window, or with `asli
-  shelf add`, and your other devices can fetch it for the next day whenever both are on. It stays
-  where it is on disk and is never stored anywhere else; any device can take it off the shelf, and
-  that never deletes it. `asli shelf`, `asli shelf take` and `asli shelf remove` do the rest from a
-  terminal. The tray menu has a Shelf item.
 - Same Network Only, in Settings. A device with it on approves a new device only when that device
   reaches it on the local network, so a join code is useless to anyone elsewhere, and sends and
   receives files only there, never through the relay. Clips still sync from anywhere.
@@ -86,7 +81,7 @@ Nothing is tagged yet and there are no downloads. What exists today:
   own version at the foot of the sidebar. The version goes up with every change. When this device is
   behind, the warning on Status has Download New Version, which opens the latest release in the
   browser. A dropped file that no device can receive now says why, naming the devices
-  that need updating, instead of offering only the shelf.
+  that need updating.
 - A device that joins another account says goodbye first, and the devices of the account it left
   take it off their lists. A machine that joins again with its own key replaces its old keyless
   entry, and an entry that cannot be removed the usual way has a Forget button.
@@ -103,14 +98,14 @@ Nothing is tagged yet and there are no downloads. What exists today:
   relay's limit for one message. Largest Clip to Sync offers 1, 4, 16 and 32 MB, and installs on
   the old 700 KB default move to 32 MB. A copy too large to read is now notified instead of
   vanishing without a word.
-- Device, file and shelf rows, the sidebar foot, and every icon, dot, badge and button that sits in
+- Device and file rows, the sidebar foot, and every icon, dot, badge and button that sits in
   a row are centred to the pixel. Centring by position was ignored inside layouts and left items
   2 to 3 pixels high.
 - Clicking the tray icon, or launching Asli again while it runs, opens Status, the main page,
   instead of History.
 - Every label, button, title and menu item is in Title Case.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
-  device list, history and shelf, tells the other devices so they take it off their lists, and
+  device list and history, tells the other devices so they take it off their lists, and
   returns to the first screen.
 
 - Installers, one build script per operating system, each writing into `dist/` with the version

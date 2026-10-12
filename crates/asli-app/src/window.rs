@@ -50,8 +50,7 @@ use crate::{notify, qr, secrets, tray};
 // build. Keeping the generated code at arm's length is what lets every hand written crate in this
 // project keep the stronger annotation.
 pub use asli_ui::{
-    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, ShelfRow, SyncState,
-    TokenCheck,
+    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
 };
 
 use crate::enroll::{Invitation, InviteOutcome, JoinAttempt, JoinOutcome};
@@ -348,10 +347,6 @@ thread_local! {
 
     /// A file dropped on the window, and the devices it could go to, in the order shown.
     static DROPPED: RefCell<Option<(std::path::PathBuf, Vec<[u8; 16]>)>> = const { RefCell::new(None) };
-    /// The items on this device's shelf, in the order drawn.
-    static SHELF_MINE: RefCell<Vec<[u8; 16]>> = const { RefCell::new(Vec::new()) };
-    /// The items on the other devices' shelves, with the device each is on, in the order drawn.
-    static SHELF_THEIRS: RefCell<Vec<([u8; 16], [u8; 16])>> = const { RefCell::new(Vec::new()) };
 }
 
 /// This device asking to join: the attempt, and the device key and id it keeps if approved.
@@ -452,7 +447,6 @@ pub const fn screen_for(command: tray::Command) -> Option<Screen> {
         tray::Command::Join => Some(Screen::Join),
         tray::Command::Settings => Some(Screen::Settings),
         tray::Command::History => Some(Screen::History),
-        tray::Command::Shelf => Some(Screen::Shelf),
         tray::Command::Status => Some(Screen::Status),
         _ => None,
     }
@@ -1289,7 +1283,6 @@ fn build() -> Result<AppWindow> {
     watch_for_dropped_files(&window);
     wire_files(&window);
     window.set_app_version(crate::VERSION.into());
-    wire_shelf(&window);
 
     let handle = window.as_weak();
     window.on_open_screen(move |screen| {
@@ -1565,7 +1558,6 @@ fn refresh_status(window: &AppWindow) {
         window.set_devices(model);
     });
     refresh_files(window, &context.controls.transfers);
-    refresh_shelf(window, &context.controls.transfers, now);
 }
 
 /// Why a device is missing from the list a dropped file can go to.
@@ -1625,118 +1617,6 @@ fn update_note(listed: &[crate::devices::Listed]) -> String {
         if names.len() == 1 { "runs" } else { "run" },
         crate::VERSION
     )
-}
-
-/// Shows what is on this device's shelf and on the others'.
-fn refresh_shelf(window: &AppWindow, transfers: &crate::transfer::Transfers, now: u64) {
-    let (mine, theirs) = transfers.shelf();
-    let detail = |item: &crate::transfer::Shelved| {
-        let size = human_bytes(usize::try_from(item.size).unwrap_or(usize::MAX));
-        let hours = item.expires_ms.saturating_sub(now) / 3_600_000;
-        let left = match hours {
-            0 => "Under an Hour Left".to_owned(),
-            1 => "1 Hour Left".to_owned(),
-            n => format!("{n} Hours Left"),
-        };
-        match item.device_id {
-            Some(_) => format!("{}  ·  {size}  ·  {left}", item.device),
-            None => format!("{size}  ·  {left}"),
-        }
-    };
-    SHELF_MINE.with_borrow_mut(|ids| *ids = mine.iter().map(|i| i.item_id).collect());
-    SHELF_THEIRS.with_borrow_mut(|ids| {
-        *ids = theirs
-            .iter()
-            .filter_map(|i| Some((i.device_id?, i.item_id)))
-            .collect();
-    });
-    let rows = |items: &[crate::transfer::Shelved]| -> Vec<ShelfRow> {
-        items
-            .iter()
-            .map(|item| ShelfRow {
-                name: item.name.clone().into(),
-                detail: detail(item).into(),
-            })
-            .collect()
-    };
-    set_rows(&window.get_shelf_mine(), rows(&mine), |model| {
-        window.set_shelf_mine(model);
-    });
-    set_rows(&window.get_shelf_theirs(), rows(&theirs), |model| {
-        window.set_shelf_theirs(model);
-    });
-}
-
-/// Puts a file on this device's shelf, and says how it went.
-fn shelve_file(path: &std::path::Path) {
-    let Some(context) = CONTEXT.get() else {
-        return;
-    };
-    match context.controls.transfers.shelve(path) {
-        Ok(()) => toast("On the shelf for a day.", true),
-        Err(why) => toast(&why, false),
-    }
-    WINDOW.with_borrow(|window| {
-        if let Some(window) = window.as_ref() {
-            refresh_status(window);
-        }
-    });
-}
-
-/// Attaches the callbacks of the Shelf screen.
-fn wire_shelf(window: &AppWindow) {
-    window.on_add_to_shelf(|| pick_then(Pick::File, |path| shelve_file(&path)));
-
-    window.on_unshelve(|index| {
-        let item = SHELF_MINE.with_borrow(|ids| {
-            usize::try_from(index)
-                .ok()
-                .and_then(|i| ids.get(i).copied())
-        });
-        if let (Some(context), Some(item)) = (CONTEXT.get(), item) {
-            context.controls.transfers.unshelve(&item);
-        }
-    });
-
-    window.on_take_shelved(|index| {
-        let item = SHELF_THEIRS.with_borrow(|ids| {
-            usize::try_from(index)
-                .ok()
-                .and_then(|i| ids.get(i).copied())
-        });
-        let (Some(context), Some((device, item))) = (CONTEXT.get(), item) else {
-            return;
-        };
-        match context.controls.transfers.take(device, item) {
-            Ok(()) => toast("Fetching it into Downloads.", true),
-            Err(why) => toast(&why, false),
-        }
-    });
-
-    window.on_remove_shelved(|index| {
-        let item = SHELF_THEIRS.with_borrow(|ids| {
-            usize::try_from(index)
-                .ok()
-                .and_then(|i| ids.get(i).copied())
-        });
-        let (Some(context), Some((device, item))) = (CONTEXT.get(), item) else {
-            return;
-        };
-        if let Err(why) = context.controls.transfers.take_off(device, item) {
-            toast(&why, false);
-        }
-    });
-
-    let handle = window.as_weak();
-    window.on_shelve_dropped(move || {
-        let dropped = DROPPED.with_borrow_mut(Option::take);
-        if let Some(window) = handle.upgrade() {
-            window.set_drop_name(String::new().into());
-        }
-        if let Some((path, _)) = dropped {
-            shelve_file(&path);
-        }
-    });
 }
 
 /// Shows the files on their way, and a file offered to this device.
@@ -2032,7 +1912,6 @@ fn took_a_dropped_file(window: &AppWindow, path: std::path::PathBuf) {
             .filter_map(|d| Some((d.name.clone(), crate::devices::id_bytes(&d.id)?)))
             .collect()
     });
-    // With nobody connected, the shelf is still a place for it.
     let name = path
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());

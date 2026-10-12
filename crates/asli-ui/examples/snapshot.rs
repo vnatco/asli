@@ -11,8 +11,7 @@
 use std::rc::Rc;
 
 use asli_ui::{
-    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, ShelfRow, SyncState,
-    TokenCheck,
+    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
 };
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
@@ -191,27 +190,6 @@ fn main() {
             }),
         ),
         (
-            "14-shelf",
-            Box::new(|ui: &AppWindow| {
-                ui.set_screen(Screen::Shelf);
-                let row = |name: &str, detail: &str| ShelfRow {
-                    name: name.into(),
-                    detail: detail.into(),
-                };
-                ui.set_shelf_mine(ModelRc::new(VecModel::from(vec![
-                    row(
-                        "asli-0.2.0-windows-x64-setup.exe",
-                        "6.1 MB  ·  23 hours left",
-                    ),
-                    row("Quarterly report final.pdf", "3.4 MB  ·  2 hours left"),
-                ])));
-                ui.set_shelf_theirs(ModelRc::new(VecModel::from(vec![row(
-                    "IMG_2041.HEIC",
-                    "MacBook Pro  ·  2.8 MB  ·  under an hour left",
-                )])));
-            }),
-        ),
-        (
             "05d-add-device-nearby",
             Box::new(|ui: &AppWindow| {
                 ui.set_screen(Screen::Token);
@@ -248,10 +226,6 @@ fn main() {
                 ui.set_screen(Screen::Settings);
                 ui.set_confirm_leave(true);
             }),
-        ),
-        (
-            "14b-shelf-empty",
-            Box::new(|ui: &AppWindow| ui.set_screen(Screen::Shelf)),
         ),
         (
             "08f-status-drop-hover",
@@ -388,7 +362,7 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.4".into());
+    ui.set_app_version("0.1.5".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
