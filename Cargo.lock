@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "asli-app"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "asli-clipboard",
  "asli-core",
@@ -234,6 +234,7 @@ dependencies = [
  "asli-dnd",
  "asli-history",
  "asli-net",
+ "asli-screen",
  "asli-ui",
  "chrono",
  "clap",
@@ -260,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "asli-clipboard"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "asli-core",
  "clipboard-win",
@@ -277,14 +278,14 @@ dependencies = [
 
 [[package]]
 name = "asli-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "sha2 0.11.0",
 ]
 
 [[package]]
 name = "asli-crypto"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -299,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "asli-dnd"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "slint",
  "wayland-backend",
@@ -309,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "asli-history"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "asli-crypto",
  "hkdf",
@@ -319,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "asli-net"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "asli-core",
  "asli-crypto",
@@ -334,8 +335,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asli-screen"
+version = "1.0.1"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "asli-ui"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "png",
  "slint",

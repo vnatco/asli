@@ -1,7 +1,7 @@
 # Maintainer: vnatco <contact@vnat.co>
 
 pkgname=asli
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="One clipboard, every machine. Zero knowledge clipboard sync over an encrypted relay"
 arch=('x86_64' 'aarch64')

@@ -369,7 +369,7 @@ fn sample_files(ui: &AppWindow) {
 
 fn sample(ui: &AppWindow) {
     ui.set_this_platform(asli_ui::DeviceOs::Linux);
-    ui.set_app_version("1.0.0".into());
+    ui.set_app_version("1.0.1".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());

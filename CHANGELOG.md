@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-12
+
+### Fixed
+
+- The window that asks about files sent to this device opens in the bottom right corner of the
+  screen on Windows and macOS, clear of the taskbar or the dock wherever they are, instead of the
+  top left. It was placed after it was shown, before the system had made it, so the placement was
+  dropped.
+
 ## [1.0.0] - 2026-10-12
 
 The first release. Asli runs on Linux, Windows 10 and 11, and macOS 11 or later, and is in daily

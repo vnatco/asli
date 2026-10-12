@@ -2152,12 +2152,29 @@ fn show_offer_popup(device: [u8; 16], from: &str, what: &str, count: usize) {
         answer_offers(device, crate::notify::OfferChoice::Decline);
     });
     popup.on_dismiss(close_offer_popup);
+    // Placed before it is shown, so it appears in the corner rather than where the system puts a
+    // new window and then jumps. Where the system cannot say where the corner is, it is placed once
+    // it exists instead.
+    let placed = asli_screen::bottom_right(POPUP_WIDTH, POPUP_HEIGHT, POPUP_MARGIN)
+        .map(|corner| {
+            popup.window().set_position(match corner {
+                asli_screen::Corner::Physical { x, y } => {
+                    slint::WindowPosition::Physical(slint::PhysicalPosition::new(x, y))
+                }
+                asli_screen::Corner::Logical { x, y } => {
+                    slint::WindowPosition::Logical(slint::LogicalPosition::new(x, y))
+                }
+            });
+        })
+        .is_some();
     if let Err(err) = popup.show() {
         eprintln!("{}", log_line("offer_window_failed", &err.to_string()));
         asked(device);
         return;
     }
-    place_bottom_right(&popup);
+    if !placed {
+        place_bottom_right(popup.as_weak(), 20);
+    }
     // Closes by itself once the files were answered some other way, on Home or elsewhere.
     let timer = slint::Timer::default();
     timer.start(
@@ -2185,33 +2202,42 @@ fn close_offer_popup() {
     }
 }
 
-/// Puts a small window in the bottom right corner of its screen, clear of the taskbar or dock.
-fn place_bottom_right(popup: &asli_ui::OfferPopup) {
+/// The corner window's size, as `OfferPopup` declares it, and how far it stays from the edges.
+const POPUP_WIDTH: f32 = 392.0;
+const POPUP_HEIGHT: f32 = 148.0;
+const POPUP_MARGIN: f32 = 16.0;
+
+/// Puts the corner window in the bottom right of its screen once its native window exists,
+/// trying again for a moment when it does not exist yet. For systems that cannot report their
+/// usable area beforehand; Wayland places windows itself and ignores this.
+fn place_bottom_right(popup: slint::Weak<asli_ui::OfferPopup>, tries: u32) {
     use slint::winit_030::winit::dpi::PhysicalPosition;
     use slint::winit_030::WinitWindowAccessor as _;
-    popup.window().with_winit_window(|winit| {
+    let Some(window) = popup.upgrade() else {
+        return;
+    };
+    let placed = window.window().with_winit_window(|winit| {
         let Some(monitor) = winit.current_monitor().or_else(|| winit.primary_monitor()) else {
             return;
         };
         let scale = monitor.scale_factor();
-        // The taskbar on Windows and the dock on macOS sit along the bottom by default.
-        let reserved = if cfg!(target_os = "macos") {
-            90.0
-        } else {
-            60.0
-        };
-        let px = |logical: f64| {
-            #[allow(clippy::cast_possible_truncation)]
-            let physical = (logical * scale).round() as i32;
-            physical
-        };
+        // Room for a taskbar along the bottom, which is where it usually is.
+        #[allow(clippy::cast_possible_truncation)]
+        let px = |logical: f64| (logical * scale).round() as i32;
         let screen = monitor.size();
         let outer = winit.outer_size();
         let to_i32 = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
-        let x = monitor.position().x + to_i32(screen.width) - to_i32(outer.width) - px(16.0);
-        let y = monitor.position().y + to_i32(screen.height) - to_i32(outer.height) - px(reserved);
+        let x = monitor.position().x + to_i32(screen.width)
+            - to_i32(outer.width)
+            - px(f64::from(POPUP_MARGIN));
+        let y = monitor.position().y + to_i32(screen.height) - to_i32(outer.height) - px(60.0);
         winit.set_outer_position(PhysicalPosition::new(x, y));
     });
+    if placed.is_none() && tries > 0 {
+        slint::Timer::single_shot(Duration::from_millis(25), move || {
+            place_bottom_right(popup, tries - 1);
+        });
+    }
 }
 
 /// Accepting asks where to keep the files, every time, starting where the last ones went: a Save

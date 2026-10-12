@@ -33,6 +33,7 @@ asli-core = { path = "../asli-core" }
 asli-crypto = { path = "../asli-crypto" }
 asli-history = { path = "../asli-history" }
 asli-net = { path = "../asli-net" }
+asli-screen = { path = "../asli-screen" }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 # The system's own dialogs for choosing a file to send and a folder to keep one in: the native
