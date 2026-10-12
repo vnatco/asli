@@ -1,68 +1,94 @@
 // The whole look of Asli, built from primitives.
 //
-// Nothing here comes from a widget library. Slint ships a std-widgets set that draws native
-// looking buttons and checkboxes, and this file deliberately does not import it: a tray utility
-// that appears on three desktops would otherwise look like three different applications, and
-// none of them like ours. Everything below is a Rectangle, a Text, an Image, a TouchArea or a
-// TextInput, so every control is ours to shape.
+// Nothing here comes from a widget library. Every control is a Rectangle, a Text, an Image, a
+// TouchArea or a TextInput, so every pixel is ours to shape and the application looks the same,
+// and like itself, on all three desktops.
 //
-// The numbers are the design's, not rounded guesses: sizes, radii, colours and timings come from
-// the token set the redesign was specified in, and the comments name the few places where the
-// toolkit could not express a value exactly and what stands in for it.
+// The language: a near black violet ground lit by slow coloured light, surfaces that are white at a
+// few percent with one pixel rings instead of fills, a two colour accent that runs as a gradient
+// through everything that is on or current, coloured glows rather than grey shadows, and two
+// typefaces: Figtree for words, Outfit for headings and numbers. Motion is quick and eased, never
+// bouncy on navigation.
 //
 // Two rules hold this together. Colour never carries meaning on its own, because a state that
 // reads only as a hue disappears for anyone who cannot separate those hues, so every state also
 // changes a shape, an icon or a label. And every interactive element animates on the same few
-// durations, because a control that moves at its own speed reads as a different control.
+// curves, because a control that moves at its own speed reads as a different control.
 
 import "fonts/JetBrainsMono-Regular.ttf";
+import "fonts/Figtree-Regular.ttf";
+import "fonts/Figtree-Medium.ttf";
+import "fonts/Figtree-SemiBold.ttf";
+import "fonts/Figtree-Bold.ttf";
+import "fonts/Outfit-Regular.ttf";
+import "fonts/Outfit-Medium.ttf";
+import "fonts/Outfit-SemiBold.ttf";
+import "fonts/Outfit-Bold.ttf";
 
-// The palette. Dark only: the redesign is dark first and specifies its light theme as a later
-// token swap, which this global is shaped to take.
+// The palette. Surfaces are white at low alpha over the dark ground, so they pick up whatever
+// light is behind them instead of sitting on it as flat grey.
 export global Theme {
-    // Grounds, darkest first.
-    out property <color> titlebar: #0A0D12;
-    out property <color> canvas: #0B0E14;
-    out property <color> input: #101622;
-    out property <color> raised-1: #131826;
-    out property <color> raised-2: #1A2130;
-    out property <color> raised-3: #222A3B;
-    out property <color> disabled-fill: #151B28;
-    // The hairline between the fixed regions: title bar, sidebar, History header.
-    out property <color> hairline: #161C27;
+    // The ground: a vertical gradient from the first to the second.
+    out property <color> bg-1: #1A1921;
+    out property <color> bg-2: #0F0E14;
+    out property <color> titlebar: #0F0E14;
+    out property <color> canvas: #0F0E14;
+    // A field, sunk into the surface around it.
+    out property <color> input: #00000038;
+    // Surfaces, lowest first: rest, raised, hover, pressed.
+    out property <color> raised-1: #FFFFFF0B;
+    out property <color> raised-2: #FFFFFF13;
+    out property <color> raised-3: #FFFFFF17;
+    out property <color> press: #FFFFFF21;
+    out property <color> disabled-fill: #FFFFFF08;
+    // Hairlines and rings.
+    out property <color> hairline: #FFFFFF14;
+    out property <color> border-subtle: #FFFFFF14;
+    out property <color> border: #FFFFFF1C;
+    out property <color> border-strong: #FFFFFF24;
 
-    out property <color> border-subtle: #1C2331;
-    out property <color> border: #242D3E;
-    out property <color> border-strong: #33405A;
-    out property <color> accent-border: #2A4B85;
+    out property <color> text: #F3F2F7;
+    out property <color> text-2: #A9A7B6;
+    out property <color> text-3: #6E6C7B;
+    out property <color> text-4: #4E4C5A;
+    // Dark text on an accent gradient.
+    out property <color> on-accent: #16131A;
 
-    out property <color> text: #E9EDF6;
-    out property <color> text-2: #A3AEC4;
-    out property <color> text-3: #6E7A92;
-    out property <color> text-4: #4A5468;
-    out property <color> link: #7FAEFF;
+    // The accent pair. Every gradient runs from the second to the first.
+    out property <color> accent: #6D7CFF;
+    out property <color> accent-2: #4FE3C1;
+    out property <color> accent-deep: #5563E8;
+    out property <color> accent-soft: #6D7CFF29;
+    out property <color> accent-border: #6D7CFF73;
+    out property <color> focus: #8F9BFF;
+    out property <color> link: #A3ADFF;
+    out property <brush> accent-fill: @linear-gradient(120deg, #4FE3C1 0%, #6D7CFF 100%);
 
-    out property <color> accent: #4C8DFF;
-    out property <color> accent-deep: #2F73F0;
-    out property <color> accent-soft: #4C8DFF24;
-    out property <color> focus: #4C8DFF;
+    out property <color> success: #3DDC97;
+    out property <color> success-border: #3DDC9766;
+    out property <color> warning: #FFB55A;
+    out property <color> warning-border: #FFB55A66;
+    out property <color> error: #FF4D5E;
+    out property <color> error-border: #FF4D5E66;
+    out property <color> danger-soft: #FF8A8F;
+    out property <color> danger-deep: #E0404F;
 
-    out property <color> success: #3DD68C;
-    out property <color> success-border: #1F6B49;
-    out property <color> warning: #F2B24C;
-    out property <color> warning-border: #7A5620;
-    out property <color> error: #F2555A;
-    out property <color> error-border: #7C2B30;
-    out property <color> danger-deep: #DC3F45;
-    // The raised gradient behind hero cards, from top left to bottom right.
-    out property <color> hero-from: #1A2434;
-    out property <color> hero-to: #121724;
+    // The content pane: a faint vertical sheen over the ground.
+    out property <color> hero-from: #FFFFFF0E;
+    out property <color> hero-to: #FFFFFF05;
+    out property <brush> sidebar-fill: transparent;
 
-    // The one gradient drawn without rounded corners. The rest go through GradientFill.
-    out property <brush> sidebar-fill: @linear-gradient(180deg, #101622 0%, #0C1018 100%);
+    // Elevated surfaces: menus, toasts.
+    out property <brush> menu-fill: @linear-gradient(180deg, #24222C 0%, #1C1A22 100%);
 
-    // The monospace face, bundled so join strings and ids look the same on every machine.
+    // The faces. Figtree for words, Outfit for headings and numbers, JetBrains Mono for codes and
+    // ids, so they look the same on every machine.
+    out property <string> ui: "Figtree";
+    out property <string> display: "Outfit";
     out property <string> mono: "JetBrains Mono";
+
+    // The curves. Quick out for most things; a gentle spring for small presses and knobs.
+    out property <duration> quick: 180ms;
 }
 
 // The icon set: 24 unit grid, 1.75 stroke, round caps, tinted at the point of use.
@@ -182,64 +208,18 @@ export component SoftShadow {
     }
 }
 
-// A rounded rectangle filled with a linear gradient.
-//
-// The software renderer draws a gradient background as a plain rectangle and ignores the corner
-// radius, so a gradient button came out square. This builds the same fill from pieces it does
-// round: a solid circle in each corner, in the colour the gradient has there, and two gradient
-// bands in a plus shape over them. Each band's stops are the full shape's colours at that band's
-// own ends, so the pieces meet without a seam. It fills its parent.
+// A rounded rectangle filled with a linear gradient. One rectangle on the GPU renderer, which
+// rounds gradients itself; the software fallback draws it with square corners, which it accepts.
 export component GradientFill {
     in property <color> from;
     in property <color> to;
     // As in CSS: 180deg runs top to bottom.
     in property <angle> angle: 180deg;
     in property <length> radius;
-    width: 100%;
-    height: 100%;
-
-    property <float> s: sin(root.angle);
-    property <float> c: cos(root.angle);
-    property <length> r: min(root.radius, min(self.width, self.height) / 2);
-    property <length> span: max(1px, abs(self.width * self.s) + abs(self.height * self.c));
-
-    // The colour at a point, measured from the centre.
-    pure function at(dx: length, dy: length) -> color {
-        return root.to.mix(root.from, max(0, min(1, 0.5 + (dx * root.s - dy * root.c) / root.span)));
-    }
-
-    // The colour at either end of a band of this size sharing the shape's centre.
-    pure function band-end(w: length, h: length, sign: float) -> color {
-        return root.to.mix(root.from, max(0, min(1, 0.5 + sign * (abs(w * root.s) + abs(h * root.c)) / (2 * root.span))));
-    }
-
-    for corner[i] in [
-        { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 },
-    ]: Rectangle {
-        x: corner.x * (root.width - 2 * root.r);
-        y: corner.y * (root.height - 2 * root.r);
-        width: 2 * root.r;
-        height: 2 * root.r;
-        border-radius: root.r;
-        background: root.at(
-            (corner.x * 2 - 1) * (root.width / 2 - root.r * 0.6),
-            (corner.y * 2 - 1) * (root.height / 2 - root.r * 0.6));
-    }
 
     Rectangle {
-        x: root.r;
-        width: root.width - 2 * root.r;
-        background: @linear-gradient(root.angle,
-            root.band-end(self.width, self.height, -1) 0%,
-            root.band-end(self.width, self.height, 1) 100%);
-    }
-
-    Rectangle {
-        y: root.r;
-        height: root.height - 2 * root.r;
-        background: @linear-gradient(root.angle,
-            root.band-end(self.width, self.height, -1) 0%,
-            root.band-end(self.width, self.height, 1) 100%);
+        border-radius: root.radius;
+        background: @linear-gradient(root.angle, root.from 0%, root.to 100%);
     }
 }
 
@@ -270,7 +250,30 @@ component FocusRing inherits Rectangle {
     border-width: 2px;
     border-color: Theme.focus;
     opacity: shown ? 1 : 0;
-    animate opacity { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+    animate opacity { duration: 120ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+}
+
+// A coloured glow behind something, pulled in under it so it reads as light the thing gives off
+// rather than a shadow it casts. Fills its parent and must come before what it lights. The GPU
+// renderer draws it; the software fallback draws nothing, which is the right failure.
+export component Glow {
+    in property <color> tint: Theme.accent;
+    in property <length> radius: 12px;
+    in property <length> blur: 24px;
+    in property <length> lift: 8px;
+    in property <length> inset: 6px;
+
+    Rectangle {
+        x: root.inset;
+        y: root.inset;
+        width: root.width - 2 * root.inset;
+        height: root.height - 2 * root.inset;
+        border-radius: root.radius;
+        background: root.tint.with-alpha(0.01);
+        drop-shadow-color: root.tint;
+        drop-shadow-blur: root.blur;
+        drop-shadow-offset-y: root.lift;
+    }
 }
 
 export enum ButtonKind {
@@ -278,12 +281,13 @@ export enum ButtonKind {
     secondary,
     ghost,
     danger,
-    // Secondary at rest, turning red under the pointer. For Clear all, which destroys but is
-    // not the point of its screen.
+    // Secondary at rest, turning red under the pointer. For actions that destroy but are not the
+    // point of their screen.
     destructive,
 }
 
-// The button, in five ranks and two sizes.
+// The button. Primary is the accent gradient with dark text and a coloured glow; secondary is a
+// soft surface with a hairline ring; ghost is text that gains a surface under the pointer.
 export component Button {
     in property <string> text;
     in property <image> icon;
@@ -292,27 +296,26 @@ export component Button {
     in property <bool> small: false;
     in property <bool> enabled: true;
     in property <bool> busy: false;
-    // Holds the pressed colour, for "Copied" after a copy.
+    // Holds the pressed look, for "Copied" after a copy.
     in property <bool> latched: false;
-    in property <length> pad-x: small
-        ? 12px
-        : (kind == ButtonKind.primary || kind == ButtonKind.danger) ? 16px
-        : kind == ButtonKind.ghost ? 12px : 14px;
+    in property <length> pad-x: small ? 12px : 16px;
     callback clicked();
 
     property <bool> live: enabled && !busy;
     property <bool> hover: touch.has-hover && live;
     property <bool> down: touch.pressed && live;
     property <bool> filled: kind == ButtonKind.primary || kind == ButtonKind.danger;
+    property <length> r: small ? 9px : 11px;
     property <color> fg: !enabled
         ? Theme.text-4
-        : filled ? #FFFFFF
-        : kind == ButtonKind.destructive && hover ? Theme.error
+        : kind == ButtonKind.primary ? Theme.on-accent
+        : kind == ButtonKind.danger ? #FFFFFF
+        : kind == ButtonKind.destructive && hover ? Theme.danger-soft
         : kind == ButtonKind.ghost && !hover ? Theme.text-2
         : kind == ButtonKind.destructive ? Theme.text-2
-        : Theme.text;
+        : hover ? Theme.text : #E4E2EC;
 
-    height: small ? 28px : 34px;
+    height: small ? 30px : 36px;
     min-width: row.min-width;
     preferred-width: row.preferred-width;
     horizontal-stretch: 0;
@@ -323,61 +326,61 @@ export component Button {
     accessible-enabled: enabled;
     accessible-action-default => { if (live) { clicked(); } }
 
-    if root.filled && root.enabled: SoftShadow {
-        radius: 8px;
-        offset-y: root.down ? 1px : 2px;
-        blur: root.down ? 2px : 10px;
-        spread: root.down ? 0px : -2px;
-        tint: root.down ? #000000 : root.kind == ButtonKind.danger ? #DC3F45 : #2F73F0;
-        strength: root.down ? 0.35 : 0.45;
-        steps: 5;
+    if root.filled && root.enabled: Glow {
+        tint: root.kind == ButtonKind.danger ? Theme.error.with-alpha(0.55) : Theme.accent.with-alpha(root.hover ? 0.75 : 0.55);
+        radius: root.r;
+        blur: root.hover ? 26px : 20px;
+        lift: root.down ? 3px : root.hover ? 8px : 6px;
+        inset: root.small ? 4px : 6px;
+        animate blur, lift { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     }
 
     frame := Rectangle {
         width: 100%;
         height: 100%;
-        border-radius: 8px;
-        border-width: 1px;
+        border-radius: root.r;
+        border-width: root.filled && root.enabled ? 0px : 1px;
         background: !enabled
-            ? (filled ? Theme.disabled-fill : kind == ButtonKind.ghost ? transparent : Theme.raised-1)
-            : kind == ButtonKind.primary ? (latched ? Theme.accent-deep : transparent)
-            : kind == ButtonKind.danger ? transparent
-            : kind == ButtonKind.ghost ? (down ? #FFFFFF24 : hover ? #FFFFFF10 : transparent)
-            : kind == ButtonKind.destructive ? (down ? #F2555A2E : hover ? #F2555A1F : Theme.raised-2)
-            : (down ? Theme.hairline : hover ? Theme.raised-3 : Theme.raised-2);
-        border-color: !enabled
-            ? (kind == ButtonKind.ghost ? transparent : Theme.border-subtle)
-            : kind == ButtonKind.primary ? Theme.accent-deep
-            : kind == ButtonKind.danger ? Theme.danger-deep
+            ? (kind == ButtonKind.ghost ? transparent : Theme.disabled-fill)
+            : kind == ButtonKind.primary ? Theme.accent-fill
+            : kind == ButtonKind.danger ? @linear-gradient(120deg, #FF7A6A 0%, #FF4D5E 100%)
+            : kind == ButtonKind.ghost ? (down ? Theme.press : hover ? Theme.raised-1 : transparent)
+            : kind == ButtonKind.destructive ? (down ? #FF4D5E40 : hover ? #FF4D5E2E : Theme.raised-1)
+            : (down ? Theme.press : hover ? Theme.raised-3 : Theme.raised-1);
+        border-color: !enabled ? Theme.border-subtle
             : kind == ButtonKind.ghost ? transparent
             : kind == ButtonKind.destructive && hover ? Theme.error-border
-            : hover ? Theme.border-strong : Theme.border;
+            : hover ? Theme.border-strong : Theme.border-subtle;
         transform-origin: { x: self.width / 2, y: self.height / 2 };
-        transform-scale-x: down && !busy ? 98% : 100%;
-        transform-scale-y: down && !busy ? 98% : 100%;
-        animate background, border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-        animate transform-scale-x, transform-scale-y { duration: 80ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        transform-scale-x: down && !busy ? 96% : 100%;
+        transform-scale-y: down && !busy ? 96% : 100%;
+        animate border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        animate transform-scale-x, transform-scale-y { duration: 200ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
 
-        // The gradient, with the border redrawn over it.
-        if root.filled && root.enabled && !root.latched: GradientFill {
-            radius: 8px;
-            from: root.kind == ButtonKind.danger
-                ? (root.hover ? #FF6A6F : #F2555A)
-                : (root.hover ? #6FA5FF : #5C97FF);
-            to: root.kind == ButtonKind.danger
-                ? (root.hover ? #E8494F : #DC3F45)
-                : (root.hover ? #3D7FF5 : #2F73F0);
+        // The top edge catches the light on a filled button.
+        if root.filled && root.enabled: Rectangle {
+            x: root.r;
+            y: 0px;
+            width: parent.width - 2 * root.r;
+            height: 1px;
+            background: #FFFFFF59;
         }
-        if root.filled && root.enabled && !root.latched: Rectangle {
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: frame.border-color;
+        // Brighter under the pointer.
+        if root.filled && root.enabled: Rectangle {
+            border-radius: root.r;
+            background: #FFFFFF;
+            opacity: root.hover ? 0.08 : 0;
+            animate opacity { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        }
+        if root.latched: Rectangle {
+            border-radius: root.r;
+            background: #00000026;
         }
 
         row := HorizontalLayout {
             padding-left: root.pad-x;
             padding-right: root.pad-x;
-            spacing: root.small ? 6px : 7px;
+            spacing: root.small ? 6px : 8px;
             alignment: center;
 
             if root.busy: VerticalLayout {
@@ -399,9 +402,9 @@ export component Button {
                 text: root.text;
                 color: root.fg;
                 font-size: root.small ? 12px : 13px;
-                font-weight: root.filled ? 600 : 500;
+                font-weight: root.filled ? 700 : 600;
                 vertical-alignment: center;
-                animate color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+                animate color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
             }
         }
     }
@@ -413,7 +416,7 @@ export component Button {
         height: parent.height + 8px;
         // A click never moves focus here, so the ring appears only for the keyboard.
         shown: focus.has-focus;
-        radius: 8px;
+        radius: root.r;
     }
 
     focus := FocusScope {
@@ -434,7 +437,7 @@ export component Button {
     }
 }
 
-// A 30 by 30 button holding only an icon. Copy and delete on a history row.
+// A 30 by 30 button holding only an icon.
 export component IconButton {
     in property <image> icon;
     in property <bool> destructive: false;
@@ -449,15 +452,20 @@ export component IconButton {
     accessible-action-default => { clicked(); }
 
     Rectangle {
-        border-radius: 8px;
-        background: touch.has-hover ? (root.destructive ? #F2555A24 : #FFFFFF12) : transparent;
-        animate background { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        border-radius: 9px;
+        background: touch.pressed ? Theme.press
+            : touch.has-hover ? (root.destructive ? #FF4D5E26 : Theme.raised-3) : transparent;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        transform-scale-x: touch.pressed ? 92% : 100%;
+        transform-scale-y: touch.pressed ? 92% : 100%;
+        animate background { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        animate transform-scale-x, transform-scale-y { duration: 200ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
 
         Icon {
             source: root.icon;
             size: 15px;
-            tint: touch.has-hover ? (root.destructive ? Theme.error : Theme.text) : Theme.text-3;
-            animate colorize { duration: 120ms; }
+            tint: touch.has-hover ? (root.destructive ? Theme.danger-soft : Theme.text) : Theme.text-3;
+            animate colorize { duration: 180ms; }
         }
     }
 
@@ -467,7 +475,7 @@ export component IconButton {
         width: parent.width + 8px;
         height: parent.height + 8px;
         shown: focus.has-focus;
-        radius: 8px;
+        radius: 9px;
     }
 
     focus := FocusScope {
@@ -486,51 +494,51 @@ export component IconButton {
     }
 }
 
-// Section header above a card. Written in capitals at the call site, since text has no
-// transform of its own here.
+// A section label: small, bold, widely tracked capitals. Written in capitals at the call site,
+// since text has no transform of its own here.
 export component Overline inherits Text {
     in property <bool> danger: false;
-    color: danger ? Theme.error : Theme.text-3;
-    font-size: 10px;
+    color: danger ? Theme.danger-soft : Theme.text-3;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: 0.8px;
+    letter-spacing: 1.4px;
 }
 
-// A screen title, 19 over 26.
+// A screen title, in the display face.
 export component Title inherits Text {
     color: Theme.text;
-    font-size: 19px;
-    font-weight: 640;
-    letter-spacing: -0.2px;
+    font-family: Theme.display;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.6px;
 }
 
 // Body copy under a title.
 export component Subtitle inherits Text {
     color: Theme.text-2;
-    font-size: 13px;
+    font-size: 13.5px;
     wrap: word-wrap;
 }
 
-// Helper text under a field.
+// Helper text.
 export component Caption inherits Text {
     color: Theme.text-3;
-    font-size: 11.5px;
-    letter-spacing: 0.1px;
+    font-size: 12px;
     wrap: word-wrap;
 }
 
 // A field label.
 export component Label inherits Text {
     color: Theme.text-2;
-    font-size: 12px;
-    font-weight: 500;
+    font-size: 12.5px;
+    font-weight: 600;
 }
 
-// The standard card.
+// The standard card: a faint surface with a hairline ring.
 export component Card inherits Rectangle {
     vertical-stretch: 0;
     background: Theme.raised-1;
-    border-radius: 14px;
+    border-radius: 18px;
     border-width: 1px;
     border-color: Theme.border-subtle;
     clip: true;
@@ -549,7 +557,8 @@ export enum BannerKind {
     info,
 }
 
-// A banner: an icon, a title and an optional line of explanation, in one of three tones.
+// A banner: an icon in a tinted tile, a title and an optional line of explanation, in one of three
+// tones. Anything placed inside it sits at its right.
 export component Banner inherits Rectangle {
     in property <BannerKind> kind: BannerKind.info;
     in property <string> title;
@@ -557,50 +566,52 @@ export component Banner inherits Rectangle {
     in property <image> icon: Icons.alert;
     property <color> tone: kind == BannerKind.warning
         ? Theme.warning
-        : kind == BannerKind.error ? Theme.error : Theme.link;
+        : kind == BannerKind.error ? Theme.error : Theme.accent;
+    property <color> ink: kind == BannerKind.warning
+        ? #FFE3BF
+        : kind == BannerKind.error ? #FFD0D4 : #DADDFF;
 
     vertical-stretch: 0;
-    border-radius: 12px;
+    border-radius: 16px;
     border-width: 1px;
-    background: kind == BannerKind.warning
-        ? #F2B24C14
-        : kind == BannerKind.error ? #F2555A14 : #4C8DFF14;
-    border-color: kind == BannerKind.warning
-        ? Theme.warning-border
-        : kind == BannerKind.error ? Theme.error-border : Theme.accent-border;
+    background: tone.with-alpha(0.1);
+    border-color: tone.with-alpha(0.32);
 
     HorizontalLayout {
-        padding-top: 12px;
-        padding-bottom: 12px;
-        padding-left: 14px;
+        padding: 12px;
         padding-right: 14px;
-        spacing: 10px;
+        spacing: 12px;
 
         VerticalLayout {
-            padding-top: 1px;
-            alignment: start;
-            Icon {
-                source: root.icon;
-                size: 15px;
-                tint: root.tone;
+            alignment: center;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 10px;
+                background: root.tone.with-alpha(0.16);
+                Icon {
+                    source: root.icon;
+                    size: 16px;
+                    tint: root.tone;
+                }
             }
         }
 
         VerticalLayout {
-            spacing: 3px;
-            alignment: start;
+            spacing: 2px;
+            alignment: center;
             horizontal-stretch: 1;
             Text {
                 text: root.title;
-                color: root.tone;
-                font-size: 12px;
-                font-weight: 600;
+                color: root.ink;
+                font-size: 13px;
+                font-weight: 700;
                 wrap: word-wrap;
             }
             if root.body != "": Text {
                 text: root.body;
                 color: Theme.text-2;
-                font-size: 11.5px;
+                font-size: 12px;
                 wrap: word-wrap;
             }
         }
@@ -609,7 +620,7 @@ export component Banner inherits Rectangle {
     }
 }
 
-// The single line field.
+// The single line field, sunk into its surface.
 export component TextField {
     in property <string> placeholder;
     in property <bool> invalid: false;
@@ -619,31 +630,31 @@ export component TextField {
     callback edited(string);
     callback accepted(string);
 
-    height: 34px;
+    height: 38px;
     vertical-stretch: 0;
     forward-focus: input;
 
-    // The ring is a soft 3 px halo around the border, drawn first so the field sits on it.
+    // A soft halo in the accent while typing.
     Rectangle {
         x: -3px;
         y: -3px;
         width: parent.width + 6px;
         height: parent.height + 6px;
-        border-radius: 11px;
+        border-radius: 14px;
         border-width: 3px;
-        border-color: root.invalid ? #F2555A2E : input.has-focus ? #4C8DFF29 : transparent;
-        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        border-color: root.invalid ? #FF4D5E33 : input.has-focus ? #6D7CFF33 : transparent;
+        animate border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     }
 
     frame := Rectangle {
-        border-radius: 8px;
+        border-radius: 11px;
         border-width: 1px;
-        background: root.enabled ? Theme.input : #0E121B;
+        background: root.enabled ? Theme.input : Theme.disabled-fill;
         border-color: !root.enabled ? Theme.border-subtle
             : root.invalid ? Theme.error
-            : input.has-focus ? Theme.focus
+            : input.has-focus ? Theme.accent
             : hover.has-hover ? Theme.border-strong : Theme.border;
-        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
 
         hover := TouchArea {
             mouse-cursor: MouseCursor.text;
@@ -651,29 +662,29 @@ export component TextField {
         }
 
         Text {
-            x: 11px;
-            width: parent.width - 22px;
+            x: 12px;
+            width: parent.width - 24px;
             height: 100%;
             vertical-alignment: center;
             text: root.placeholder;
             color: Theme.text-4;
             font-size: root.monospace ? 12px : 13px;
-            font-family: root.monospace ? Theme.mono : "";
+            font-family: root.monospace ? Theme.mono : Theme.ui;
             visible: root.text == "";
             overflow: elide;
         }
 
         input := TextInput {
-            x: 11px;
-            width: parent.width - 22px;
+            x: 12px;
+            width: parent.width - 24px;
             height: 100%;
             vertical-alignment: center;
             text <=> root.text;
             enabled: root.enabled;
             color: root.enabled ? Theme.text : Theme.text-4;
             font-size: root.monospace ? 12px : 13px;
-            font-family: root.monospace ? Theme.mono : "";
-            selection-background-color: #4C8DFF66;
+            font-family: root.monospace ? Theme.mono : Theme.ui;
+            selection-background-color: #6D7CFF66;
             selection-foreground-color: Theme.text;
             single-line: true;
             wrap: no-wrap;
@@ -683,7 +694,7 @@ export component TextField {
     }
 }
 
-// The join string field: several lines, monospaced, breaking anywhere.
+// The join code field: several lines, monospaced, breaking anywhere.
 export component JoinArea {
     in property <string> placeholder;
     in property <bool> invalid: false;
@@ -693,7 +704,7 @@ export component JoinArea {
     callback accepted(string);
 
     min-height: 72px;
-    preferred-height: max(72px, input.preferred-height + 20px);
+    preferred-height: max(72px, input.preferred-height + 24px);
     vertical-stretch: 0;
     forward-focus: input;
 
@@ -713,21 +724,21 @@ export component JoinArea {
         y: -3px;
         width: parent.width + 6px;
         height: parent.height + 6px;
-        border-radius: 13px;
+        border-radius: 17px;
         border-width: 3px;
-        border-color: root.invalid ? #F2555A2E : input.has-focus && !root.read-only ? #4C8DFF29 : transparent;
-        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        border-color: root.invalid ? #FF4D5E33 : input.has-focus && !root.read-only ? #6D7CFF33 : transparent;
+        animate border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     }
 
     Rectangle {
-        border-radius: 10px;
+        border-radius: 14px;
         border-width: 1px;
         background: Theme.input;
         border-color: root.invalid ? Theme.error
-            : input.has-focus && !root.read-only ? Theme.focus
-            : hover.has-hover ? Theme.border-strong : Theme.border-strong;
+            : input.has-focus && !root.read-only ? Theme.accent
+            : hover.has-hover ? Theme.border-strong : Theme.border;
         opacity: root.read-only ? 0.45 : 1;
-        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
 
         hover := TouchArea {
             mouse-cursor: MouseCursor.text;
@@ -735,35 +746,35 @@ export component JoinArea {
         }
 
         Text {
-            x: 12px;
-            y: 10px;
-            width: parent.width - 24px;
+            x: 14px;
+            y: 12px;
+            width: parent.width - 28px;
             text: root.placeholder;
             color: Theme.text-4;
-            font-size: 12px;
+            font-size: 12.5px;
             font-family: Theme.mono;
             letter-spacing: 0.2px;
             visible: root.text == "";
         }
 
         input := TextInput {
-            x: 12px;
-            y: 10px;
-            width: parent.width - 24px;
-            height: parent.height - 20px;
+            x: 14px;
+            y: 12px;
+            width: parent.width - 28px;
+            height: parent.height - 24px;
             text <=> root.text;
             read-only: root.read-only;
             color: Theme.text;
-            font-size: 12px;
+            font-size: 12.5px;
             font-family: Theme.mono;
             letter-spacing: 0.2px;
-            selection-background-color: #4C8DFF66;
+            selection-background-color: #6D7CFF66;
             selection-foreground-color: Theme.text;
             single-line: false;
             wrap: char-wrap;
             edited => { root.edited(self.text); }
             key-pressed(event) => {
-                // Enter joins rather than adding a line break nobody wants in a join string.
+                // Enter joins rather than adding a line break nobody wants in a code.
                 if (event.text == "\n") {
                     root.accepted(self.text);
                     return accept;
@@ -774,15 +785,16 @@ export component JoinArea {
     }
 }
 
-// The switch. The knob moves, so the state reads as position and not only as colour.
+// The switch. The knob moves, so the state reads as position and not only as colour, and it
+// stretches a little while pressed.
 export component Toggle {
     in property <bool> enabled: true;
     in property <string> label;
     in-out property <bool> checked;
     callback toggled(bool);
 
-    width: 38px;
-    height: 22px;
+    width: 40px;
+    height: 24px;
     forward-focus: focus;
     accessible-role: switch;
     accessible-label: label;
@@ -797,57 +809,34 @@ export component Toggle {
         }
     }
 
-    if root.checked: SoftShadow {
-        radius: 11px;
-        offset-y: 2px;
-        blur: 8px;
-        spread: -2px;
-        tint: #2F73F0;
-        strength: 0.55;
-        steps: 4;
-        opacity: root.enabled ? 1 : 0.45;
+    if root.checked && root.enabled: Glow {
+        tint: Theme.accent.with-alpha(0.7);
+        radius: 12px;
+        blur: 14px;
+        lift: 0px;
+        inset: 3px;
     }
 
     track := Rectangle {
-        border-radius: 11px;
-        border-width: 1px;
-        background: root.checked ? transparent : Theme.raised-2;
-        border-color: root.checked ? Theme.accent-deep : Theme.border-strong;
+        border-radius: 12px;
+        border-width: root.checked ? 0px : 1px;
+        background: root.checked ? @linear-gradient(120deg, #6D7CFF 0%, #4FE3C1 100%) : #FFFFFF1A;
+        border-color: Theme.border-strong;
         opacity: root.enabled ? 1 : 0.45;
-        animate background, border-color { duration: 140ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-
-        if root.checked: GradientFill {
-            radius: 11px;
-            from: #5C97FF;
-            to: #2F73F0;
-        }
-        if root.checked: Rectangle {
-            border-radius: 11px;
-            border-width: 1px;
-            border-color: Theme.accent-deep;
-        }
-
-        SoftShadow {
-            x: knob.x;
-            y: knob.y;
-            width: knob.width;
-            height: knob.height;
-            radius: 8px;
-            offset-y: 1px;
-            blur: 2px;
-            strength: 0.45;
-            steps: 2;
-        }
 
         knob := Rectangle {
-            width: 16px;
-            height: 16px;
+            property <length> stretch: touch.pressed ? 5px : 0px;
+            width: 18px + self.stretch;
+            height: 18px;
             y: 3px;
             x: root.checked ? parent.width - self.width - 3px : 3px;
-            border-radius: 8px;
-            background: root.checked ? #FFFFFF : Theme.text-3;
-            animate x { duration: 140ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-            animate background { duration: 140ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+            border-radius: 9px;
+            background: root.checked ? #FFFFFF : #D9D7E3;
+            drop-shadow-color: #00000066;
+            drop-shadow-blur: 4px;
+            drop-shadow-offset-y: 1px;
+            animate x { duration: 420ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
+            animate stretch { duration: 200ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
         }
     }
 
@@ -857,7 +846,7 @@ export component Toggle {
         width: parent.width + 8px;
         height: parent.height + 8px;
         shown: focus.has-focus;
-        radius: 11px;
+        radius: 12px;
     }
 
     focus := FocusScope {
@@ -871,7 +860,7 @@ export component Toggle {
         }
     }
 
-    TouchArea {
+    touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.flip(); }
@@ -886,7 +875,7 @@ export component Select {
     in-out property <int> current: 0;
     callback changed(int);
 
-    height: 34px;
+    height: 38px;
     vertical-stretch: 0;
     forward-focus: focus;
     accessible-role: combobox;
@@ -895,16 +884,16 @@ export component Select {
     property <bool> open: false;
 
     Rectangle {
-        border-radius: 8px;
+        border-radius: 11px;
         border-width: 1px;
         background: Theme.input;
-        border-color: root.open ? Theme.focus : touch.has-hover && root.enabled ? Theme.border-strong : Theme.border;
+        border-color: root.open ? Theme.accent : touch.has-hover && root.enabled ? Theme.border-strong : Theme.border;
         opacity: root.enabled ? 1 : 0.45;
-        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
 
         HorizontalLayout {
-            padding-left: 11px;
-            padding-right: 11px;
+            padding-left: 12px;
+            padding-right: 12px;
             spacing: 8px;
 
             Text {
@@ -913,6 +902,7 @@ export component Select {
                     : "";
                 color: root.enabled ? Theme.text : Theme.text-4;
                 font-size: 13px;
+                font-weight: 500;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -924,6 +914,9 @@ export component Select {
                     source: Icons.chevron-down;
                     size: 15px;
                     tint: Theme.text-3;
+                    transform-origin: { x: self.width / 2, y: self.height / 2 };
+                    transform-rotation: root.open ? 180deg : 0deg;
+                    animate transform-rotation { duration: 350ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
                 }
             }
         }
@@ -935,39 +928,44 @@ export component Select {
         width: parent.width + 8px;
         height: parent.height + 8px;
         shown: focus.has-focus && !root.open;
-        radius: 8px;
+        radius: 11px;
     }
 
     popup := PopupWindow {
         x: 0;
-        y: root.height + 4px;
+        y: root.height + 6px;
         width: root.width;
         close-policy: close-on-click-outside;
 
         Rectangle {
-            background: Theme.raised-2;
-            border-radius: 10px;
+            background: Theme.menu-fill;
+            border-radius: 14px;
             border-width: 1px;
-            border-color: Theme.border;
+            border-color: #FFFFFF17;
+            drop-shadow-color: #0000008C;
+            drop-shadow-blur: 32px;
+            drop-shadow-offset-y: 12px;
 
             VerticalLayout {
-                padding: 4px;
+                padding: 6px;
                 spacing: 2px;
                 for option[index] in root.options: Rectangle {
-                    height: 30px;
-                    border-radius: 6px;
+                    height: 32px;
+                    border-radius: 8px;
                     background: index == root.current ? Theme.accent-soft
-                        : row-touch.has-hover ? Theme.raised-3 : transparent;
+                        : row-touch.has-hover ? #FFFFFF14 : transparent;
+                    animate background { duration: 120ms; }
 
                     HorizontalLayout {
-                        padding-left: 11px;
-                        padding-right: 9px;
+                        padding-left: 12px;
+                        padding-right: 10px;
                         spacing: 6px;
 
                         Text {
                             text: option;
                             color: Theme.text;
                             font-size: 13px;
+                            font-weight: index == root.current ? 600 : 400;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                             overflow: elide;
@@ -980,7 +978,7 @@ export component Select {
                             Icon {
                                 source: Icons.check;
                                 size: 14px;
-                                tint: Theme.link;
+                                tint: Theme.accent-2;
                             }
                         }
                     }
@@ -1031,10 +1029,10 @@ export component Select {
     }
 }
 
-// A state dot with its halo. Never shown alone: a label always sits beside it.
+// A state dot with its glow. Never shown alone: a label always sits beside it.
 export component StateDot {
     in property <SyncState> state;
-    // The hero's larger dot adds a glow.
+    // The hero's larger dot glows more.
     in property <bool> hero: false;
     property <length> dot: hero ? 10px : 8px;
     property <color> tint: States.tint(state);
@@ -1042,28 +1040,9 @@ export component StateDot {
     width: dot + 6px;
     height: dot + 6px;
 
-    // The 3 px halo, at 15 % of the state colour.
-    Rectangle {
-        border-radius: self.width / 2;
-        background: hero ? transparent : root.tint.with-alpha(0.15);
-    }
-
     property <float> pulse: States.pulses(root.state)
         ? 0.675 + 0.325 * cos(animation-tick() / 1800ms * 360deg)
         : 1;
-
-    if root.hero: Rectangle {
-        width: root.dot;
-        height: root.dot;
-        SoftShadow {
-            radius: root.dot / 2;
-            blur: 12px;
-            tint: root.tint;
-            strength: 0.8;
-            steps: 6;
-            opacity: root.pulse;
-        }
-    }
 
     Rectangle {
         width: root.dot;
@@ -1071,20 +1050,22 @@ export component StateDot {
         border-radius: root.dot / 2;
         background: root.tint;
         opacity: root.pulse;
+        drop-shadow-color: root.tint.with-alpha(root.hero ? 0.9 : 0.7);
+        drop-shadow-blur: root.hero ? 14px : 8px;
         animate background { duration: 180ms; }
     }
 }
 
-// A small pill. "THIS DEVICE", "EXPIRED".
+// A small badge. "THIS DEVICE", "EXPIRED".
 export component Pill inherits Rectangle {
     in property <string> text;
     in property <color> tone: Theme.link;
     in property <color> fill: Theme.accent-soft;
-    in property <color> edge: Theme.accent-border;
+    in property <color> edge: transparent;
 
-    height: 16px;
+    height: 18px;
     width: label.preferred-width + 14px;
-    border-radius: 8px;
+    border-radius: 9px;
     border-width: 1px;
     background: fill;
     border-color: edge;
@@ -1093,10 +1074,60 @@ export component Pill inherits Rectangle {
         text: root.text;
         color: root.tone;
         font-size: 10px;
-        font-weight: 600;
-        letter-spacing: 0.3px;
+        font-weight: 700;
+        letter-spacing: 0.6px;
         vertical-alignment: center;
         horizontal-alignment: center;
+    }
+}
+
+// A thin progress bar in the accent gradient, with a glow on the part that is done.
+export component ProgressBar inherits Rectangle {
+    in property <float> progress;
+    in property <length> thickness: 4px;
+    height: thickness;
+    vertical-stretch: 0;
+    border-radius: thickness / 2;
+    background: Theme.hairline;
+
+    Rectangle {
+        x: 0px;
+        width: max(parent.height, parent.width * clamp(root.progress, 0, 1));
+        border-radius: parent.border-radius;
+        background: @linear-gradient(90deg, #4FE3C1 0%, #6D7CFF 100%);
+        drop-shadow-color: #6D7CFFAA;
+        drop-shadow-blur: 8px;
+        animate width { duration: 400ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    }
+}
+
+// A square tile holding an icon: flat at rest, the accent gradient with a glow when on.
+export component Tile inherits Rectangle {
+    in property <image> icon;
+    in property <bool> on: false;
+    in property <length> size: 34px;
+    in property <color> tint: Theme.text-2;
+    width: size;
+    height: size;
+    border-radius: size * 0.3;
+
+    if root.on: Glow {
+        tint: Theme.accent.with-alpha(0.6);
+        radius: root.border-radius;
+        blur: 16px;
+        lift: 2px;
+        inset: 3px;
+    }
+    Rectangle {
+        border-radius: root.border-radius;
+        background: root.on ? @linear-gradient(135deg, #4FE3C1 0%, #6D7CFF 100%) : #18171F;
+        border-width: root.on ? 0px : 1px;
+        border-color: Theme.border-strong;
+        Icon {
+            source: root.icon;
+            size: root.size * 0.47;
+            tint: root.on ? Theme.on-accent : root.tint;
+        }
     }
 }
 
@@ -1104,55 +1135,57 @@ export component Pill inherits Rectangle {
 export component Skeleton inherits Rectangle {
     in property <bool> animated: true;
     background: Theme.raised-2;
-    border-radius: 4px;
+    border-radius: 6px;
     opacity: animated ? 0.75 + 0.25 * cos(animation-tick() / 1400ms * 360deg) : 1;
 }
 
-// A short confirmation near the bottom edge of the window.
+// A short confirmation near the bottom edge of the window. Rises in from below.
 export component Toast {
     in property <string> text;
     in property <bool> shown;
     in property <bool> good: true;
 
-    height: 36px;
+    height: 40px;
     width: row.preferred-width;
     opacity: shown ? 1 : 0;
-    animate opacity { duration: shown ? 180ms : 140ms; easing: cubic-bezier(0.05, 0.7, 0.1, 1); }
-
-    SoftShadow {
-        radius: 10px;
-        offset-y: 12px;
-        blur: 32px;
-        spread: -6px;
-        strength: 0.6;
-        steps: 14;
-    }
+    animate opacity { duration: shown ? 200ms : 140ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
 
     Rectangle {
-        border-radius: 10px;
+        y: root.shown ? 0px : 14px;
+        border-radius: 12px;
         border-width: 1px;
-        background: Theme.raised-2;
-        border-color: Theme.border-strong;
+        background: #26242E;
+        border-color: #FFFFFF17;
+        drop-shadow-color: #00000080;
+        drop-shadow-blur: 30px;
+        drop-shadow-offset-y: 12px;
+        animate y { duration: 450ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
 
         row := HorizontalLayout {
             padding-left: 12px;
-            padding-right: 14px;
-            spacing: 8px;
+            padding-right: 16px;
+            spacing: 9px;
             alignment: center;
 
             VerticalLayout {
                 alignment: center;
-                Icon {
-                    source: root.good ? Icons.check : Icons.alert;
-                    size: 15px;
-                    tint: root.good ? Theme.success : Theme.error;
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 10px;
+                    background: (root.good ? Theme.success : Theme.error).with-alpha(0.16);
+                    Icon {
+                        source: root.good ? Icons.check : Icons.alert;
+                        size: 12px;
+                        tint: root.good ? Theme.success : Theme.error;
+                    }
                 }
             }
             Text {
                 text: root.text;
                 color: Theme.text;
                 font-size: 12.5px;
-                font-weight: 500;
+                font-weight: 600;
                 vertical-alignment: center;
             }
         }

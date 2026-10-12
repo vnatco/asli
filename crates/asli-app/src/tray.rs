@@ -218,7 +218,7 @@ impl Tray {
         // terminal command, which is no onboarding story at all for a tray application.
         let join_item = MenuItem::with_id(id::JOIN, "Join Another Account", true, None);
         let history_item = MenuItem::with_id(id::HISTORY, "History", true, None);
-        let open_status_item = MenuItem::with_id(id::STATUS, "Status", true, None);
+        let open_status_item = MenuItem::with_id(id::STATUS, "Home", true, None);
         let settings_item = MenuItem::with_id(id::SETTINGS, "Settings", true, None);
         let diagnostics_item = MenuItem::with_id(id::DIAGNOSTICS, "Copy Diagnostics", true, None);
         let quit_item = MenuItem::with_id(id::QUIT, "Quit", true, None);

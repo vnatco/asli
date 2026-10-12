@@ -50,13 +50,14 @@ use crate::{notify, qr, secrets, tray};
 // build. Keeping the generated code at arm's length is what lets every hand written crate in this
 // project keep the stronger annotation.
 pub use asli_ui::{
-    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
+    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, ReadyFile, ReadyTarget, Screen,
+    SyncState, TokenCheck,
 };
 
 use crate::enroll::{Invitation, InviteOutcome, JoinAttempt, JoinOutcome};
 
 /// How often the visible window refreshes its status.
-const REFRESH: Duration = Duration::from_millis(900);
+const REFRESH: Duration = Duration::from_millis(400);
 
 /// The size caps offered, as bytes and as the label beside them.
 const SIZE_CAPS: [(usize, &str); 4] = [
@@ -339,14 +340,20 @@ thread_local! {
     /// The transfer behind each row of the file list, in the order shown.
     static FILE_ROWS: RefCell<Vec<crate::transfer::OfferId>> = const { RefCell::new(Vec::new()) };
 
-    /// The file offered to this device that the accept card is showing.
-    static OFFER_SHOWN: RefCell<Option<crate::transfer::OfferId>> = const { RefCell::new(None) };
+    /// The files offered to this device that the accept card is asking about: one sender's.
+    static OFFER_SHOWN: RefCell<Vec<crate::transfer::OfferId>> = const { RefCell::new(Vec::new()) };
 
     /// Where an accepted file goes, once the person has picked a folder other than Downloads.
     static OFFER_FOLDER: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
 
-    /// A file dropped on the window, and the devices it could go to, in the order shown.
-    static DROPPED: RefCell<Option<(std::path::PathBuf, Vec<[u8; 16]>)>> = const { RefCell::new(None) };
+    /// Files dropped on the window, ready to send, and the devices offered for them in the order
+    /// shown.
+    static READY: RefCell<crate::ready::Ready> = RefCell::new(crate::ready::Ready::default());
+    static READY_TARGETS: RefCell<Vec<[u8; 16]>> = const { RefCell::new(Vec::new()) };
+    /// How each device's last sending ended, kept on its row for a moment.
+    static MOMENTS: RefCell<crate::ready::Moments> = RefCell::new(crate::ready::Moments::default());
+    /// Files dropped one by one in a single drop, gathered before they join Ready to Send.
+    static PENDING_DROP: RefCell<Vec<std::path::PathBuf>> = const { RefCell::new(Vec::new()) };
 }
 
 /// This device asking to join: the attempt, and the device key and id it keeps if approved.
@@ -603,27 +610,6 @@ fn bring_to_front(window: &AppWindow) {
 /// Whether this is a Wayland session, where only a freshly shown window gets focus.
 fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
-}
-
-/// The interface face for this platform, when the platform's own default is not the one the
-/// design names.
-fn ui_font() -> &'static str {
-    if cfg!(target_os = "windows") {
-        // Windows 11 ships the variable Segoe that the design is drawn in. Windows 10 has only
-        // the older face, which is close enough and always present.
-        let windir = std::env::var_os("WINDIR").map_or_else(
-            || std::path::PathBuf::from(r"C:\Windows"),
-            std::path::PathBuf::from,
-        );
-        if windir.join("Fonts").join("SegUIVar.ttf").exists() {
-            "Segoe UI Variable Text"
-        } else {
-            "Segoe UI"
-        }
-    } else {
-        // The system face: Noto Sans on most Linux desktops, San Francisco on macOS.
-        ""
-    }
 }
 
 /// Hides the window and stops everything that was running for it.
@@ -1276,12 +1262,12 @@ fn build() -> Result<AppWindow> {
     });
 
     let window = AppWindow::new().map_err(|err| Error::ConfigDir(err.to_string()))?;
-    window.set_ui_font(ui_font().into());
     // A new window's history list is empty, whatever the last one showed, so it is drawn in full
     // rather than skipped as already up to date.
     HISTORY_DRAWN.set(None);
     watch_for_dropped_files(&window);
     wire_files(&window);
+    wire_ready(&window);
     window.set_app_version(crate::VERSION.into());
 
     let handle = window.as_weak();
@@ -1521,47 +1507,99 @@ fn refresh_status(window: &AppWindow) {
     }
     window.set_rekey_note(REKEY_NOTE.with_borrow(Clone::clone).into());
     window.set_update_note(update_note(&listed).into());
+    let rows = device_rows(listed, &context.controls.transfers, now);
+    set_rows(&window.get_devices(), rows, |model| {
+        window.set_devices(model);
+    });
+    refresh_files(window, &context.controls.transfers);
+    refresh_ready(window);
+}
+
+/// The rows of Paired Devices: who each device is, how current its Asli is, and how sending to it
+/// stands.
+fn device_rows(
+    listed: Vec<crate::devices::Listed>,
+    transfers_handle: &crate::transfer::Transfers,
+    now: u64,
+) -> Vec<DeviceRow> {
     let newest = listed
         .iter()
         .map(|d| crate::version_key(&d.version))
         .max()
         .unwrap_or_default();
-    let rows: Vec<DeviceRow> = listed
-        .into_iter()
-        .map(|device| DeviceRow {
-            version: if device.version.is_empty() {
-                "Older Asli".to_owned()
-            } else {
-                device.version.clone()
-            }
-            .into(),
-            outdated: crate::version_key(&device.version) < newest,
-            forgettable: !device.this_device && !device.keyed,
-            can_send: !device.this_device && device.keyed && device.online,
-            removable: !device.this_device && device.keyed,
-            name: device.name.into(),
-            os: device.os.into(),
-            id: short(&device.id).into(),
-            seen: if device.online {
-                "Now".to_owned()
-            } else if device.this_device {
-                "Offline".to_owned()
-            } else {
-                crate::title_case(&tray::relative_time(device.last_seen_ms, now))
-            }
-            .into(),
-            online: device.online,
-            this_device: device.this_device,
-        })
-        .collect();
-    set_rows(&window.get_devices(), rows, |model| {
-        window.set_devices(model);
+    let transfers = transfers_handle.list();
+    let mut sends = crate::ready::device_sends(&transfers, &transfers_handle.preparing());
+    MOMENTS.with_borrow_mut(|moments| {
+        moments.apply(&mut sends, &transfers, std::time::Instant::now());
     });
-    refresh_files(window, &context.controls.transfers);
+    listed
+        .into_iter()
+        .map(|device| {
+            let send = crate::devices::id_bytes(&device.id)
+                .and_then(|id| sends.get(&id).copied())
+                .unwrap_or(crate::ready::DeviceSend::Idle);
+            let (send_state, send_label, send_progress) = describe_send(send);
+            DeviceRow {
+                send_state,
+                send_label: send_label.into(),
+                send_progress,
+                version: if device.version.is_empty() {
+                    "Older Asli".to_owned()
+                } else {
+                    device.version.clone()
+                }
+                .into(),
+                outdated: crate::version_key(&device.version) < newest,
+                forgettable: !device.this_device && !device.keyed,
+                can_send: !device.this_device && device.keyed && device.online,
+                removable: !device.this_device && device.keyed,
+                name: device.name.into(),
+                os: device.os.into(),
+                id: short(&device.id).into(),
+                seen: if device.online {
+                    "Now".to_owned()
+                } else if device.this_device {
+                    "Offline".to_owned()
+                } else {
+                    crate::title_case(&tray::relative_time(device.last_seen_ms, now))
+                }
+                .into(),
+                online: device.online,
+                this_device: device.this_device,
+            }
+        })
+        .collect()
 }
 
-/// Why a device is missing from the list a dropped file can go to.
-fn drop_note() -> String {
+/// How a device row's sending control should look: its state, what it says, and how far.
+fn describe_send(send: crate::ready::DeviceSend) -> (i32, String, f32) {
+    use crate::ready::{DeviceSend, Ending};
+    let files = |n: u32| {
+        if n == 1 {
+            String::new()
+        } else {
+            format!(" · {n} Files")
+        }
+    };
+    match send {
+        DeviceSend::Idle => (0, String::new(), 0.0),
+        DeviceSend::Waiting { files: n } => {
+            (1, format!("Waiting for Confirmation{}", files(n)), 0.0)
+        }
+        DeviceSend::Sending { files: n, progress } => (
+            2,
+            format!("Sending{} · {}%", files(n), (progress * 100.0).round()),
+            progress,
+        ),
+        DeviceSend::Ended(Ending::Sent) => (3, "Sent".to_owned(), 1.0),
+        DeviceSend::Ended(Ending::Declined) => (4, "Declined".to_owned(), 0.0),
+        DeviceSend::Ended(Ending::Cancelled) => (5, "Cancelled".to_owned(), 0.0),
+        DeviceSend::Ended(Ending::Failed) => (6, "Didn't Send".to_owned(), 0.0),
+    }
+}
+
+/// Why a device is missing from the ones Ready to Send can go to.
+fn ready_note() -> String {
     DEVICE_ROWS.with_borrow(|rows| {
         let others = rows.iter().filter(|d| !d.this_device);
         let old: Vec<&str> = others
@@ -1625,21 +1663,37 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
 
     window.set_status_badge(i32::try_from(transfers.offers_waiting()).unwrap_or(i32::MAX));
     let listed = transfers.list();
-    let offer = listed
+    // Offers are asked about one sender at a time, every file that sender offered together, oldest
+    // first: several files dropped and sent at once are one question, not several.
+    let waiting: Vec<&crate::transfer::Listed> = listed
         .iter()
-        .find(|t| t.direction == Direction::Receiving && t.stage == Stage::Offered);
-    OFFER_SHOWN.with_borrow_mut(|slot| *slot = offer.map(|t| t.id));
-    window.set_offer_waiting(offer.is_some());
-    if let Some(offer) = offer {
-        window.set_offer_from(offer.peer.clone().into());
-        window.set_offer_name(offer.name.clone().into());
-        window
-            .set_offer_size(human_bytes(usize::try_from(offer.size).unwrap_or(usize::MAX)).into());
+        .rev()
+        .filter(|t| t.direction == Direction::Receiving && t.stage == Stage::Offered)
+        .collect();
+    let group: Vec<&crate::transfer::Listed> = waiting
+        .first()
+        .map(|first| {
+            waiting
+                .iter()
+                .filter(|t| t.device_id == first.device_id)
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    OFFER_SHOWN.with_borrow_mut(|slot| *slot = group.iter().map(|t| t.id).collect());
+    window.set_offer_waiting(!group.is_empty());
+    window.set_offer_count(i32::try_from(group.len()).unwrap_or(i32::MAX));
+    if let Some(first) = group.first() {
+        let total: u64 = group.iter().map(|t| t.size).sum();
+        window.set_offer_from(first.peer.clone().into());
+        window.set_offer_name(first.name.clone().into());
+        window.set_offer_size(human_bytes(usize::try_from(total).unwrap_or(usize::MAX)).into());
     }
 
+    // What came to this device. What this device sends shows on the device it goes to instead.
     let shown: Vec<&crate::transfer::Listed> = listed
         .iter()
-        .filter(|t| !(t.direction == Direction::Receiving && t.stage == Stage::Offered))
+        .filter(|t| t.direction == Direction::Receiving && t.stage != Stage::Offered)
         .collect();
     FILE_ROWS.with_borrow_mut(|rows| *rows = shown.iter().map(|t| t.id).collect());
     let rows: Vec<FileRow> = shown
@@ -1683,16 +1737,16 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
     set_rows(&window.get_files(), rows, |model| window.set_files(model));
 }
 
-/// Opens the system's own dialog to pick a file or a folder, on a thread of its own so the
-/// window stays responsive, and hands the result back on the window's thread.
 /// What a file dialog asks for.
 enum Pick {
-    /// A file to send or shelve.
-    File,
+    /// A folder to save several files in, starting in this one.
+    Folder(std::path::PathBuf),
     /// Where to save a file: starting in a folder, with a name filled in.
     Save(std::path::PathBuf, String),
 }
 
+/// Opens the system's own dialog to pick a folder or a place to save, on a thread of its own so
+/// the window stays responsive, and hands the result back on the window's thread.
 fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static) {
     let spawned = std::thread::Builder::new()
         .name("asli-pick".to_owned())
@@ -1703,7 +1757,13 @@ fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static)
             let picked = runtime.block_on(async {
                 let dialog = rfd::AsyncFileDialog::new();
                 match pick {
-                    Pick::File => dialog.pick_file().await,
+                    Pick::Folder(folder) => {
+                        dialog
+                            .set_title("Save the Files In")
+                            .set_directory(folder)
+                            .pick_folder()
+                            .await
+                    }
                     Pick::Save(folder, name) => {
                         dialog
                             .set_title("Save the File As")
@@ -1724,15 +1784,50 @@ fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static)
     }
 }
 
-/// Offers a file to a device, saying so, or saying why not.
-fn offer_file(path: &std::path::Path, to: [u8; 16]) {
+/// Opens the system's dialog to pick one file or several to send.
+fn pick_many_then(then: impl FnOnce(Vec<std::path::PathBuf>) + Send + 'static) {
+    let spawned = std::thread::Builder::new()
+        .name("asli-pick".to_owned())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+                return;
+            };
+            let picked = runtime.block_on(async {
+                rfd::AsyncFileDialog::new()
+                    .set_title("Choose Files to Send")
+                    .pick_files()
+                    .await
+            });
+            if let Some(handles) = picked {
+                let paths: Vec<_> = handles.iter().map(|h| h.path().to_path_buf()).collect();
+                if !paths.is_empty() {
+                    let _ = slint::invoke_from_event_loop(move || then(paths));
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        eprintln!("{}", log_line("pick_failed", &err.to_string()));
+    }
+}
+
+/// Offers files to a device. Its row shows how that goes; only a refusal is said here.
+fn send_files(paths: &[std::path::PathBuf], to: [u8; 16]) {
     let Some(context) = CONTEXT.get() else {
         return;
     };
-    match context.controls.transfers.send(path, to) {
-        Ok(()) => toast("Offered. It is sent once they accept it.", true),
-        Err(why) => toast(&why, false),
+    // Every file is tried, whatever happens to the one before it.
+    let refused: Vec<String> = paths
+        .iter()
+        .filter_map(|path| context.controls.transfers.send(path, to).err())
+        .collect();
+    if let Some(why) = refused.first() {
+        toast(why, false);
     }
+    WINDOW.with_borrow(|window| {
+        if let Some(window) = window.as_ref() {
+            refresh_status(window);
+        }
+    });
 }
 
 /// Shows a kept file in its folder, from its row in the list.
@@ -1765,40 +1860,64 @@ fn show_file(index: i32) {
     }
 }
 
-/// Accepting asks where to keep the file, every time, starting where the last one went.
+/// Accepting asks where to keep the files, every time, starting where the last ones went: a Save
+/// dialog for one file, a folder for several.
 fn accept_offer() {
-    let (Some(context), Some(id)) = (CONTEXT.get(), OFFER_SHOWN.with_borrow(Clone::clone)) else {
-        return;
-    };
-    let Some(name) = context
-        .controls
-        .transfers
-        .list()
-        .into_iter()
-        .find(|t| t.id == id)
-        .map(|t| t.name)
-    else {
+    let ids = OFFER_SHOWN.with_borrow(Clone::clone);
+    let Some(context) = CONTEXT.get() else {
         return;
     };
     let folder = OFFER_FOLDER
         .with_borrow(Clone::clone)
         .unwrap_or_else(crate::transfer::default_folder);
-    pick_then(Pick::Save(folder, name), move |path| {
+    if let [id] = ids.as_slice() {
+        let id = *id;
+        let Some(name) = context
+            .controls
+            .transfers
+            .list()
+            .into_iter()
+            .find(|t| t.id == id)
+            .map(|t| t.name)
+        else {
+            return;
+        };
+        pick_then(Pick::Save(folder, name), move |path| {
+            let Some(context) = CONTEXT.get() else {
+                return;
+            };
+            if let Some(parent) = path.parent() {
+                OFFER_FOLDER.with_borrow_mut(|slot| *slot = Some(parent.to_path_buf()));
+            }
+            // The dialog has already asked about replacing a file of that name.
+            let replace = path.exists();
+            match context
+                .controls
+                .transfers
+                .accept_as(&id, path.clone(), replace)
+            {
+                Ok(()) => toast(&format!("Saving to {}", path.display()), true),
+                Err(why) => toast(&why, false),
+            }
+        });
+        return;
+    }
+    if ids.is_empty() {
+        return;
+    }
+    pick_then(Pick::Folder(folder), move |chosen| {
         let Some(context) = CONTEXT.get() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            OFFER_FOLDER.with_borrow_mut(|slot| *slot = Some(parent.to_path_buf()));
-        }
-        // The dialog has already asked about replacing a file of that name.
-        let replace = path.exists();
-        match context
-            .controls
-            .transfers
-            .accept_as(&id, path.clone(), replace)
-        {
-            Ok(()) => toast(&format!("Saving to {}", path.display()), true),
-            Err(why) => toast(&why, false),
+        OFFER_FOLDER.with_borrow_mut(|slot| *slot = Some(chosen.clone()));
+        // Every file is accepted, whatever happens to the one before it.
+        let failed: Vec<String> = ids
+            .iter()
+            .filter_map(|id| context.controls.transfers.accept(id, &chosen).err())
+            .collect();
+        match failed.first() {
+            None => toast(&format!("Saving to {}", chosen.display()), true),
+            Some(why) => toast(why, false),
         }
     });
 }
@@ -1814,14 +1933,30 @@ fn wire_files(window: &AppWindow) {
         let Some(to) = device.and_then(|d| crate::devices::id_bytes(&d.id)) else {
             return;
         };
-        pick_then(Pick::File, move |path| offer_file(&path, to));
+        // One file or several, straight to that device. Nothing else on the screen changes: the
+        // device's own row shows how it goes.
+        pick_many_then(move |paths| send_files(&paths, to));
+    });
+
+    window.on_cancel_device_send(|index| {
+        let device = DEVICE_ROWS.with_borrow(|rows| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| rows.get(i))
+                .and_then(|d| crate::devices::id_bytes(&d.id))
+        });
+        if let (Some(context), Some(device)) = (CONTEXT.get(), device) {
+            context.controls.transfers.cancel_to(&device);
+        }
     });
 
     window.on_accept_offer(accept_offer);
 
     window.on_decline_offer(|| {
-        if let (Some(context), Some(id)) = (CONTEXT.get(), OFFER_SHOWN.with_borrow(Clone::clone)) {
-            context.controls.transfers.decline(&id);
+        if let Some(context) = CONTEXT.get() {
+            for id in OFFER_SHOWN.with_borrow(Clone::clone) {
+                context.controls.transfers.decline(&id);
+            }
         }
     });
 
@@ -1843,37 +1978,13 @@ fn wire_files(window: &AppWindow) {
             context.controls.transfers.clear_finished();
         }
     });
-
-    let handle = window.as_weak();
-    window.on_send_dropped(move |index| {
-        let dropped = DROPPED.with_borrow_mut(Option::take);
-        if let Some(window) = handle.upgrade() {
-            window.set_drop_name(String::new().into());
-        }
-        let Some((path, targets)) = dropped else {
-            return;
-        };
-        if let Some(to) = usize::try_from(index)
-            .ok()
-            .and_then(|i| targets.get(i).copied())
-        {
-            offer_file(&path, to);
-        }
-    });
-
-    let handle = window.as_weak();
-    window.on_cancel_drop(move || {
-        DROPPED.with_borrow_mut(Option::take);
-        if let Some(window) = handle.upgrade() {
-            window.set_drop_name(String::new().into());
-        }
-    });
 }
 
 /// Watches for files dragged onto the window and dropped there.
 ///
-/// Through the platform window's own events, which winit reports on Windows, macOS and X11. On
-/// Wayland winit reports none, so there a file is sent with Send File on a device instead.
+/// winit reports drops on Windows, macOS and X11, one file at a time; those are gathered for a
+/// moment into one group. On Wayland winit reports none, and [`asli_dnd`] does it instead. Either
+/// way a drag over the window shows Home, where the files land.
 fn watch_for_dropped_files(window: &AppWindow) {
     use slint::winit_030::winit::event::WindowEvent;
     use slint::winit_030::{EventResult, WinitWindowAccessor as _};
@@ -1884,45 +1995,214 @@ fn watch_for_dropped_files(window: &AppWindow) {
             return EventResult::Propagate;
         };
         match event {
-            WindowEvent::HoveredFile(_) => window.set_drop_hover(true),
+            WindowEvent::HoveredFile(_) => drag_entered(&window),
             WindowEvent::HoveredFileCancelled => window.set_drop_hover(false),
             WindowEvent::DroppedFile(path) => {
                 window.set_drop_hover(false);
-                took_a_dropped_file(&window, path.clone());
+                let first = PENDING_DROP.with_borrow_mut(|pending| {
+                    pending.push(path.clone());
+                    pending.len() == 1
+                });
+                // The rest of one drop arrives in the same burst of events.
+                if first {
+                    slint::Timer::single_shot(Duration::from_millis(80), || {
+                        let paths = PENDING_DROP.with_borrow_mut(std::mem::take);
+                        WINDOW.with_borrow(|window| {
+                            if let Some(window) = window.as_ref() {
+                                files_dropped(window, paths);
+                            }
+                        });
+                    });
+                }
             }
             _ => {}
         }
         EventResult::Propagate
     });
+
+    #[cfg(target_os = "linux")]
+    watch_wayland_drops(window);
 }
 
-/// Asks where a dropped file should go: one of the devices connected now.
-fn took_a_dropped_file(window: &AppWindow, path: std::path::PathBuf) {
-    // One at a time: a second file dropped together with the first waits for another drop.
-    if DROPPED.with_borrow(Option::is_some) {
+/// Wayland, where winit reports no drops: the drop target joins its connection once, for the life
+/// of the process, and a timer passes on what it hears to whichever window is open.
+#[cfg(target_os = "linux")]
+fn watch_wayland_drops(window: &AppWindow) {
+    thread_local! {
+        static TARGET: RefCell<Option<asli_dnd::DropTarget>> = const { RefCell::new(None) };
+        static POLL: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+    }
+    if TARGET.with_borrow(Option::is_some) {
         return;
     }
-    if !path.is_file() {
-        toast("Only files can be sent, not folders.", false);
+    let Some(target) = asli_dnd::DropTarget::attach(window.window()) else {
+        return;
+    };
+    TARGET.with_borrow_mut(|slot| *slot = Some(target));
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(30),
+        || {
+            let events =
+                TARGET.with_borrow_mut(|slot| slot.as_mut().map(asli_dnd::DropTarget::poll));
+            for event in events.unwrap_or_default() {
+                WINDOW.with_borrow(|window| {
+                    let Some(window) = window.as_ref() else {
+                        return;
+                    };
+                    match event {
+                        asli_dnd::DropEvent::Entered => drag_entered(window),
+                        asli_dnd::DropEvent::Left => window.set_drop_hover(false),
+                        asli_dnd::DropEvent::Dropped(paths) => {
+                            window.set_drop_hover(false);
+                            files_dropped(window, paths);
+                        }
+                    }
+                });
+            }
+        },
+    );
+    POLL.with_borrow_mut(|slot| *slot = Some(timer));
+}
+
+/// Files are being dragged over the window: show Home, where they will land.
+fn drag_entered(window: &AppWindow) {
+    if window.get_screen() != Screen::Status && window.get_has_account() {
+        window.invoke_open_screen(Screen::Status);
+    }
+    window.set_drop_hover(true);
+}
+
+/// Files dropped on the window join Ready to Send on Home.
+fn files_dropped(window: &AppWindow, paths: Vec<std::path::PathBuf>) {
+    if paths.is_empty() || !window.get_has_account() {
         return;
     }
-    let targets: Vec<(String, [u8; 16])> = DEVICE_ROWS.with_borrow(|rows| {
+    let skipped = READY.with_borrow_mut(|ready| ready.add(paths));
+    if skipped > 0 {
+        toast("Folders Can't Be Sent, Only Files", false);
+    }
+    if window.get_screen() != Screen::Status {
+        window.invoke_open_screen(Screen::Status);
+    }
+    refresh_ready(window);
+}
+
+/// Draws Ready to Send: the files, and the devices they can go to now.
+fn refresh_ready(window: &AppWindow) {
+    let (files, total): (Vec<ReadyFile>, u64) = READY.with_borrow(|ready| {
+        let files = ready
+            .files()
+            .iter()
+            .map(|path| ReadyFile {
+                name: path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                    .into(),
+                size: std::fs::metadata(path)
+                    .map(|m| human_bytes(usize::try_from(m.len()).unwrap_or(usize::MAX)))
+                    .unwrap_or_default()
+                    .into(),
+            })
+            .collect();
+        (files, ready.total_bytes())
+    });
+    let count = files.len();
+    window.set_ready_summary(
+        format!(
+            "{}  ·  {}",
+            if count == 1 {
+                "1 File".to_owned()
+            } else {
+                format!("{count} Files")
+            },
+            human_bytes(usize::try_from(total).unwrap_or(usize::MAX))
+        )
+        .into(),
+    );
+    set_rows(&window.get_ready_files(), files, |model| {
+        window.set_ready_files(model);
+    });
+    let targets: Vec<([u8; 16], ReadyTarget)> = DEVICE_ROWS.with_borrow(|rows| {
         rows.iter()
             .filter(|d| !d.this_device && d.keyed && d.online)
-            .filter_map(|d| Some((d.name.clone(), crate::devices::id_bytes(&d.id)?)))
+            .filter_map(|d| {
+                let id = crate::devices::id_bytes(&d.id)?;
+                Some((
+                    id,
+                    ReadyTarget {
+                        name: d.name.clone().into(),
+                        sent: READY.with_borrow(|ready| ready.was_sent_to(&id)),
+                    },
+                ))
+            })
             .collect()
     });
-    let name = path
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let names: Vec<slint::SharedString> = targets.iter().map(|(n, _)| n.clone().into()).collect();
-    window.set_drop_targets(ModelRc::new(VecModel::from(names)));
-    window.set_drop_note(drop_note().into());
-    window.set_drop_name(name.into());
-    DROPPED.with_borrow_mut(|slot| {
-        *slot = Some((path, targets.into_iter().map(|(_, id)| id).collect()));
+    READY_TARGETS.with_borrow_mut(|ids| *ids = targets.iter().map(|(id, _)| *id).collect());
+    set_rows(
+        &window.get_ready_targets(),
+        targets.into_iter().map(|(_, t)| t).collect(),
+        |model| window.set_ready_targets(model),
+    );
+    window.set_ready_note(
+        if count > 0 {
+            ready_note()
+        } else {
+            String::new()
+        }
+        .into(),
+    );
+}
+
+/// Sends what is ready to one device.
+fn send_ready_to(device: [u8; 16]) {
+    let files = READY.with_borrow(|ready| ready.files().to_vec());
+    send_files(&files, device);
+    READY.with_borrow_mut(|ready| ready.sent(device));
+}
+
+/// Attaches the callbacks of Ready to Send.
+fn wire_ready(window: &AppWindow) {
+    window.on_ready_send(|index| {
+        let device = READY_TARGETS.with_borrow(|ids| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| ids.get(i).copied())
+        });
+        if let Some(device) = device {
+            send_ready_to(device);
+        }
     });
-    window.set_screen(Screen::Status);
+    window.on_ready_send_all(|| {
+        for device in READY_TARGETS.with_borrow(Clone::clone) {
+            if !READY.with_borrow(|ready| ready.was_sent_to(&device)) {
+                send_ready_to(device);
+            }
+        }
+    });
+    let handle = window.as_weak();
+    window.on_ready_done(move || {
+        READY.with_borrow_mut(crate::ready::Ready::clear);
+        if let Some(window) = handle.upgrade() {
+            refresh_ready(&window);
+        }
+    });
+    let handle = window.as_weak();
+    window.on_ready_remove(move |index| {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        let path = READY.with_borrow(|ready| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| ready.files().get(i).cloned())
+        });
+        if let Some(path) = path {
+            READY.with_borrow_mut(|ready| ready.remove(&path));
+        }
+        refresh_ready(&window);
+    });
 }
 
 /// Replaces a list's rows in place when only their contents changed, so a redraw every second

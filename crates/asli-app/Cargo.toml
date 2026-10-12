@@ -139,3 +139,7 @@ assets = [
 # that file unless this table exists, so it is here and nearly empty.
 [package.metadata.generate-rpm]
 name = "asli"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Files dropped on the window under Wayland, where winit reports none.
+asli-dnd = { path = "../asli-dnd", version = "0.1.0" }

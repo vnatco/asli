@@ -226,11 +226,12 @@ dependencies = [
 
 [[package]]
 name = "asli-app"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "asli-clipboard",
  "asli-core",
  "asli-crypto",
+ "asli-dnd",
  "asli-history",
  "asli-net",
  "asli-ui",
@@ -258,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "asli-clipboard"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "asli-core",
  "clipboard-win",
@@ -275,14 +276,14 @@ dependencies = [
 
 [[package]]
 name = "asli-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "sha2 0.11.0",
 ]
 
 [[package]]
 name = "asli-crypto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -296,8 +297,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "asli-dnd"
+version = "0.1.7"
+dependencies = [
+ "slint",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-sys",
+]
+
+[[package]]
 name = "asli-history"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "asli-crypto",
  "hkdf",
@@ -307,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "asli-net"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "asli-core",
  "asli-crypto",
@@ -323,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "asli-ui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "png",
  "slint",

@@ -121,6 +121,8 @@ pub struct Listed {
     pub direction: Direction,
     /// The other device's name.
     pub peer: String,
+    /// The other device.
+    pub device_id: [u8; 16],
     /// The file's name.
     pub name: String,
     /// Its size.
@@ -145,6 +147,9 @@ struct State {
     pace: Pace,
     /// Files only on the local network, never through the relay.
     same_network_only: bool,
+    /// Files being read and hashed before they are offered, with the device each goes to: a large
+    /// file takes a while, and the device it is for shows that it is on its way.
+    preparing: Vec<([u8; 16], PathBuf)>,
     /// Whether the relay has read this device's goodbye.
     leave_sent: bool,
     /// Bumped on every change, so a window knows to redraw.
@@ -357,6 +362,7 @@ impl Transfers {
                         id: o.offer.offer_id,
                         direction: Direction::Sending,
                         peer: o.peer.clone(),
+                        device_id: o.offer.to_device_id,
                         name: o.offer.name.clone(),
                         size: o.offer.size,
                         chunks: o.offer.chunk_count(),
@@ -371,6 +377,7 @@ impl Transfers {
                         id: i.offer.offer_id,
                         direction: Direction::Receiving,
                         peer: i.peer.clone(),
+                        device_id: i.offer.from_device_id,
                         name: crate::transfer::safe_name(&i.offer.name),
                         size: i.offer.size,
                         chunks: i.offer.chunk_count(),
@@ -452,18 +459,62 @@ impl Transfers {
 
         let this = self.clone();
         let path = path.to_path_buf();
-        std::thread::Builder::new()
+        let kept = path.clone();
+        self.set_preparing(to, &path, true);
+        let spawned = std::thread::Builder::new()
             .name("asli-hash".to_owned())
             .spawn(move || {
-                let outcome = hash_file(&path)
-                    .and_then(|hashed| this.offer(path.clone(), to, &conn, &peer, hashed));
+                let outcome = hash_file(&path).and_then(|hashed| {
+                    // Called off while it was being read: it is not offered at all.
+                    if !this.is_preparing(to, &path) {
+                        return Ok(());
+                    }
+                    this.offer(path.clone(), to, &conn, &peer, hashed)
+                });
+                this.set_preparing(to, &path, false);
                 if let Err(err) = outcome {
                     eprintln!("{}", log_line("file_offer_failed", &err));
                     crate::notify::file_failed(&display_name(&path), &err);
                 }
-            })
-            .map_err(|err| err.to_string())?;
+            });
+        if let Err(err) = spawned {
+            self.set_preparing(to, &kept, false);
+            return Err(err.to_string());
+        }
         Ok(())
+    }
+
+    fn set_preparing(&self, to: [u8; 16], path: &Path, on: bool) {
+        if let Ok(mut state) = self.0.lock() {
+            if on {
+                state.preparing.push((to, path.to_path_buf()));
+            } else if let Some(at) = state
+                .preparing
+                .iter()
+                .position(|(device, p)| *device == to && p == path)
+            {
+                state.preparing.remove(at);
+            }
+            state.revision += 1;
+        }
+    }
+
+    fn is_preparing(&self, to: [u8; 16], path: &Path) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state
+                .preparing
+                .iter()
+                .any(|(device, p)| *device == to && p == path)
+        })
+    }
+
+    /// How many files are being read before they are offered, per device.
+    #[must_use]
+    pub fn preparing(&self) -> Vec<[u8; 16]> {
+        self.0.lock().map_or_else(
+            |_| Vec::new(),
+            |state| state.preparing.iter().map(|(device, _)| *device).collect(),
+        )
     }
 
     fn offer(
@@ -812,6 +863,25 @@ impl Transfers {
         let _ = answer(link, id, false, &incoming.offer.reply_to);
         incoming.stage = Stage::Declined;
         state.revision += 1;
+    }
+
+    /// Calls off everything on its way to one device, and drops what is still being read for it.
+    pub fn cancel_to(&self, device: &[u8; 16]) {
+        let ids: Vec<OfferId> = self.0.lock().map_or_else(
+            |_| Vec::new(),
+            |mut state| {
+                state.preparing.retain(|(to, _)| to != device);
+                state
+                    .sending
+                    .values()
+                    .filter(|o| o.offer.to_device_id == *device && !o.stage.finished())
+                    .map(|o| o.offer.offer_id)
+                    .collect()
+            },
+        );
+        for id in ids {
+            self.cancel(&id);
+        }
     }
 
     /// Calls a transfer off, either way round.

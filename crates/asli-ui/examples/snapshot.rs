@@ -11,7 +11,8 @@
 use std::rc::Rc;
 
 use asli_ui::{
-    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, Screen, SyncState, TokenCheck,
+    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, ReadyFile, ReadyTarget, Screen,
+    SyncState, TokenCheck,
 };
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
@@ -172,24 +173,6 @@ fn main() {
             }),
         ),
         (
-            "08e-status-drop",
-            Box::new(|ui: &AppWindow| {
-                ui.set_screen(Screen::Status);
-                ui.set_drop_name("holiday-photos.zip".into());
-                ui.set_drop_targets(ModelRc::new(VecModel::from(vec![
-                    SharedString::from("MacBook-Air"),
-                    SharedString::from("DESKTOP-7Q"),
-                ])));
-            }),
-        ),
-        (
-            "08g-status-drop-nobody",
-            Box::new(|ui: &AppWindow| {
-                ui.set_screen(Screen::Status);
-                ui.set_drop_name("holiday-photos.zip".into());
-            }),
-        ),
-        (
             "05d-add-device-nearby",
             Box::new(|ui: &AppWindow| {
                 ui.set_screen(Screen::Token);
@@ -206,25 +189,34 @@ fn main() {
             }),
         ),
         (
-            "08h-status-update",
+            "08e-home-ready",
             Box::new(|ui: &AppWindow| {
                 ui.set_screen(Screen::Status);
-                ui.set_update_note("MacBook Pro runs Asli 0.1.2; this device runs 0.1.1. Update Asli here to keep up.".into());
-            }),
-        ),
-        (
-            "08i-status-drop-old",
-            Box::new(|ui: &AppWindow| {
-                ui.set_screen(Screen::Status);
-                ui.set_drop_name("holiday-photos.zip".into());
-                ui.set_drop_note("DESKTOP-CVM6TIQ, Mariami's MacBook Air run an older Asli that cannot receive files: update them first.".into());
-            }),
-        ),
-        (
-            "12c-settings-confirm-leave",
-            Box::new(|ui: &AppWindow| {
-                ui.set_screen(Screen::Settings);
-                ui.set_confirm_leave(true);
+                ui.set_ready_files(ModelRc::new(VecModel::from(vec![
+                    ReadyFile {
+                        name: "holiday-photos.zip".into(),
+                        size: "212 MB".into(),
+                    },
+                    ReadyFile {
+                        name: "Quarterly report final.pdf".into(),
+                        size: "3.4 MB".into(),
+                    },
+                    ReadyFile {
+                        name: "notes.md".into(),
+                        size: "4 KB".into(),
+                    },
+                ])));
+                ui.set_ready_summary("3 Files  ·  215.4 MB".into());
+                ui.set_ready_targets(ModelRc::new(VecModel::from(vec![
+                    ReadyTarget {
+                        name: "MacBook Pro".into(),
+                        sent: true,
+                    },
+                    ReadyTarget {
+                        name: "DESKTOP-7Q".into(),
+                        sent: false,
+                    },
+                ])));
             }),
         ),
         (
@@ -232,6 +224,20 @@ fn main() {
             Box::new(|ui: &AppWindow| {
                 ui.set_screen(Screen::Status);
                 ui.set_drop_hover(true);
+            }),
+        ),
+        (
+            "08h-status-update",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Status);
+                ui.set_update_note("MacBook Pro runs Asli 0.1.2; this device runs 0.1.1. Update Asli here to keep up.".into());
+            }),
+        ),
+        (
+            "12c-settings-confirm-leave",
+            Box::new(|ui: &AppWindow| {
+                ui.set_screen(Screen::Settings);
+                ui.set_confirm_leave(true);
             }),
         ),
         (
@@ -362,7 +368,7 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.6".into());
+    ui.set_app_version("0.1.7".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
@@ -395,6 +401,9 @@ fn sample(ui: &AppWindow) {
             version: "0.1.1".into(),
             outdated: false,
             forgettable: false,
+            send_state: 0,
+            send_label: "".into(),
+            send_progress: 0.0,
         },
         DeviceRow {
             name: "MacBook Pro".into(),
@@ -408,6 +417,9 @@ fn sample(ui: &AppWindow) {
             version: "0.1.2".into(),
             outdated: false,
             forgettable: false,
+            send_state: 2,
+            send_label: "Sending 3 Files · 45%".into(),
+            send_progress: 0.45,
         },
         DeviceRow {
             name: "fedora-desk".into(),
@@ -421,6 +433,9 @@ fn sample(ui: &AppWindow) {
             version: "0.1.0".into(),
             outdated: true,
             forgettable: false,
+            send_state: 0,
+            send_label: "".into(),
+            send_progress: 0.0,
         },
     ])));
     let row = |preview: &str, meta: &str, image: bool, mono: bool| HistoryRow {

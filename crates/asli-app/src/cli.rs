@@ -386,7 +386,22 @@ fn request_transfer(paths: &Paths, request: &daemon::TransferRequest) -> Result<
         ));
     }
     let bytes = serde_json::to_vec(request).map_err(|err| Error::Parse(err.to_string()))?;
-    crate::config::write_atomically(&daemon::transfer_request_path(paths), &bytes, 0o600)
+    let path = daemon::transfer_request_path(paths);
+    // One request at a time: the running Asli picks this file up every half second, and writing
+    // over one it has not read yet would lose it. Two quick sends in a row did exactly that.
+    for _ in 0..40 {
+        if !path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if path.exists() {
+        return Err(Error::Join(
+            "Asli has not picked up the last request. Check that it is running, then try again"
+                .to_owned(),
+        ));
+    }
+    crate::config::write_atomically(&path, &bytes, 0o600)
 }
 
 fn send_file(paths: &Paths, query: &str, file: &std::path::Path) -> Result<()> {

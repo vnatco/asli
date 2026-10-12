@@ -138,6 +138,7 @@ pub mod instance;
 pub mod macos;
 pub mod notify;
 pub mod qr;
+pub mod ready;
 pub mod replay_store;
 pub mod reveal;
 pub mod secrets;

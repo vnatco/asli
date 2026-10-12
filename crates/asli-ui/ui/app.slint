@@ -11,7 +11,7 @@
 import {
     SoftShadow, GradientFill, Theme, Icons, SyncState, States, Icon, Spinner, ButtonKind, Button, IconButton, Overline,
     Title, Subtitle, Caption, Label, Card, Divider, BannerKind, Banner, TextField, JoinArea,
-    Toggle, Select, StateDot, Pill, Skeleton, Toast
+    Toggle, Select, StateDot, Pill, Skeleton, Toast, Glow, Tile, ProgressBar
 } from "design.slint";
 
 export { SyncState }
@@ -57,6 +57,24 @@ export struct DeviceRow {
     outdated: bool,
     // Whether it can only be taken off this list: it has no key of its own to remove it with.
     forgettable: bool,
+    // Sending to it: 0 at rest, 1 waiting for an answer, 2 sending, 3 sent, 4 declined,
+    // 5 called off, 6 failed. With what to say, and how far it has got.
+    send-state: int,
+    send-label: string,
+    send-progress: float,
+}
+
+// A file dropped on the window, waiting in Ready to Send.
+export struct ReadyFile {
+    name: string,
+    size: string,
+}
+
+// A device Ready to Send can go to.
+export struct ReadyTarget {
+    name: string,
+    // Already sent this group.
+    sent: bool,
 }
 
 // A file on its way to or from this device.
@@ -145,75 +163,80 @@ component Scroller inherits Rectangle {
     }
 }
 
-// An item in the sidebar.
+// An item in the sidebar: an icon tile, a title, and a line under it saying how things stand
+// there. The highlight behind the selected item is shared and glides between items, so it is drawn
+// by the sidebar, not here.
 component NavItem inherits Rectangle {
     in property <string> text;
+    in property <string> sub;
     in property <image> icon;
     in property <bool> selected: false;
     // How many things on this screen wait for the person. Shown as a count while above zero.
     in property <int> badge: 0;
     callback clicked();
 
-    height: 34px;
-    border-radius: 8px;
-    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.hairline : transparent;
-    animate background { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+    // Even heights throughout, so the tile, the text block and the count sit on whole pixels.
+    height: 54px;
+    border-radius: 14px;
+    background: !selected && touch.has-hover ? #FFFFFF0A : transparent;
+    animate background { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     accessible-role: tab;
     accessible-label: text;
     accessible-item-selected: selected;
     accessible-action-default => { clicked(); }
 
-    // The selected item carries a bar at the sidebar's edge as well as a fill, so the current
-    // screen is not indicated by background colour alone.
-    Rectangle {
-        x: -10px;
-        y: 8px;
-        width: 3px;
-        height: 18px;
-        border-top-right-radius: 3px;
-        border-bottom-right-radius: 3px;
-        background: Theme.accent;
-        opacity: root.selected ? 1 : 0;
-        animate opacity { duration: 120ms; }
-    }
-
     HorizontalLayout {
         padding-left: 10px;
         padding-right: 10px;
-        spacing: 10px;
+        spacing: 12px;
 
         VerticalLayout {
             alignment: center;
-            Icon {
-                source: root.icon;
-                size: 16px;
-                tint: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
-                opacity: 0.9;
+            Tile {
+                icon: root.icon;
+                on: root.selected;
+                size: 32px;
+                tint: touch.has-hover ? Theme.text-2 : Theme.text-3;
             }
         }
 
-        Text {
-            text: root.text;
-            color: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
-            font-size: 13px;
-            font-weight: root.selected ? 600 : 400;
-            letter-spacing: -0.05px;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
             horizontal-stretch: 1;
-            animate color { duration: 120ms; }
+            Text {
+                height: 18px;
+                text: root.text;
+                color: root.selected || touch.has-hover ? Theme.text : Theme.text-2;
+                font-size: 13.5px;
+                font-weight: root.selected ? 700 : 600;
+                vertical-alignment: center;
+                animate color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+            }
+            if root.sub != "": Text {
+                height: 14px;
+                text: root.sub;
+                color: root.selected ? Theme.text-2 : Theme.text-3;
+                font-size: 11.5px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
 
         if root.badge > 0: VerticalLayout {
             alignment: center;
             Rectangle {
-                width: max(18px, badge-text.preferred-width + 10px);
-                height: 18px;
-                border-radius: 9px;
-                background: Theme.error;
+                width: max(20px, badge-text.preferred-width + 12px);
+                height: 20px;
+                border-radius: 10px;
+                background: @linear-gradient(120deg, #FF7A6A 0%, #FF4D5E 100%);
+                drop-shadow-color: #FF4D5E80;
+                drop-shadow-blur: 10px;
                 badge-text := Text {
                     text: root.badge;
                     color: #FFFFFF;
-                    font-size: 11px;
+                    font-family: Theme.display;
+                    font-size: 11.5px;
                     font-weight: 700;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -227,6 +250,156 @@ component NavItem inherits Rectangle {
     }
 }
 
+// The sending control on a device's row. It is one piece that changes shape: Send File at rest,
+// then waiting for the other device to accept with a way to call it off, then a progress bar, then
+// for a moment how it ended, then Send File again. Its width glides between those, and each face
+// fades into the next, so the row never jumps.
+component SendControl inherits Rectangle {
+    // 0 at rest, 1 waiting for an answer, 2 sending, 3 sent, 4 declined, 5 called off, 6 failed.
+    in property <int> state: 0;
+    in property <string> label;
+    in property <float> progress: 0;
+    in property <bool> can-send: true;
+    callback send();
+    callback cancel();
+
+    property <bool> live: state == 1 || state == 2;
+    property <color> ending-tone: state == 3 ? Theme.success
+        : state == 4 ? Theme.warning
+        : state == 6 ? Theme.error : Theme.text-2;
+
+    width: state == 0 ? (can-send ? 116px : 0px)
+        : state == 1 ? 296px
+        : state == 2 ? 252px : ending.preferred-width;
+    height: 30px;
+    animate width { duration: 380ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+
+    // At rest.
+    Button {
+        width: parent.width;
+        text: "Send File";
+        small: true;
+        icon: Icons.send;
+        show-icon: true;
+        enabled: root.can-send && root.state == 0;
+        opacity: root.state == 0 && root.can-send ? 1 : 0;
+        visible: self.opacity > 0.01;
+        animate opacity { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        clicked => { root.send(); }
+    }
+
+    // Under way: waiting for an answer, or sending.
+    Rectangle {
+        border-radius: 9px;
+        background: #6D7CFF1A;
+        border-width: 1px;
+        border-color: #6D7CFF59;
+        opacity: root.live ? 1 : 0;
+        visible: self.opacity > 0.01;
+        clip: true;
+        animate opacity { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+
+        // A band of light that sweeps across while it waits, so waiting reads as alive.
+        if root.state == 1: Rectangle {
+            x: (mod(animation-tick(), 1800ms) / 1800ms) * (parent.width + 120px) - 120px;
+            width: 120px;
+            background: @linear-gradient(90deg, #4FE3C100 0%, #4FE3C126 50%, #4FE3C100 100%);
+        }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 3px;
+            spacing: 8px;
+
+            if root.state == 1: VerticalLayout {
+                alignment: center;
+                Spinner {
+                    size: 13px;
+                    tint: Theme.accent-2;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 4px;
+                Text {
+                    height: 14px;
+                    text: root.label;
+                    color: Theme.text;
+                    font-size: 11.5px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.state == 2: ProgressBar {
+                    progress: root.progress;
+                    thickness: 4px;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: cancel-text.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: 7px;
+                    background: cancel-touch.pressed ? #FF4D5E40 : cancel-touch.has-hover ? #FF4D5E26 : transparent;
+                    animate background { duration: 140ms; }
+                    cancel-text := Text {
+                        text: "Cancel";
+                        color: cancel-touch.has-hover ? Theme.danger-soft : Theme.text-2;
+                        font-size: 11.5px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    cancel-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cancel(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // How it ended, for a moment.
+    Rectangle {
+        border-radius: 9px;
+        background: root.ending-tone.with-alpha(0.12);
+        border-width: 1px;
+        border-color: root.ending-tone.with-alpha(0.35);
+        opacity: root.state >= 3 ? 1 : 0;
+        visible: self.opacity > 0.01;
+        animate opacity { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+
+        ending := HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 12px;
+            spacing: 7px;
+            alignment: center;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    source: root.state == 3 ? Icons.check : Icons.alert;
+                    size: 14px;
+                    tint: root.ending-tone;
+                    // The mark pops in.
+                    transform-origin: { x: self.width / 2, y: self.height / 2 };
+                    transform-scale-x: root.state >= 3 ? 1 : 0.2;
+                    transform-scale-y: root.state >= 3 ? 1 : 0.2;
+                    animate transform-scale-x, transform-scale-y { duration: 450ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
+                }
+            }
+            Text {
+                text: root.label;
+                color: root.ending-tone;
+                font-size: 11.5px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 // One of the three caption buttons at the right of the title bar.
 component CaptionButton inherits Rectangle {
     in property <image> icon;
@@ -234,10 +407,13 @@ component CaptionButton inherits Rectangle {
     in property <string> label;
     callback clicked();
 
-    width: 46px;
-    height: 36px;
-    background: touch.has-hover ? (close ? Theme.danger-deep : Theme.hairline) : transparent;
-    animate background { duration: 120ms; }
+    width: 34px;
+    height: 30px;
+    border-radius: 8px;
+    y: 7px;
+    background: touch.pressed ? (close ? #A82418 : Theme.press)
+        : touch.has-hover ? (close ? #C42B1C : Theme.raised-3) : transparent;
+    animate background { duration: 140ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     accessible-role: button;
     accessible-label: label;
     accessible-action-default => { clicked(); }
@@ -461,16 +637,14 @@ export component AppWindow inherits Window {
     // Square, with the design's one pixel edge. The design rounds the window's corners, but the
     // software renderer hands the desktop an opaque surface, so a transparent corner comes out
     // black on every platform. Square is the better of the two.
-    background: Theme.canvas;
+    background: Theme.bg-2;
     min-width: 720px;
     min-height: 520px;
     preferred-width: 880px;
     preferred-height: 600px;
     default-font-size: 13px;
-    default-font-family: root.ui-font;
+    default-font-family: Theme.ui;
 
-    // Set by the application before the window is shown.
-    in property <string> ui-font: "";
     in property <bool> is-maximized: false;
 
     // Which screen is showing, and whether this device has an account at all. With no account
@@ -521,14 +695,18 @@ export component AppWindow inherits Window {
     in property <string> offer-from: "";
     in property <string> offer-name: "";
     in property <string> offer-size: "";
-    in property <string> drop-name: "";
-    in property <[string]> drop-targets: [];
+    // How many files the device offering them sent at once.
+    in property <int> offer-count: 0;
+    // Files dropped on the window, ready to send.
+    in property <[ReadyFile]> ready-files: [];
+    in property <string> ready-summary: "";
+    in property <[ReadyTarget]> ready-targets: [];
+    in property <string> ready-note: "";
     in property <bool> drop-hover: false;
     in property <string> update-note: "";
     in property <string> app-version: "";
     // Things on Status that wait for the person: a file offered to this device.
     in property <int> status-badge: 0;
-    in property <string> drop-note: "";
 
     // First run.
     in property <bool> creating: false;
@@ -602,8 +780,11 @@ export component AppWindow inherits Window {
     callback copy-invite-code();
     callback open-releases();
     callback clear-files();
-    callback send-dropped(int);
-    callback cancel-drop();
+    callback ready-send(int);
+    callback ready-send-all();
+    callback ready-done();
+    callback ready-remove(int);
+    callback cancel-device-send(int);
     callback restore-entry(int);
     callback copy-entry(int);
     callback forget-entry(int);
@@ -690,17 +871,41 @@ export component AppWindow inherits Window {
         // The whole window, with its own one pixel edge, which a maximised window does without.
         frame := Rectangle {
             border-width: root.is-maximized ? 0px : 1px;
-            border-color: Theme.border;
-            background: Theme.canvas;
+            border-color: #FFFFFF14;
+            background: @linear-gradient(180deg, #1A1921 0%, #0F0E14 100%);
             clip: true;
+
+            // The light the window sits in: three very faint pools of the accent colours, one high on
+            // the left, one low on the right, one in the middle. Still, not drifting: motion here
+            // would keep the window redrawing for as long as it is open.
+            Rectangle {
+                x: -180px;
+                y: -260px;
+                width: 620px;
+                height: 620px;
+                background: @radial-gradient(circle, #4FE3C138 0%, #4FE3C100 70%);
+            }
+            Rectangle {
+                x: frame.width - 700px + 260px;
+                y: frame.height - 700px + 320px;
+                width: 700px;
+                height: 700px;
+                background: @radial-gradient(circle, #6D7CFF3D 0%, #6D7CFF00 70%);
+            }
+            Rectangle {
+                x: frame.width * 0.42 - 210px;
+                y: frame.height * 0.3 - 210px;
+                width: 420px;
+                height: 420px;
+                background: @radial-gradient(circle, #5EB0E01F 0%, #5EB0E000 70%);
+            }
 
             VerticalLayout {
                 padding: frame.border-width;
 
                 // The title bar. All of it drags the window except the three buttons.
                 Rectangle {
-                    height: 36px;
-                    background: Theme.titlebar;
+                    height: 44px;
 
                     // The move starts once the pointer moves with the button held, not on the
                     // press, so a double click still reaches the maximise below.
@@ -715,28 +920,36 @@ export component AppWindow inherits Window {
                     }
 
                     HorizontalLayout {
-                        padding-left: 12px;
-                        spacing: 8px;
+                        padding-left: 18px;
+                        padding-right: 8px;
+                        spacing: 9px;
 
                         VerticalLayout {
                             alignment: center;
                             Image {
                                 source: Icons.mark;
-                                width: 15px;
-                                height: 15px;
+                                width: 18px;
+                                height: 18px;
                             }
                         }
                         Text {
                             text: "Asli";
-                            color: Theme.text-2;
-                            font-size: 12px;
-                            font-weight: 500;
-                            letter-spacing: 0.1px;
+                            color: Theme.text;
+                            font-size: 12.5px;
+                            font-weight: 700;
+                            letter-spacing: 0.2px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "v" + root.app-version;
+                            color: Theme.text-3;
+                            font-family: Theme.display;
+                            font-size: 11px;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
                         HorizontalLayout {
-                            spacing: 0px;
+                            spacing: 2px;
                             CaptionButton {
                                 icon: Icons.win-minimize;
                                 label: "Minimize to Tray";
@@ -755,117 +968,96 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-
-                    Rectangle {
-                        y: parent.height - 1px;
-                        height: 1px;
-                        background: Theme.hairline;
-                    }
                 }
 
                 HorizontalLayout {
+                    padding-right: root.chrome ? 10px : 0px;
+                    padding-bottom: root.chrome ? 10px : 0px;
+
                     // The sidebar. Absent on first run and join, which take the whole window.
                     if root.chrome: Rectangle {
-                        width: 212px;
-                        background: Theme.sidebar-fill;
+                        width: 236px;
 
                         VerticalLayout {
-                            padding-top: 18px;
+                            padding-top: 8px;
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-bottom: 14px;
 
-                            HorizontalLayout {
-                                padding-left: 16px;
-                                padding-right: 16px;
-                                padding-bottom: 14px;
-                                spacing: 10px;
+                            // The items, with the one highlight that glides to the selected item.
+                            Rectangle {
+                                property <int> index: root.screen == Screen.Status ? 0
+                                    : root.screen == Screen.History ? 1
+                                    : root.screen == Screen.Token ? 2
+                                    : root.screen == Screen.Settings ? 3 : -1;
+                                height: nav.preferred-height;
 
-                                Rectangle {
-                                    width: 24px;
-                                    height: 24px;
-                                    // The glow under the mark, cast by the front sheet.
-                                    Rectangle {
-                                        x: 6.75px;
-                                        y: 6.75px;
-                                        width: 13.5px;
-                                        height: 13.5px;
-                                        SoftShadow {
-                                            radius: 3.75px;
-                                            offset-y: 2px;
-                                            blur: 6px;
-                                            tint: #2F73F0;
-                                            strength: 0.45;
-                                            steps: 4;
-                                        }
+                                if self.index >= 0: Rectangle {
+                                    y: parent.index * (54px + 4px);
+                                    height: 54px;
+                                    border-radius: 14px;
+                                    background: @linear-gradient(90deg, #6D7CFF29 0%, #FFFFFF05 100%);
+                                    border-width: 1px;
+                                    border-color: #6D7CFF47;
+                                    drop-shadow-color: #6D7CFF40;
+                                    drop-shadow-blur: 22px;
+                                    drop-shadow-offset-y: 8px;
+                                    animate y { duration: 350ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                                }
+
+                                nav := VerticalLayout {
+                                    spacing: 4px;
+                                    NavItem {
+                                        text: "Home";
+                                        sub: root.state-label;
+                                        badge: root.status-badge;
+                                        icon: Icons.shield;
+                                        selected: root.screen == Screen.Status;
+                                        clicked => { root.open-screen(Screen.Status); }
                                     }
-                                    Image {
-                                        source: Icons.mark;
-                                        width: 24px;
-                                        height: 24px;
+                                    NavItem {
+                                        text: "History";
+                                        sub: root.history.length == 0 ? "Nothing Yet"
+                                            : root.history.length == 1 ? "1 Clip" : root.history.length + " Clips";
+                                        icon: Icons.history;
+                                        selected: root.screen == Screen.History;
+                                        clicked => { root.open-screen(Screen.History); }
                                     }
-                                }
-                                Text {
-                                    text: "Asli";
-                                    color: Theme.text;
-                                    font-size: 15px;
-                                    font-weight: 640;
-                                    letter-spacing: -0.1px;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                            }
-
-                            VerticalLayout {
-                                padding-top: 6px;
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 2px;
-
-                                NavItem {
-                                    text: "Status";
-                                    badge: root.status-badge;
-                                    icon: Icons.shield;
-                                    selected: root.screen == Screen.Status;
-                                    clicked => { root.open-screen(Screen.Status); }
-                                }
-                                NavItem {
-                                    text: "History";
-                                    icon: Icons.history;
-                                    selected: root.screen == Screen.History;
-                                    clicked => { root.open-screen(Screen.History); }
-                                }
-                                NavItem {
-                                    text: "Add a Device";
-                                    badge: root.invite-asking.length;
-                                    icon: Icons.key;
-                                    selected: root.screen == Screen.Token;
-                                    clicked => { root.open-screen(Screen.Token); }
-                                }
-                                NavItem {
-                                    text: "Settings";
-                                    icon: Icons.settings;
-                                    selected: root.screen == Screen.Settings;
-                                    clicked => { root.open-screen(Screen.Settings); }
+                                    NavItem {
+                                        text: "Add a Device";
+                                        sub: root.invite-asking.length > 0 ? "Someone is Asking"
+                                            : root.invite-state == InviteState.waiting ? "Code is Open" : "With a Join Code";
+                                        badge: root.invite-asking.length;
+                                        icon: Icons.key;
+                                        selected: root.screen == Screen.Token;
+                                        clicked => { root.open-screen(Screen.Token); }
+                                    }
+                                    NavItem {
+                                        text: "Settings";
+                                        sub: "Relay, Device, Account";
+                                        icon: Icons.settings;
+                                        selected: root.screen == Screen.Settings;
+                                        clicked => { root.open-screen(Screen.Settings); }
+                                    }
                                 }
                             }
 
                             Rectangle { vertical-stretch: 1; }
 
-                            // The state repeated at the foot of the sidebar, so it is visible from
-                            // every screen without going back to Status to check.
-                            // 49 high: the line on top takes a pixel, leaving an even 48 for the dot
-                            // to sit exactly in the middle of.
+                            // The connection at a glance, from every screen. 48 high inside its
+                            // ring, so the dot sits exactly in the middle.
                             Rectangle {
-                                height: 49px;
-                                Rectangle {
-                                    y: 0px;
-                                    height: 1px;
-                                    background: Theme.hairline;
-                                }
+                                height: 50px;
+                                border-radius: 16px;
+                                background: #FFFFFF08;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
                                 HorizontalLayout {
                                     y: 1px;
                                     height: 48px;
-                                    padding-left: 13px;
-                                    padding-right: 16px;
-                                    spacing: 6px;
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 9px;
                                     VerticalLayout {
                                         alignment: center;
                                         StateDot {
@@ -874,42 +1066,33 @@ export component AppWindow inherits Window {
                                     }
                                     Text {
                                         text: root.state-label;
-                                        color: Theme.text-2;
-                                        font-size: 12px;
-                                        font-weight: 500;
+                                        color: Theme.text;
+                                        font-size: 12.5px;
+                                        font-weight: 600;
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                         overflow: elide;
                                     }
                                     Text {
                                         text: "v" + root.app-version;
-                                        color: Theme.text-4;
+                                        color: Theme.text-3;
+                                        font-family: Theme.display;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }
                                 }
                             }
                         }
-
-                        Rectangle {
-                            x: parent.width - 1px;
-                            width: 1px;
-                            background: Theme.hairline;
-                        }
                     }
 
-                    // The content column.
+                    // The content, in a pane of its own that catches a little of the light.
                     content := Rectangle {
                         horizontal-stretch: 1;
-                        background: Theme.canvas;
+                        border-radius: root.chrome ? 22px : 0px;
+                        background: root.chrome ? @linear-gradient(180deg, #FFFFFF09 0%, #FFFFFF04 100%) : transparent;
+                        border-width: root.chrome ? 1px : 0px;
+                        border-color: #FFFFFF0F;
                         clip: true;
-
-                        Image {
-                            source: Icons.wash;
-                            width: 100%;
-                            height: 100%;
-                            image-fit: fill;
-                        }
 
                         // ─────────────────────────── First run ───────────────────────────
                         if root.screen == Screen.FirstRun: ScreenFrame {
@@ -1796,15 +1979,15 @@ export component AppWindow inherits Window {
                                 content-height: status-screen.preferred-height;
 
                                 status-screen := VerticalLayout {
-                                    padding-top: 20px;
-                                    padding-bottom: 24px;
-                                    padding-left: 24px;
-                                    padding-right: 24px;
+                                    padding-top: 22px;
+                                    padding-bottom: 26px;
+                                    padding-left: 28px;
+                                    padding-right: 28px;
                                     spacing: 0px;
                                     alignment: start;
 
-                                    Title { text: "Status"; }
-                                    Rectangle { height: 14px; }
+                                    Title { text: "Home"; }
+                                    Rectangle { height: 18px; }
 
                                     // A question about the account waiting for an answer: removing a
                                     // device, or replacing the key.
@@ -1851,117 +2034,75 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    // A file offered to this device: nothing is kept unless it is
-                                    // accepted here.
+                                    // Files offered to this device: nothing is kept unless it is
+                                    // accepted here, and the person chooses where.
                                     if root.offer-waiting: VerticalLayout {
-                                        padding-bottom: 14px;
-                                        Card {
+                                        padding-bottom: 16px;
+                                        Rectangle {
                                             height: offer-body.preferred-height;
-                                            offer-body := VerticalLayout {
-                                                padding-top: 14px;
-                                                padding-bottom: 14px;
-                                                padding-left: 16px;
-                                                padding-right: 16px;
-                                                spacing: 0px;
-                                                Text {
-                                                    text: root.offer-from + " Wants to Send You a File";
-                                                    color: Theme.text;
-                                                    font-size: 13.5px;
-                                                    font-weight: 600;
-                                                    wrap: word-wrap;
-                                                }
-                                                Rectangle { height: 8px; }
-                                                HorizontalLayout {
-                                                    spacing: 8px;
+                                            Glow {
+                                                tint: #6D7CFF59;
+                                                radius: 18px;
+                                                blur: 30px;
+                                                lift: 10px;
+                                                inset: 10px;
+                                            }
+                                            Rectangle {
+                                                border-radius: 18px;
+                                                background: @linear-gradient(135deg, #6D7CFF26 0%, #4FE3C10F 100%);
+                                                border-width: 1px;
+                                                border-color: #6D7CFF66;
+                                                offer-body := HorizontalLayout {
+                                                    padding: 16px;
+                                                    spacing: 14px;
                                                     VerticalLayout {
                                                         alignment: center;
-                                                        Icon {
-                                                            source: Icons.download;
-                                                            size: 15px;
-                                                            tint: Theme.link;
+                                                        Tile {
+                                                            icon: Icons.download;
+                                                            on: true;
+                                                            size: 44px;
                                                         }
                                                     }
-                                                    Text {
-                                                        text: root.offer-name;
-                                                        color: Theme.text;
-                                                        font-size: 13px;
-                                                        overflow: elide;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: 3px;
                                                         horizontal-stretch: 1;
-                                                        vertical-alignment: center;
+                                                        Text {
+                                                            text: root.offer-count > 1
+                                                                ? root.offer-from + " Wants to Send You " + root.offer-count + " Files"
+                                                                : root.offer-from + " Wants to Send You a File";
+                                                            color: Theme.text;
+                                                            font-size: 14px;
+                                                            font-weight: 700;
+                                                            wrap: word-wrap;
+                                                        }
+                                                        Text {
+                                                            text: root.offer-count > 1
+                                                                ? root.offer-name + " and " + (root.offer-count - 1) + " more  ·  " + root.offer-size
+                                                                : root.offer-name + "  ·  " + root.offer-size;
+                                                            color: Theme.text-2;
+                                                            font-size: 12.5px;
+                                                            overflow: elide;
+                                                        }
+                                                        Caption {
+                                                            text: "You choose where it is saved. Only accept what you expect; Asli never opens files.";
+                                                        }
                                                     }
-                                                    Text {
-                                                        text: root.offer-size;
-                                                        color: Theme.text-3;
-                                                        font-size: 12px;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                                Rectangle { height: 12px; }
-                                                HorizontalLayout {
-                                                    spacing: 8px;
-                                                    alignment: start;
-                                                    Button {
-                                                        text: "Accept and Save As…";
-                                                        kind: ButtonKind.primary;
-                                                        icon: Icons.download;
-                                                        show-icon: true;
-                                                        clicked => { root.accept-offer(); }
-                                                    }
-                                                    Button {
-                                                        text: "Decline";
-                                                        clicked => { root.decline-offer(); }
-                                                    }
-                                                }
-                                                Rectangle { height: 8px; }
-                                                Caption {
-                                                    text: "You choose where it is saved. Only accept files you expect; Asli never opens them.";
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // A file dropped on the window, waiting to be told where to go.
-                                    if root.drop-name != "": VerticalLayout {
-                                        padding-bottom: 14px;
-                                        Card {
-                                            height: drop-body.preferred-height;
-                                            drop-body := VerticalLayout {
-                                                padding-top: 14px;
-                                                padding-bottom: 14px;
-                                                padding-left: 16px;
-                                                padding-right: 16px;
-                                                spacing: 0px;
-                                                Text {
-                                                    text: root.drop-targets.length > 0
-                                                        ? "Send " + root.drop-name + " To"
-                                                        : "No Device Can Receive " + root.drop-name + " Right Now";
-                                                    color: Theme.text;
-                                                    font-size: 13.5px;
-                                                    font-weight: 600;
-                                                    overflow: elide;
-                                                }
-                                                if root.drop-note != "": VerticalLayout {
-                                                    padding-top: 6px;
-                                                    Caption {
-                                                        text: root.drop-note;
-                                                        color: Theme.text-2;
-                                                        wrap: word-wrap;
-                                                    }
-                                                }
-                                                Rectangle { height: 10px; }
-                                                HorizontalLayout {
-                                                    spacing: 8px;
-                                                    alignment: start;
-                                                    for target[t] in root.drop-targets: Button {
-                                                        text: target;
-                                                        kind: ButtonKind.primary;
-                                                        icon: Icons.send;
-                                                        show-icon: true;
-                                                        clicked => { root.send-dropped(t); }
-                                                    }
-                                                    Button {
-                                                        text: "Cancel";
-                                                        clicked => { root.cancel-drop(); }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: 8px;
+                                                        Button {
+                                                            text: root.offer-count > 1 ? "Accept All…" : "Accept and Save As…";
+                                                            kind: ButtonKind.primary;
+                                                            icon: Icons.download;
+                                                            show-icon: true;
+                                                            clicked => { root.accept-offer(); }
+                                                        }
+                                                        Button {
+                                                            text: root.offer-count > 1 ? "Decline All" : "Decline";
+                                                            kind: ButtonKind.ghost;
+                                                            clicked => { root.decline-offer(); }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2017,131 +2158,147 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    // The hero: what is happening, and the one thing to do about it.
-                                    Rectangle {
-                                      height: hero.preferred-height;
-                                      SoftShadow {
-                                        radius: 14px;
-                                        offset-y: 4px;
-                                        blur: 12px;
-                                        spread: -2px;
-                                        strength: 0.45;
-                                      }
-                                      GradientFill {
-                                        radius: 14px;
-                                        angle: 145deg;
-                                        from: Theme.hero-from;
-                                        to: Theme.hero-to;
-                                      }
-                                      Rectangle {
-                                        border-radius: 14px;
-                                        border-width: 1px;
-                                        border-color: States.edge(root.sync-state);
-                                        animate border-color { duration: 180ms; }
+                                    // The connection: what is happening, and the one thing to do about it.
+                                    hero-card := Rectangle {
+                                        property <color> tone: States.tint(root.sync-state);
+                                        height: hero.preferred-height;
+                                        Rectangle {
+                                            border-radius: 20px;
+                                            background: @linear-gradient(135deg, #FFFFFF0F 0%, #FFFFFF05 100%);
+                                            border-width: 1px;
+                                            border-color: hero-card.tone.with-alpha(0.32);
+                                            clip: true;
+                                            animate border-color { duration: 600ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
 
-                                        hero := VerticalLayout {
-                                            HorizontalLayout {
-                                                padding-top: 16px;
-                                                padding-bottom: 16px;
-                                                padding-left: 18px;
-                                                padding-right: 18px;
-                                                spacing: 14px;
+                                            // The state's own colour, as light from the left.
+                                            Rectangle {
+                                                x: -120px;
+                                                y: -140px;
+                                                width: 360px;
+                                                height: 360px;
+                                                background: @radial-gradient(circle, hero-card.tone.with-alpha(0.22) 0%, hero-card.tone.with-alpha(0) 70%);
+                                            }
 
-                                                VerticalLayout {
-                                                    alignment: center;
-                                                    Rectangle {
-                                                        width: 40px;
-                                                        height: 40px;
-                                                        border-radius: 12px;
-                                                        border-width: 1px;
-                                                        background: States.tint(root.sync-state).with-alpha(0.1);
-                                                        border-color: States.edge(root.sync-state);
-                                                        StateDot {
-                                                            state: root.sync-state;
-                                                            hero: true;
+                                            hero := VerticalLayout {
+                                                HorizontalLayout {
+                                                    padding: 20px;
+                                                    spacing: 16px;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 52px;
+                                                            height: 52px;
+                                                            border-radius: 16px;
+                                                            background: hero-card.tone.with-alpha(0.14);
+                                                            border-width: 1px;
+                                                            border-color: hero-card.tone.with-alpha(0.4);
+                                                            StateDot {
+                                                                state: root.sync-state;
+                                                                hero: true;
+                                                            }
+                                                        }
+                                                    }
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        alignment: center;
+                                                        spacing: 4px;
+                                                        Text {
+                                                            text: root.state-label;
+                                                            color: States.tint(root.sync-state);
+                                                            font-family: Theme.display;
+                                                            font-size: 24px;
+                                                            font-weight: 600;
+                                                            letter-spacing: -0.4px;
+                                                        }
+                                                        Text {
+                                                            text: root.state-detail;
+                                                            color: Theme.text-2;
+                                                            font-size: 12.5px;
+                                                            wrap: word-wrap;
+                                                        }
+                                                    }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: root.paused ? "Resume"
+                                                                : root.sync-state == SyncState.error ? "Retry Now" : "Pause";
+                                                            icon: root.paused ? Icons.play
+                                                                : root.sync-state == SyncState.error ? Icons.refresh : Icons.pause;
+                                                            show-icon: true;
+                                                            kind: root.paused || root.sync-state == SyncState.error ? ButtonKind.primary : ButtonKind.secondary;
+                                                            clicked => {
+                                                                if (root.paused) {
+                                                                    root.set-paused(false);
+                                                                } else if (root.sync-state == SyncState.error) {
+                                                                    root.retry-now();
+                                                                } else {
+                                                                    root.set-paused(true);
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
-
-                                                VerticalLayout {
-                                                    horizontal-stretch: 1;
-                                                    alignment: center;
-                                                    spacing: 2px;
-                                                    Text {
-                                                        text: root.state-label;
-                                                        color: States.tint(root.sync-state);
-                                                        font-size: 15px;
-                                                        font-weight: 620;
-                                                        letter-spacing: -0.1px;
-                                                    }
-                                                    Text {
-                                                        text: root.state-detail;
-                                                        color: Theme.text-2;
-                                                        font-size: 12px;
-                                                        wrap: word-wrap;
-                                                    }
-                                                }
-
-                                                VerticalLayout {
-                                                    alignment: center;
-                                                    Button {
-                                                        pad-x: 16px;
-                                                        text: root.paused ? "Resume"
-                                                            : root.sync-state == SyncState.error ? "Retry Now" : "Pause";
-                                                        icon: root.paused ? Icons.play
-                                                            : root.sync-state == SyncState.error ? Icons.refresh : Icons.pause;
-                                                        show-icon: true;
-                                                        clicked => {
-                                                            if (root.paused) {
-                                                                root.set-paused(false);
-                                                            } else if (root.sync-state == SyncState.error) {
-                                                                root.retry-now();
-                                                            } else {
-                                                                root.set-paused(true);
+                                                HorizontalLayout {
+                                                    padding-left: 12px;
+                                                    padding-right: 12px;
+                                                    padding-bottom: 12px;
+                                                    spacing: 8px;
+                                                    for stat[i] in [
+                                                        { key: "CONNECTED", value: root.stat-connections, icon: Icons.device },
+                                                        { key: "LAST SYNC", value: root.stat-last-sync, icon: Icons.history },
+                                                        { key: "SKIPPED", value: root.stat-skipped, icon: Icons.shield },
+                                                    ]: Rectangle {
+                                                        horizontal-stretch: 1;
+                                                        height: 58px;
+                                                        border-radius: 14px;
+                                                        background: #FFFFFF08;
+                                                        border-width: 1px;
+                                                        border-color: Theme.border-subtle;
+                                                        HorizontalLayout {
+                                                            padding-left: 12px;
+                                                            padding-right: 12px;
+                                                            spacing: 10px;
+                                                            VerticalLayout {
+                                                                alignment: center;
+                                                                Tile {
+                                                                    icon: stat.icon;
+                                                                    size: 30px;
+                                                                    tint: Theme.text-3;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center;
+                                                                spacing: 2px;
+                                                                horizontal-stretch: 1;
+                                                                Text {
+                                                                    height: 14px;
+                                                                    text: stat.key;
+                                                                    color: Theme.text-3;
+                                                                    font-size: 10.5px;
+                                                                    font-weight: 700;
+                                                                    letter-spacing: 1px;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                                if !root.loading: Text {
+                                                                    height: 18px;
+                                                                    text: stat.value;
+                                                                    color: Theme.text;
+                                                                    font-family: Theme.display;
+                                                                    font-size: 15px;
+                                                                    font-weight: 600;
+                                                                    vertical-alignment: center;
+                                                                    overflow: elide;
+                                                                }
+                                                                if root.loading: Skeleton {
+                                                                    width: 56px;
+                                                                    height: 14px;
+                                                                }
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
-
-                                            Rectangle { height: 1px; background: Theme.border; }
-
-                                            HorizontalLayout {
-                                                for stat[i] in [
-                                                    { key: "CONNECTIONS", value: root.stat-connections },
-                                                    { key: "LAST SYNC", value: root.stat-last-sync },
-                                                    { key: "SKIPPED", value: root.stat-skipped },
-                                                ]: Rectangle {
-                                                    horizontal-stretch: 1;
-                                                    height: cell.preferred-height;
-                                                    cell := VerticalLayout {
-                                                        padding-top: 12px;
-                                                        padding-bottom: 12px;
-                                                        padding-left: 18px;
-                                                        padding-right: 18px;
-                                                        spacing: 4px;
-                                                        Overline { text: stat.key; }
-                                                        if !root.loading: Text {
-                                                            text: stat.value;
-                                                            color: Theme.text;
-                                                            font-size: 13px;
-                                                            font-weight: 500;
-                                                            overflow: elide;
-                                                        }
-                                                        if root.loading: Skeleton {
-                                                            width: 48px;
-                                                            height: 13px;
-                                                        }
-                                                    }
-                                                    if i < 2: Rectangle {
-                                                        x: parent.width - 1px;
-                                                        width: 1px;
-                                                        background: Theme.border-subtle;
-                                                    }
-                                                }
-                                            }
                                         }
-                                      }
                                     }
 
                                     // A clip copied while this device was away. Offered, never
@@ -2166,17 +2323,335 @@ export component AppWindow inherits Window {
                                     }
 
                                     Rectangle { height: 14px; }
+
+                                    // Files dropped on the window, ready to go to any device, as many
+                                    // times as wanted, until Done.
+                                    if root.ready-files.length > 0: VerticalLayout {
+                                        padding-top: 16px;
+                                        Rectangle {
+                                            height: ready-body.preferred-height;
+                                            Glow {
+                                                tint: #4FE3C140;
+                                                radius: 18px;
+                                                blur: 28px;
+                                                lift: 8px;
+                                                inset: 10px;
+                                            }
+                                            Rectangle {
+                                                border-radius: 18px;
+                                                background: @linear-gradient(135deg, #4FE3C11A 0%, #6D7CFF12 100%);
+                                                border-width: 1px;
+                                                border-color: #4FE3C152;
+                                                ready-body := VerticalLayout {
+                                                    padding: 16px;
+                                                    spacing: 12px;
+                                                    HorizontalLayout {
+                                                        spacing: 12px;
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            Tile {
+                                                                icon: Icons.send;
+                                                                on: true;
+                                                                size: 40px;
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            spacing: 2px;
+                                                            horizontal-stretch: 1;
+                                                            Text {
+                                                                height: 20px;
+                                                                text: "Ready to Send";
+                                                                color: Theme.text;
+                                                                font-family: Theme.display;
+                                                                font-size: 17px;
+                                                                font-weight: 600;
+                                                                vertical-alignment: center;
+                                                            }
+                                                            Text {
+                                                                height: 16px;
+                                                                text: root.ready-summary;
+                                                                color: Theme.text-2;
+                                                                font-size: 12px;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            Button {
+                                                                text: "Done";
+                                                                small: true;
+                                                                icon: Icons.check;
+                                                                show-icon: true;
+                                                                clicked => { root.ready-done(); }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // The files, each removable.
+                                                    VerticalLayout {
+                                                        spacing: 4px;
+                                                        for file[f] in root.ready-files: Rectangle {
+                                                            height: 34px;
+                                                            border-radius: 10px;
+                                                            background: file-touch.has-hover ? #FFFFFF0D : #FFFFFF06;
+                                                            animate background { duration: 140ms; }
+                                                            file-touch := TouchArea { }
+                                                            HorizontalLayout {
+                                                                padding-left: 10px;
+                                                                padding-right: 4px;
+                                                                spacing: 9px;
+                                                                VerticalLayout {
+                                                                    alignment: center;
+                                                                    Icon {
+                                                                        source: Icons.text;
+                                                                        size: 14px;
+                                                                        tint: Theme.text-3;
+                                                                    }
+                                                                }
+                                                                Text {
+                                                                    text: file.name;
+                                                                    color: Theme.text;
+                                                                    font-size: 12.5px;
+                                                                    vertical-alignment: center;
+                                                                    horizontal-stretch: 1;
+                                                                    overflow: elide;
+                                                                }
+                                                                Text {
+                                                                    text: file.size;
+                                                                    color: Theme.text-3;
+                                                                    font-family: Theme.display;
+                                                                    font-size: 12px;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                                VerticalLayout {
+                                                                    alignment: center;
+                                                                    Rectangle {
+                                                                        width: 26px;
+                                                                        height: 26px;
+                                                                        border-radius: 7px;
+                                                                        background: remove-touch.has-hover ? #FF4D5E26 : transparent;
+                                                                        opacity: file-touch.has-hover || remove-touch.has-hover ? 1 : 0.5;
+                                                                        animate background, opacity { duration: 140ms; }
+                                                                        Icon {
+                                                                            source: Icons.win-close;
+                                                                            size: 9px;
+                                                                            tint: remove-touch.has-hover ? Theme.danger-soft : Theme.text-2;
+                                                                        }
+                                                                        remove-touch := TouchArea {
+                                                                            mouse-cursor: pointer;
+                                                                            clicked => { root.ready-remove(f); }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if root.ready-targets.length > 0: VerticalLayout {
+                                                        spacing: 8px;
+                                                        Text {
+                                                            text: "SEND TO";
+                                                            color: Theme.text-3;
+                                                            font-size: 10.5px;
+                                                            font-weight: 700;
+                                                            letter-spacing: 1.2px;
+                                                        }
+                                                        HorizontalLayout {
+                                                            spacing: 8px;
+                                                            alignment: start;
+                                                            for target[t] in root.ready-targets: Button {
+                                                                text: target.sent ? "Sent to " + target.name : target.name;
+                                                                kind: target.sent ? ButtonKind.secondary : ButtonKind.primary;
+                                                                icon: target.sent ? Icons.check : Icons.send;
+                                                                show-icon: true;
+                                                                small: true;
+                                                                clicked => { root.ready-send(t); }
+                                                            }
+                                                            if root.ready-targets.length > 1: Button {
+                                                                text: "All Devices";
+                                                                small: true;
+                                                                icon: Icons.send;
+                                                                show-icon: true;
+                                                                clicked => { root.ready-send-all(); }
+                                                            }
+                                                        }
+                                                    }
+                                                    if root.ready-note != "": Caption {
+                                                        text: root.ready-note;
+                                                        color: Theme.text-2;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+
+                                    Rectangle { height: 22px; }
+                                    Overline { text: "PAIRED DEVICES"; }
+                                    Rectangle { height: 10px; }
+                                    Card {
+                                        height: device-list.preferred-height;
+                                        device-list := VerticalLayout {
+                                            // Inside the card's border, so a row's first pixel is not under it.
+                                            padding-top: 1px;
+                                            padding-bottom: 1px;
+                                            // Whole pixels throughout: a fixed row height, and lines of a fixed
+                                            // height inside it, so every centred item lands on a pixel.
+                                            for device[i] in root.devices: Rectangle {
+                                                // 60 for the row, and a pixel below it for the line between rows.
+                                                height: i < root.devices.length - 1 ? 61px : 60px;
+                                                accessible-role: list-item;
+                                                accessible-label: device.name;
+                                                accessible-description: device.os + ", " + device.seen;
+
+                                                device-touch := TouchArea { }
+
+                                                // A row with something on its way to it glows a little.
+                                                Rectangle {
+                                                    y: 0px;
+                                                    height: 60px;
+                                                    background: device.send-state == 1 || device.send-state == 2
+                                                        ? #6D7CFF12 : device-touch.has-hover ? #FFFFFF06 : transparent;
+                                                    animate background { duration: 300ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                                                }
+
+                                                device-row := HorizontalLayout {
+                                                    y: 0px;
+                                                    height: 60px;
+                                                    padding-left: 14px;
+                                                    padding-right: 14px;
+                                                    spacing: 12px;
+
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 36px;
+                                                            height: 36px;
+                                                            Tile {
+                                                                icon: Icons.device;
+                                                                on: device.this-device;
+                                                                size: 36px;
+                                                                tint: Theme.text-2;
+                                                            }
+                                                            // Online, as a dot on the tile's corner with a cut-out ring.
+                                                            Rectangle {
+                                                                x: parent.width - 11px;
+                                                                y: parent.height - 11px;
+                                                                width: 14px;
+                                                                height: 14px;
+                                                                border-radius: 7px;
+                                                                background: #1A1922;
+                                                                Rectangle {
+                                                                    width: 8px;
+                                                                    height: 8px;
+                                                                    border-radius: 4px;
+                                                                    background: device.online ? Theme.success : Theme.text-4;
+                                                                    drop-shadow-color: device.online ? #3DDC97AA : transparent;
+                                                                    drop-shadow-blur: 6px;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        min-width: 0px;
+                                                        alignment: center;
+                                                        spacing: 2px;
+                                                        HorizontalLayout {
+                                                            height: 20px;
+                                                            spacing: 8px;
+                                                            alignment: start;
+                                                            Text {
+                                                                text: device.name;
+                                                                color: Theme.text;
+                                                                font-size: 13.5px;
+                                                                font-weight: 700;
+                                                                overflow: elide;
+                                                                vertical-alignment: center;
+                                                            }
+                                                            if device.this-device: VerticalLayout {
+                                                                alignment: center;
+                                                                Pill {
+                                                                    text: "THIS DEVICE";
+                                                                }
+                                                            }
+                                                        }
+                                                        HorizontalLayout {
+                                                            height: 16px;
+                                                            spacing: 0px;
+                                                            alignment: start;
+                                                            Text {
+                                                                text: (device.os != "" ? device.os + "  ·  " : "") + device.seen + "  ·  ";
+                                                                color: Theme.text-3;
+                                                                font-size: 11.5px;
+                                                                vertical-alignment: center;
+                                                            }
+                                                            Text {
+                                                                text: device.version;
+                                                                color: device.outdated ? Theme.warning : Theme.text-3;
+                                                                font-size: 11.5px;
+                                                                vertical-alignment: center;
+                                                                overflow: elide;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if !device.this-device: VerticalLayout {
+                                                        alignment: center;
+                                                        SendControl {
+                                                            state: device.send-state;
+                                                            label: device.send-label;
+                                                            progress: device.send-progress;
+                                                            can-send: device.can-send;
+                                                            send => { root.send-file(i); }
+                                                            cancel => { root.cancel-device-send(i); }
+                                                        }
+                                                    }
+                                                    if device.removable && device.send-state == 0: VerticalLayout {
+                                                        alignment: center;
+                                                        IconButton {
+                                                            icon: Icons.trash;
+                                                            destructive: true;
+                                                            label: "Remove " + device.name;
+                                                            clicked => { root.ask-remove(i); }
+                                                        }
+                                                    }
+                                                    if device.forgettable: VerticalLayout {
+                                                        alignment: center;
+                                                        Button {
+                                                            text: "Forget";
+                                                            small: true;
+                                                            kind: ButtonKind.ghost;
+                                                            clicked => { root.forget-device(i); }
+                                                        }
+                                                    }
+                                                }
+
+                                                if i < root.devices.length - 1: Rectangle {
+                                                    y: parent.height - 1px;
+                                                    height: 1px;
+                                                    background: Theme.border-subtle;
+                                                }
+                                            }
+                                        }
+                                    }
+
+
+                                    // Files that came to this device.
                                     if root.files.length > 0: VerticalLayout {
-                                        spacing: 0px;
+                                        padding-top: 22px;
                                         HorizontalLayout {
                                             Overline {
-                                                text: "FILES";
+                                                text: "RECEIVED FILES";
                                                 vertical-alignment: center;
                                             }
                                             Rectangle { horizontal-stretch: 1; }
                                             Button {
-                                                text: "Clear Finished";
+                                                text: "Clear";
                                                 small: true;
+                                                kind: ButtonKind.ghost;
                                                 clicked => { root.clear-files(); }
                                             }
                                         }
@@ -2193,7 +2668,15 @@ export component AppWindow inherits Window {
                                                         height: 56px;
                                                         padding-left: 14px;
                                                         padding-right: 14px;
-                                                        spacing: 11px;
+                                                        spacing: 12px;
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            Tile {
+                                                                icon: Icons.download;
+                                                                size: 32px;
+                                                                tint: file.good ? Theme.success : file.live ? Theme.accent-2 : Theme.error;
+                                                            }
+                                                        }
                                                         VerticalLayout {
                                                             horizontal-stretch: 1;
                                                             min-width: 0px;
@@ -2205,6 +2688,7 @@ export component AppWindow inherits Window {
                                                                 text: file.name;
                                                                 color: Theme.text;
                                                                 font-size: 13px;
+                                                                font-weight: 600;
                                                                 overflow: elide;
                                                             }
                                                             Text {
@@ -2215,16 +2699,9 @@ export component AppWindow inherits Window {
                                                                 font-size: 11.5px;
                                                                 overflow: elide;
                                                             }
-                                                            if file.live: Rectangle {
-                                                                height: 4px;
-                                                                border-radius: 2px;
-                                                                background: Theme.hairline;
-                                                                Rectangle {
-                                                                    x: 0px;
-                                                                    width: parent.width * clamp(file.progress, 0, 1);
-                                                                    border-radius: 2px;
-                                                                    background: Theme.link;
-                                                                }
+                                                            if file.live: ProgressBar {
+                                                                progress: file.progress;
+                                                                thickness: 4px;
                                                             }
                                                         }
                                                         if file.live: VerticalLayout {
@@ -2232,6 +2709,7 @@ export component AppWindow inherits Window {
                                                             Button {
                                                                 text: "Cancel";
                                                                 small: true;
+                                                                kind: ButtonKind.ghost;
                                                                 clicked => { root.cancel-file(f); }
                                                             }
                                                         }
@@ -2252,170 +2730,10 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                         }
-                                        Rectangle { height: 14px; }
                                     }
 
-                                    Overline { text: "PAIRED DEVICES"; }
-                                    Rectangle { height: 8px; }
-                                    Card {
-                                        height: device-list.preferred-height;
-                                        device-list := VerticalLayout {
-                                            // Inside the card's border, so a row's first pixel is not under it.
-                                            padding-top: 1px;
-                                            padding-bottom: 1px;
-                                            // Whole pixels throughout: a fixed row height, and lines of a fixed
-                                            // height inside it, so every centred item lands on a pixel rather
-                                            // than half way between two.
-                                            for device[i] in root.devices: Rectangle {
-                                                // 56 for the row, and a pixel below it for the line between rows.
-                                                height: i < root.devices.length - 1 ? 57px : 56px;
-                                                background: device-touch.has-hover ? Theme.raised-2 : transparent;
-                                                // Rounded where the card is. Clipping in the software
-                                                // renderer ignores the card's corners.
-                                                border-top-left-radius: i == 0 ? 13px : 0px;
-                                                border-top-right-radius: i == 0 ? 13px : 0px;
-                                                border-bottom-left-radius: i == root.devices.length - 1 ? 13px : 0px;
-                                                border-bottom-right-radius: i == root.devices.length - 1 ? 13px : 0px;
-                                                animate background { duration: 120ms; }
-                                                accessible-role: list-item;
-                                                accessible-label: device.name;
-                                                accessible-description: device.os + ", " + device.seen;
+                                    Rectangle { height: 22px; }
 
-                                                device-touch := TouchArea { }
-
-                                                device-row := HorizontalLayout {
-                                                    y: 0px;
-                                                    height: 56px;
-                                                    padding-left: 14px;
-                                                    padding-right: 14px;
-                                                    spacing: 11px;
-
-                                                    VerticalLayout {
-                                                        alignment: center;
-                                                        Rectangle {
-                                                            width: 30px;
-                                                            height: 30px;
-                                                            border-radius: 9px;
-                                                            border-width: 1px;
-                                                            background: Theme.raised-2;
-                                                            border-color: Theme.border;
-                                                            Icon {
-                                                                source: Icons.device;
-                                                                size: 15px;
-                                                                tint: Theme.text-2;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    VerticalLayout {
-                                                        horizontal-stretch: 1;
-                                                        min-width: 0px;
-                                                        alignment: center;
-                                                        spacing: 2px;
-                                                        HorizontalLayout {
-                                                            height: 20px;
-                                                            spacing: 7px;
-                                                            alignment: start;
-                                                            Text {
-                                                                text: device.name;
-                                                                color: Theme.text;
-                                                                font-size: 13px;
-                                                                font-weight: 500;
-                                                                overflow: elide;
-                                                                vertical-alignment: center;
-                                                            }
-                                                            if device.this-device: VerticalLayout {
-                                                                alignment: center;
-                                                                Pill {
-                                                                    text: "THIS DEVICE";
-                                                                }
-                                                            }
-                                                        }
-                                                        HorizontalLayout {
-                                                            height: 16px;
-                                                            spacing: 0px;
-                                                            alignment: start;
-                                                            if device.os != "": Text {
-                                                                text: device.os + "  ·  ";
-                                                                color: Theme.text-3;
-                                                                font-size: 11.5px;
-                                                                vertical-alignment: center;
-                                                            }
-                                                            Text {
-                                                                text: device.id;
-                                                                color: Theme.text-3;
-                                                                font-size: 11.5px;
-                                                                font-family: Theme.mono;
-                                                                vertical-alignment: center;
-                                                            }
-                                                            if device.version != "": Text {
-                                                                text: "  ·  " + device.version;
-                                                                color: device.outdated ? Theme.warning : Theme.text-3;
-                                                                font-size: 11.5px;
-                                                                vertical-alignment: center;
-                                                                overflow: elide;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    HorizontalLayout {
-                                                        spacing: 6px;
-                                                        horizontal-stretch: 0;
-                                                        VerticalLayout {
-                                                            alignment: center;
-                                                            Rectangle {
-                                                                width: 8px;
-                                                                height: 8px;
-                                                                border-radius: 4px;
-                                                                background: device.online ? Theme.success : Theme.text-3;
-                                                            }
-                                                        }
-                                                        Text {
-                                                            text: device.seen;
-                                                            color: Theme.text-2;
-                                                            font-size: 11.5px;
-                                                            vertical-alignment: center;
-                                                        }
-                                                    }
-                                                    if device.can-send: VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Send File";
-                                                            small: true;
-                                                            icon: Icons.send;
-                                                            show-icon: true;
-                                                            clicked => { root.send-file(i); }
-                                                        }
-                                                    }
-                                                    if device.removable: VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Remove";
-                                                            small: true;
-                                                            enabled: !root.rekey-busy;
-                                                            clicked => { root.ask-remove(i); }
-                                                        }
-                                                    }
-                                                    if device.forgettable: VerticalLayout {
-                                                        alignment: center;
-                                                        Button {
-                                                            text: "Forget";
-                                                            small: true;
-                                                            clicked => { root.forget-device(i); }
-                                                        }
-                                                    }
-                                                }
-
-                                                if i < root.devices.length - 1: Rectangle {
-                                                    y: parent.height - 1px;
-                                                    height: 1px;
-                                                    background: Theme.border-subtle;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    Rectangle { height: 14px; }
                                     Overline { text: "CONNECTION"; }
                                     Rectangle { height: 8px; }
                                     Card {
@@ -2447,6 +2765,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+
 
                         // ─────────────────────────── Settings ────────────────────────────
                         if root.screen == Screen.Settings: ScreenFrame {
@@ -2723,7 +3042,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     Text {
-                                        text: "Drop to Send It to Another Device";
+                                        text: "Drop to Get It Ready to Send";
                                         color: Theme.text;
                                         font-size: 15px;
                                         font-weight: 600;
