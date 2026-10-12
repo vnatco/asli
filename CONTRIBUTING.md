@@ -10,8 +10,10 @@ to keep it small too.
 .\setup.ps1 -BuildOnly         # Windows
 ```
 
-You need Rust. You do **not** need Node.js unless you are working on the relay server, in which case
-pass `--with-server`. The script installs what is missing and tells you exactly what it is doing.
+You need Rust 1.92 or newer and a C toolchain, and on Linux the fontconfig development files (see
+[docs/BUILDING.md](docs/BUILDING.md)). You do **not** need Node.js unless you are working on the
+relay server, in which case pass `--with-server`. The script installs Rust with rustup if it is
+missing; for anything else it cannot install, it stops and prints the command that would.
 
 Run the tests before you push:
 
@@ -59,9 +61,10 @@ Keep commits focused. One logical change per commit is easier to review and much
 ## Reporting bugs
 
 For clipboard bugs, please include your OS and version, your desktop environment, and on Linux your
-display server and compositor (for example: Arch, Hyprland, Wayland). Use the tray menu's
-"Copy diagnostics" action if the app runs at all: it collects recent log lines, which never contain
-clipboard content.
+display server and compositor (for example: Arch, Hyprland, Wayland). Use **Copy Diagnostics**, in
+the tray menu or under Connection on Home, if the app runs at all: it puts a short report on the
+clipboard with the relay address, device id, connection state, number of peers, skipped clips, the
+last error and the config file's path. It never contains clipboard content.
 
 For security issues, do not open a public issue. See [SECURITY.md](SECURITY.md).
 

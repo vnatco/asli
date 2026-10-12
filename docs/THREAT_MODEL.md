@@ -1,16 +1,21 @@
 # Threat model
 
-Status: this describes the approved design and the code that now implements it. Linux is verified on real hardware for text and images; the Windows and macOS backends compile but have never executed. Where a control is designed but not built, the table says so in the row itself rather than in a summary that can drift out of date.
+Status: this describes the design and the code that implements it, which runs in daily use on
+Linux, Windows 11 and macOS. Where a control is designed but not built, the text says so where the
+control is described rather than in a summary that can drift out of date.
 
-Related reading: `docs/PROTOCOL.md` for the wire format, the architecture notes for the crypto
-spec, `SECURITY.md` for how to report a problem.
+Related reading: `docs/PROTOCOL.md` for the wire format and the cryptography, `SECURITY.md` for how
+to report a problem.
 
 ## 1. What Asli is, in one paragraph
 
-Asli syncs clipboard text between the machines of one person. Every device holds the same 32 byte
-root secret, obtained once by pasting a join token or scanning a QR code. Clipboard content is
-sealed with XChaCha20-Poly1305 before it leaves the device. A relay server forwards sealed messages
-between devices in the same room and retains at most the last small message. The relay never holds a
+Asli syncs clipboard text and images between the machines of one person, and sends files between
+them when a person on the receiving machine accepts. Every device holds the same 32 byte root secret,
+which reaches a new device once, sealed to that device's own key, after a person types a join code
+on it and approves it on a device already on the account. Clipboard content is sealed with
+XChaCha20-Poly1305 before it leaves the device. A relay server forwards sealed messages between
+devices in the same room and retains at most the last small clip. Files go directly between the two
+machines when they share a local network, and through the relay otherwise. The relay never holds a
 key that can decrypt anything.
 
 ## 2. Assets
@@ -18,8 +23,8 @@ key that can decrypt anything.
 | Asset | Where it lives | Value to an attacker |
 |---|---|---|
 | **Clipboard plaintext** | OS clipboard buffers on each device, in our process briefly, sealed in transit | Immediately actionable. Real clipboards carry passwords, API tokens, one time codes, private URLs, source code and personal messages. This is the reason the product needs encryption at all |
-| **Root secret (32 bytes)** | OS keychain on each device. Handed to a new device sealed to that device's key, after a person approves it (protocol section 18). Never displayed. Accounts made before that change may have shown it as a join token | Total compromise of one account. It decrypts every message ever archived by an observer and every future message, allows joining the room, and allows sending clips that every device will accept |
-| **Device secret (32 bytes)** | OS keychain, beside the root secret, one per device. Never transmitted | Lets the holder speak as that one device: its card, a key change in its name. Gives nothing the root secret does not already give |
+| **Root secret (32 bytes)** | OS keychain on each device, or an owner only file where there is no keychain (section 4.5). Handed to a new device sealed to that device's key, after a person approves it (protocol section 18). Never displayed. Accounts made before that change may have shown it as a join token | Total compromise of one account. It decrypts every message ever archived by an observer and every future message, allows joining the room, and allows sending clips that every device will accept |
+| **Device secret (32 bytes)** | In the same keychain entry as the root secret, one per device. Never transmitted | Lets the holder speak as that one device: its card, a file offer or answer, a key change in its name. Gives nothing the root secret does not already give |
 | **Device linkage metadata** | Visible to the relay: source IPs, connection times, message timing, padded sizes, connection count per room | Shows that a set of IP addresses belongs to one person, and when that person is active. Valuable to a surveillance oriented adversary even without content |
 | **Room id** | Public routing label in every frame and in relay logs (salted) | Low. By design it is a hash of a public key and grants nothing on its own |
 
@@ -40,9 +45,10 @@ What crosses each boundary:
 |---|---|---|
 | Device to OS clipboard | Plaintext | None available. Every desktop OS lets local processes read the clipboard. See adversary 6 |
 | Device to relay | Sealed ciphertext plus a public header (`v`, `type`, `room`, `epoch`, `msg_id`, nonce) | XChaCha20-Poly1305 with the header bound as AAD, over TLS |
-| Device to keychain | Root secret | OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service) |
+| Device to keychain | Root secret and device secret | OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service), or an unencrypted owner only file when no keychain is available (section 4.5) |
+| Device to device, same network | File pieces, sealed under a key made for that transfer | XChaCha20-Poly1305, over a TCP connection on the local network (section 4.8) |
 | Relay to disk | Nothing | Storage is in memory by design, which is also the honest answer to a legal demand |
-| Relay to logs | Salted room id, event name, byte count, message id, coarse error code | Allowlist logging, never content, never the join token |
+| Relay to logs | Salted room id, event name, byte count, message id, coarse error code | Allowlist logging, never content |
 
 ## 4. Adversaries
 
@@ -100,7 +106,7 @@ relay by default.
 
 **Residual risks the operator keeps.** Metadata and availability, both listed above. Neither is
 fixable by a single relay design. The answer for anyone who will not accept them is self-hosting,
-which is a first class path running the identical published compose file.
+which is a first class path running the same published relay code.
 
 ### 4.3 Attacker who sees a join code, or an old join token
 
@@ -118,14 +124,14 @@ fingerprints. After ten minutes, or after one answer, the code is worth nothing.
 
 **An old join token** (protocol section 5), shown by versions before join codes, **is** the root
 secret. Whoever holds one holds the account until its key is replaced. Current versions neither show
-nor accept tokens, and Status offers to replace the key of an account whose key was ever shown as
+nor accept tokens, and Home offers to replace the key of an account whose key was ever shown as
 one; once replaced, every old token, screenshot and chat message carrying it is useless.
 
 **How a code or an old token leaks, and what is done about it:**
 
 | Leak path | Mitigation | Implemented |
 |---|---|---|
-| Shoulder surfing, screenshots, screen sharing | A code expires in ten minutes and is single use, and still needs approval with matching digits | Implemented, and run end to end against a local relay from the command line. The window's screens are rendered and not yet driven by hand |
+| Shoulder surfing, screenshots, screen sharing | A code expires in ten minutes and is single use, and still needs approval with matching digits | Implemented, in the window and from the command line |
 | Someone races the real new device with a request of their own | The comparison code, shown on both devices | Implemented and tested |
 | Someone answers the new device's request with an account of their own | The grant must be signed by the key the code fingerprints | Implemented and tested |
 | An old token survives in a screenshot, a chat or a clipboard manager | Replace the account key: a new root secret goes to every device sealed to its own key, and the old one opens nothing new | Implemented and run end to end |
@@ -149,10 +155,10 @@ already won, and any product claiming otherwise is lying. This is out of scope.
 **What protects the root secret.** The OS keychain: Windows Credential Manager (tied to the user
 login), macOS Keychain, Linux Secret Service. On a Linux session with no Secret Service provider (a
 bare Hyprland or Sway session with no gnome-keyring or kwallet running is the realistic case), the
-designed fallback chain ends in an encrypted file in the config directory. **That fallback is weaker
-than a real keychain and must be labelled as such in the UI**, because a file encrypted with a key
-that also lives on the same disk protects against casual inspection and not against a determined
-attacker with the image.
+keys go instead to `secret.key` in the configuration directory: **not encrypted**, written owner only
+(mode 0600 on Linux). That protects against other users on the machine and nothing more. Anyone who
+images the disk reads the key directly. `asli status` names the store in use and says this plainly;
+the window does not show it.
 
 **What does not protect it.** Zeroization is defence in depth, not a guarantee. Rust moves values,
 and a move may leave a copy that `Drop` never sees. The keychain API hands us memory we do not own
@@ -170,9 +176,10 @@ recommend in the README rather than pretending our process hygiene substitutes f
 the clipboard is a shared, unauthenticated bus on every desktop operating system. A tool that syncs
 the clipboard cannot defend the clipboard.
 
-**What we do control.** We do not register a generic URL scheme that another app could claim in order
-to intercept join links, we keep the root secret in the OS keychain rather than a config file, and we
-do not write the QR or the token to disk.
+**What we do control.** We do not register a URL scheme that another app could claim in order to
+intercept join links, and we keep the root secret in the OS keychain rather than a config file
+wherever a keychain exists (section 4.5 covers the case where none does). A join code carries no key,
+so an app that reads one from the clipboard after Copy Code learns only what section 4.3 describes.
 
 **Worth noting.** The macOS 15.4 and later pasteboard access alert exists precisely because of this
 adversary. It makes our own life harder while making the platform
@@ -188,11 +195,11 @@ control transport, or a small file drop.
 **Mitigations.** A per room daily byte quota (50 MiB default) for clips, and a separate budget for
 device to device messages, which carry files: 8 MiB a second per connection, 4 GiB a day per room
 and 32 GiB a day for the whole relay, so a busy room slows down before it can starve the shared box.
-Files are forwarded and never stored. A small retention cap
-(`RETAIN_MAX_BYTES` 64 KiB) so the relay cannot be used as a file host at all, a 24 hour TTL,
-per IP and per room connection caps plus a global cap, memory only storage so there is nothing to
-seize, a published abuse contact and transparency statement, and a kill switch that can block a
-specific room id or stop new room creation without a redeploy.
+Image pieces are charged to the same budget. Files are forwarded and never stored. A small
+retention cap (`RETAIN_MAX_BYTES` 64 KiB) so the relay cannot be used as a file host at all, a 24
+hour TTL, per IP and per room connection caps plus a global cap, and memory only storage so there is
+nothing to seize. There is no mechanism to block a specific room; an operator's only levers are the
+limits above and restarting with different ones.
 
 **Honest tension.** Every one of those limits constrains a legitimate user too. The self hosted path
 exists so that anyone who needs higher limits can raise them, which is what makes tight defaults on
@@ -226,7 +233,15 @@ must be sealed under a key that went to the receiver alone, sealed to its device
 gets nothing and is disconnected; after 16 such attempts the sender stops listening. The receiver
 connects only to private, carrier grade and link local addresses, so a forged or altered offer
 cannot make it reach the internet. Someone on the same network learns that the two machines
-exchanged a file of about that size, which the relay would otherwise learn instead.
+exchanged a file of about that size, which the relay would otherwise learn instead. If nothing
+arrives directly within 15 seconds, the receiver answers through the relay and the sender switches
+to it, so a network that blocks the connection costs time, not the file.
+
+**Old and orphaned offers.** A relay could hold on to a signed offer and deliver it again later. A
+receiver ignores an offer made more than a day ago or more than a day in the future, and one that
+names a connection its sender is known to have left, since an answer could not reach it. An offer
+still waiting for an answer ends on either side once the other device has been off the connection
+it was made on for 20 seconds.
 
 **Same Network Only.** With this setting a device approves a new device only when the request
 reaches it over the local network, sealed under a key that only the join code makes, and never takes
@@ -239,7 +254,7 @@ it narrows where a device can be added from and where files move, not who holds 
 
 | Risk | Why it is accepted | Cost of fixing |
 |---|---|---|
-| **No forward secrecy.** A secret compromised at any time decrypts all archived and future traffic | Real forward secrecy needs a ratchet with per device pairwise state, which destroys the stateless one string join that is the entire product thesis. Key epochs do **not** help: every device must be able to derive any epoch from the root secret so an offline device can catch up, therefore old epoch keys are always recoverable | A full rekeying protocol plus device enrollment. Changes onboarding fundamentally |
+| **No forward secrecy.** A secret compromised at any time decrypts all archived and future traffic | Real forward secrecy needs a ratchet with pairwise state between every pair of devices, while clips are sealed once, under a room key every device holds. Key epochs do **not** help: every device must be able to derive any epoch from the root secret so an offline device can catch up, therefore old epoch keys are always recoverable | A ratchet between every pair of devices, and clips sealed per recipient. Changes the protocol fundamentally |
 | **Removing a device protects the future, not the past.** Removing one replaces the root secret and hands the new one to every other device sealed to its own key, so the removed device reads nothing sent after. It keeps whatever it already decrypted and kept, and it can still read anything an observer archived from before | A deleted copy cannot be recalled, and archived ciphertext stays decryptable under the old key by design (no forward secrecy, above) | Nothing short of forward secrecy |
 | **A device offline during a key change is left behind** | The relay keeps no message for a device that is not connected, so a device that misses the new key stays on the old one, alone. It has to join again with a code. The window says which devices this will happen to before the change is made | Retained key change messages, which the relay would have to store |
 | **All devices are equally trusted.** Every device holds the root secret, so a compromised device can read everything and can remove the others | Device keys stop one device speaking as another and make removal possible; they do not create a hierarchy of devices | Per device group keys and an admin role, which nobody has asked for |
@@ -253,8 +268,8 @@ it narrows where a device can be added from and where files move, not who holds 
 
 A clipboard sync tool that replicates password manager output to three machines, where it sits in
 clipboards and clipboard histories that never expire it, is a security regression compared to not
-using the tool. KDE Connect has a public bug for exactly this. We default to **not** syncing content
-that is marked sensitive, rather than offering it as an opt in.
+using the tool. KDE Connect has a public bug for exactly this. We **never** sync content that is
+marked sensitive, and there is no setting that changes this. History does not record it either.
 
 We skip a clip entirely (do not encrypt it, do not send it, do not even hash it) when:
 
@@ -290,12 +305,16 @@ manager's auto type feature instead of the clipboard.
 | Crate | Role | Why trusted |
 |---|---|---|
 | `chacha20poly1305` 0.11 | XChaCha20-Poly1305 AEAD | RustCrypto, widely deployed, has been through third party audit of the AEAD family |
-| `hkdf` 0.13 | Key derivation | RustCrypto, thin wrapper over HMAC, RFC 5869 vectors in CI |
+| `hkdf` 0.13 | Key derivation | RustCrypto, thin wrapper over HMAC, tested upstream against the RFC 5869 vectors |
 | `sha2` 0.11 | Hashing, room id derivation | RustCrypto, ubiquitous |
-| `ed25519-dalek` 3.0 | Relay authentication signatures | The reference Rust Ed25519 implementation, audited, with strict verification semantics |
+| `ed25519-dalek` 2 | Relay authentication signatures, and per device signatures on cards, file offers and answers | The reference Rust Ed25519 implementation, audited, with strict verification semantics |
+| `x25519-dalek` 2 | Key agreement for sealing a secret to one device: the account key in a join grant or a key change, the key for a direct file transfer | Same project and same curve implementation as `ed25519-dalek`, so it adds one crate |
 | `getrandom` 0.4 | All randomness, direct from the OS CSPRNG | No user space PRNG in the design at all. RNG failure is fatal by policy, never a fallback |
 | `zeroize` 1.9 | Best effort memory hygiene | Defence in depth only, see 4.5 |
-| `data-encoding` 2.11 | Crockford base32 for tokens and room ids | Constant time where it matters, no ambiguous alphabet |
+| `data-encoding` 2.11 | Strict base64 for binary fields on the wire | Rejects non canonical padding, which the protocol requires |
+
+Crockford base32, used for room ids, is a short hand written module in `asli-crypto` rather than a
+dependency.
 
 Rejected, with reasons: `orion` and `dryoc` both self declare that they have had no third party
 audit. `libsodium-sys` has been unmaintained since 2021. `rand` is dropped entirely in favour of
@@ -305,7 +324,8 @@ audit. `libsodium-sys` has been unmaintained since 2021. `rand` is dropped entir
 `draft-irtf-cfrg-xchacha`, expired without being published. The de facto specification is libsodium's
 `crypto_aead_xchacha20poly1305_ietf`. The frozen vectors in `testdata/vectors.json` pin our
 output, but no check against libsodium itself exists yet, so "libsodium compatible" is a design
-intent that has not been independently tested. An interop check is item 4 in the list below.
+intent that has not been independently tested. An interop check is planned and not done; it is item
+4 in the list below.
 
 ## 8. What we do NOT claim
 
@@ -320,15 +340,15 @@ intent that has not been independently tested. An interop check is item 4 in the
 - **We do not claim the relay cannot deny you service.** It can, trivially.
 - **We do not claim to detect all passwords.** We honour the markers that exist and refuse to guess
   beyond them.
-- **We do not claim any of this is audited.** No third party has reviewed this design or the code
-  that does not exist yet.
+- **We do not claim any of this is audited.** No third party has reviewed this design or its code.
 
 ## 9. Items to verify before the first release
 
 1. Empirical confirmation that the `keyring` fallback behaves sanely on a bare Hyprland session with
-   no Secret Service provider, and that the weaker file fallback is clearly labelled in the UI.
+   no Secret Service provider. The weaker file fallback is labelled in `asli status` only, not in the
+   window.
 2. Whether `x-kde-passwordManagerHint` survives Mutter's XWayland selection bridge, which determines
    whether sensitive content filtering works at all on GNOME Wayland.
 3. Whether 1Password and Bitwarden set any of the documented exclusion markers on any platform.
-4. A libsodium interop check, run before any release is tagged.
+4. A libsodium interop check. Planned, not built.
 5. A manual USPTO and EUIPO check is unrelated to security but is tracked separately.

@@ -27,6 +27,12 @@ mode = "644"
 doc = true
 
 [[package.metadata.generate-rpm.assets]]
+source = "packaging/THIRD_PARTY_LICENSES.txt"
+dest = "/usr/share/licenses/asli/THIRD_PARTY_LICENSES.txt"
+mode = "644"
+doc = true
+
+[[package.metadata.generate-rpm.assets]]
 source = "README.md"
 dest = "/usr/share/doc/asli/README.md"
 mode = "644"

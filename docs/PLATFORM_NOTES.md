@@ -3,10 +3,8 @@
 Everything awkward about clipboards, per operating system, written for someone whose clipboard is
 not syncing. If you are reading this because something is broken, start at section 7.
 
-> **Status.** Linux is implemented and verified on real hardware, for text and for images, over
-> both X11 and Wayland. Windows has run under Wine but not yet on Windows itself, and no AppKit call
-> in the macOS build has been observed running yet, so treat those sections as the mechanism they
-> use rather than as observed behaviour.
+> **Status.** Asli runs in daily use on Linux (X11 and Wayland), Windows 11 and macOS, for text and
+> images. Where a statement below has not been confirmed on real hardware, it says so.
 
 ## 1. Support matrix
 
@@ -38,8 +36,8 @@ as "mostly fails, sometimes works" when you call it directly from the notificati
 `rdpclip.exe` is a known aggressive holder of the lock.
 
 What we do: the notification handler does nothing except arm a 100 ms debounce timer. A worker
-thread then opens the clipboard with exponential backoff (1 ms doubling, 8 attempts, roughly 150 ms
-total) and gives up quietly until the next event if it never wins.
+thread then opens the clipboard with exponential backoff (1 ms doubling, 8 attempts, at most 255 ms
+of waiting) and gives up quietly until the next event if it never wins.
 
 **The 30 second hazard.** A clipboard format can be advertised without being produced yet, and asking
 for it makes the owning application render it while the system waits, for up to 30 seconds. During
@@ -85,22 +83,23 @@ a user action the system considers paste related. The important facts:
   addresses, links and phone numbers. They cannot return arbitrary text, so they are not a way to
   sync a clipboard without prompting.
 - Reading the change counter and the type list carry no privacy language and are very likely exempt,
-  which is what makes the design workable. **This is unverified against real macOS 26 hardware and is
-  a blocking task before the macOS client ships.**
+  which is what makes the design workable. Apple does not document which reads are exempt, so this
+  remains an inference.
 
 **What the app does.** It reads the permission state at start and reports it in its log and in
 `asli status`, which also prints the command that opens the right Settings pane when reads are
 blocked. The fix is System Settings, Privacy and Security, "Paste from Other Apps", Allow, after which
 the prompt does not return. Content is read only when the change counter actually moves, which keeps
-the number of gate-able reads to at most one per real copy. A guided onboarding screen in the window
-is not built yet.
+the number of reads the alert can gate to at most one per real copy. The window has no guided screen
+for this permission.
 
 **Notifications** go through `osascript`, because the notification library's macOS backend needs an
 Objective-C build against Apple's SDK. Until Asli ships as a signed bundle, macOS attributes them to
 Script Editor.
 
-**Concealed writes.** Copying the join token from the window adds the `org.nspasteboard.ConcealedType`
-marker, so clipboard managers that honour it skip the token. Unverified on a real Mac.
+**Copy Code.** The join code that Add a Device shows is copied as ordinary text, with no
+concealment marker, on every platform. It carries no key: it is good for ten minutes, for one answer,
+and still needs approval with matching digits.
 
 **Receiving never needs permission.** Writing to the pasteboard is not gated. If you refuse the
 permission, or macOS blocks it, this Mac still receives clips from your other machines and puts them
@@ -173,9 +172,9 @@ external clipboard managers"). Do not expect this to change.
 **What works anyway: the XWayland bridge.** GNOME's compositor mirrors Wayland native clipboard
 ownership into the X11 selection so that X11 applications keep working. That means a hidden X11
 client watching with XFixes **does see copies made by Wayland applications on GNOME**, and XFixes
-needs no focus. This is the same code as the X11 backend, selected automatically at runtime. The tray
-menu will say GNOME is running in compatibility mode so the behaviour is visible rather than
-mysterious.
+needs no focus. This is the same code as the X11 backend, selected automatically at runtime. `asli status`
+reports the backend in use and marks this one as the compatibility path; the tray menu and the window
+do not mention it.
 
 Two honest caveats: exotic clipboard formats may not survive the bridge (plain text and PNG do), and
 whether the password manager hint survives it is **unverified** and must be tested before secret
@@ -210,9 +209,10 @@ session implements a host for it.
 only ever show the menu, so every action is also in the menu, and no feature depends on telling a
 left click from a right click.
 
-Because a missing tray host makes the application invisible rather than merely ugly, startup will
-check whether a StatusNotifierItem host exists and, if not, show the onboarding window with the exact
-command to fix it rather than vanishing into the background.
+Because a missing tray host makes the application invisible rather than merely ugly, `asli tray`
+checks at startup whether a StatusNotifierItem host exists and, if not, prints to its terminal or log
+what each desktop needs, then keeps syncing without an icon. It does not open a window to say so. On
+a device with no account yet the first run window opens anyway. `asli run` runs with no tray at all.
 
 ## 7. Troubleshooting
 
@@ -233,15 +233,14 @@ only the removed protocol.
 
 **The keychain fails on bare Hyprland or Sway.** A session with no `gnome-keyring-daemon` and no
 `kwallet` running has no Secret Service provider, so there is nowhere standard to put the key. The
-app falls back to an encrypted file in the configuration directory and will say so plainly in the
-interface. That fallback protects against casual inspection, not against someone imaging the disk,
-because the file and its key live on the same disk. If that matters to you, start a keyring daemon in
+app falls back to a file, `secret.key` in the configuration directory, holding the keys unencrypted
+and readable only by you (mode 0600), and `asli status` says so on its Key store line. That fallback
+protects against other users on the machine, not against someone imaging the disk. If that matters to you, start a keyring daemon in
 your session.
 
 **macOS asks for clipboard permission repeatedly.** Open System Settings, Privacy and Security, and
 find "Paste from Other Apps". Set Asli to Allow. The application appears in that list only after it
-has triggered at least one prompt, which is a limitation of the operating system and the reason the
-onboarding flow exists. If you would rather not grant it, the Mac still receives clips from your
+has triggered at least one prompt, which is a limitation of the operating system. If you would rather not grant it, the Mac still receives clips from your
 other machines; only sending stops.
 
 **Copying the same text twice does not sync the second time.** It should, and it is tested. The loop
@@ -249,5 +248,6 @@ prevention entries expire after a short window precisely so that deliberately re
 you see this, please file a bug with your platform and desktop.
 
 **Large clips do not arrive.** There is a size cap, and anything over it is skipped with a
-notification rather than silently dropped. The limit is announced by the relay, so a self hosted
-relay can raise it without a client update.
+notification rather than silently dropped. Text is limited by the content cap the relay announces
+(700 KiB on the public relay), so a self hosted relay can raise it without a client update. Images
+are sent in pieces and are limited to 32 MiB. Anything larger can go as a file, up to 4 GiB.

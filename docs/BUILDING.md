@@ -1,8 +1,7 @@
 # Building Asli
 
-> **Status.** Linux builds, installs and runs. Windows and macOS are wired up and type check
-> clean, and are being verified on real hardware. The platform table in the README is the current
-> word on each.
+> **Status.** Asli builds, installs and runs on Linux, Windows 11 and macOS. The platform table in
+> the README is the current word on each.
 
 ## 1. Node.js is not required
 
@@ -15,14 +14,14 @@ silently.
 
 ## 2. Prerequisites
 
-Rust comes from [rustup](https://rustup.rs) on every platform. The application crate needs Rust 1.92
-or newer, because the window toolkit does; the library crates build with 1.82.
+Rust comes from [rustup](https://rustup.rs) on every platform. Every crate in the workspace needs
+Rust 1.92 or newer.
 
 | Platform | What you need |
 |---|---|
-| **Arch Linux** | `base-devel` and Rust. No GTK, no appindicator, no libxdo. At runtime, a D-Bus session for the tray |
-| **Debian and Ubuntu** | `build-essential`, `pkg-config` and Rust |
-| **Fedora** | the `c-development` group and Rust |
+| **Arch Linux** | `base-devel`, `pkgconf`, `fontconfig` and Rust. No GTK, no appindicator, no libxdo. At runtime, fontconfig and a D-Bus session for the tray |
+| **Debian and Ubuntu** | `build-essential`, `pkg-config`, `libfontconfig-dev` and Rust |
+| **Fedora** | the `c-development` group, `pkgconf-pkg-config`, `fontconfig-devel` and Rust |
 | **macOS** | Xcode Command Line Tools (`xcode-select --install`) and Rust |
 | **Windows** | Microsoft C++ Build Tools (the "Desktop development with C++" workload) and Rust on the MSVC toolchain. No WebView2 |
 
@@ -69,8 +68,8 @@ means nothing to any other Mac.
 cargo build --release -p asli-app
 ```
 
-The binary is `target/release/asli` (`asli.exe` on Windows). On Linux it is a single file whose only
-runtime requirement is a D-Bus session for the tray.
+The binary is `target/release/asli` (`asli.exe` on Windows). On Linux it is a single file that needs
+glibc, fontconfig (for the window's text) and a D-Bus session for the tray at runtime.
 
 On Windows the C runtime is linked statically (`.cargo/config.toml`), so the executables run on a
 machine without the Visual C++ redistributable. A `RUSTFLAGS` variable replaces that setting.
@@ -110,18 +109,15 @@ by running the program. So also run it:
 ```
 cargo run -p asli-net --example live_relay -- wss://asli.vnat.dev/v1
 cargo run -p asli-clipboard --example watch -- --show-content
-cargo run -p asli-app -- status
+cargo run -p asli-app --bin asli -- status
 ```
 
 The first proves TLS, the handshake and a round trip against a real relay. The second prints one
 line per clipboard change, which is the quickest way to see what a desktop actually delivers.
 
-To act as a second device without a second machine, point the peer harness at an account's join
-token:
-
-```
-cargo run --release -p asli-net --example peer -- <join-token> --send-every-secs 5
-```
+The peer harness, `crates/asli-net/examples/peer.rs`, acts as a second device on an existing
+account, but it still takes an old style join token, which current versions neither show nor accept.
+No command prints one, so it is usable only with a token built by hand from a test account's key.
 
 Isolated instances keep tests away from a real account: set `ASLI_CONFIG_DIR` to a scratch directory
 and `ASLI_KEYRING_SUFFIX` to any name, and the instance gets its own configuration, its own keychain

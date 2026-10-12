@@ -1,7 +1,8 @@
 # Asli relay
 
-The server half of [Asli](../README.md). It forwards encrypted clipboard messages between a
-person's own devices and can read none of them.
+The server half of [Asli](../README.md). It forwards encrypted clipboard messages, and the
+sealed messages that carry files and device changes, between a person's own devices and can read
+none of them.
 
 It is deliberately small: one process, no database, nothing written to disk, and no account system.
 What it holds is a set of live WebSocket connections grouped into rooms, plus at most one recent
@@ -30,7 +31,8 @@ npm start          # listens on http://127.0.0.1:8080, WebSocket path /v1
 
 There is no build step. The sources are TypeScript and Node runs them directly using native type
 stripping, which is why `tsconfig.json` sets `erasableSyntaxOnly`: it makes the type checker reject
-any syntax that stripping cannot handle, so the failure shows up in CI rather than in production.
+any syntax that stripping cannot handle, so the failure shows up in `npm run typecheck` rather than
+in production. There is no hosted CI: run these yourself before a change goes in.
 
 ```sh
 npm run typecheck  # tsc --noEmit
@@ -52,9 +54,10 @@ docker compose up -d
 Edit the hostname in `Caddyfile` first. Caddy obtains a certificate automatically, so there is no
 certificate management step.
 
-The compose file is the same one the public relay runs. Self hosting is meant to be identical
-rather than a downgraded variant, so if you need higher limits, raise them here and point your
-clients at your own relay in Settings.
+The public relay runs the same code, as a systemd service rather than from this compose file, with
+`MemoryMax=128M` and `RETAIN_GLOBAL_BUDGET_BYTES` lowered to 16 MiB to suit a small shared machine.
+Its other limits are the defaults below. If you need higher limits, raise them in your own
+deployment and point your clients at it with **Relay Address** in Settings.
 
 ## Configuration
 
@@ -66,7 +69,7 @@ nonsense value. The defaults are the public relay's.
 | `PORT` | 8080 | Listen port |
 | `HOST` | 0.0.0.0 | Listen address |
 | `METRICS_PORT` | 9090 | Prometheus style counters, bound to loopback. Set to 0 to disable |
-| `LOG_LEVEL` | info | debug, info, warn or error |
+| `LOG_LEVEL` | info | debug, info, warn or error. Any other value falls back to info without a warning |
 | `MAX_FRAME_BYTES` | 1 MiB | Largest accepted WebSocket frame, once the session is authenticated |
 | `HANDSHAKE_FRAME_BYTES` | 4 KiB | Frame cap before authentication. `hello` is under 200 bytes and `auth` a little over 300 |
 | `MAX_CONTENT_BYTES` | 700 KiB | Content cap announced to clients. Base64 expansion is why it is not 1 MiB |
@@ -74,13 +77,29 @@ nonsense value. The defaults are the public relay's.
 | `RETAIN_GLOBAL_BUDGET_BYTES` | 256 MiB | Ceiling across all rooms, with least recently used eviction |
 | `RETAIN_TTL_MS` | 24 hours | How long a stored clip survives |
 | `MAX_ROOMS` | 100000 | At this many rooms, the empty room idle longest is dropped for a new one; new rooms are refused only when every room has someone in it |
-| `MSG_BURST`, `MSGS_PER_SEC` | 10, 2 | Per connection message rate |
-| `BYTE_BURST`, `BYTES_PER_SEC` | 2 MiB, 256 KiB | Per connection byte rate |
-| `ROOM_BYTES_PER_DAY` | 50 MiB | Per room rolling quota |
+| `AUTH_TIMEOUT_MS` | 10000 (10 s) | Time a new connection has to finish the handshake |
+| `HEARTBEAT_INTERVAL_MS` | 30000 (30 s) | WebSocket ping interval. A connection that misses two pongs is dropped |
+| `MSG_BURST`, `MSGS_PER_SEC` | 10, 2 | Per connection message rate for clips and everything else that is not bulk |
+| `BYTE_BURST`, `BYTES_PER_SEC` | 2 MiB, 256 KiB | Per connection byte rate, same scope |
+| `ROOM_BYTES_PER_DAY` | 50 MiB | Per room rolling quota for clips |
+| `TRANSFER_MSG_BURST`, `TRANSFER_MSGS_PER_SEC` | 128, 64 | Per connection message rate for bulk frames: `msg` (files, device cards, joining, rekeys) and image chunks |
+| `TRANSFER_BYTE_BURST`, `TRANSFER_BYTES_PER_SEC` | 16 MiB, 8 MiB | Per connection byte rate for bulk frames |
+| `ROOM_TRANSFER_BYTES_PER_DAY` | 4096 MiB (4 GiB) | Per room rolling daily budget for bulk frames, counted as they leave the relay: a `msg` to the whole room is charged once per receiving device |
+| `GLOBAL_TRANSFER_BYTES_PER_DAY` | 32768 MiB (32 GiB) | The same, for the whole relay across all rooms |
 | `MAX_CONNS_PER_IP` | 20 | Concurrent connections per address |
+| `NEW_CONN_BURST`, `NEW_CONN_REFILL_MS` | 10, 5000 (5 s) | New connections per address: a burst of 10, then one more every 5 seconds |
 | `MAX_CONNS_PER_ROOM` | 16 | Concurrent connections per room |
 | `MAX_CONNS_GLOBAL` | 10000 | Hard ceiling |
+| `BACKPRESSURE_SOFT_BYTES` | 1 MiB | Above this much unsent data to a receiver, a clip for it is held back, newest replacing older |
+| `BACKPRESSURE_HARD_BYTES` | 8 MiB | Above this, a receiver is disconnected rather than sent more bulk frames |
+| `BACKPRESSURE_GRACE_MS` | 15000 (15 s) | A receiver whose held clip has waited this long is disconnected |
+| `DEDUP_WINDOW` | 256 | Recent message ids remembered per room, to drop duplicates |
+| `PRESENCE_DEBOUNCE_MS` | 1500 | Delay before telling a room its device count changed, so reconnects do not flicker. 0 sends at once |
 | `TRUSTED_PROXY_CIDRS` | empty | Comma separated. Required for `X-Forwarded-For` to be honoured at all |
+
+A quota that runs out is answered with a `QUOTA_EXCEEDED` error. Running out of the clip quota
+closes the connection; running out of a bulk budget refuses that frame only, so clips keep
+syncing.
 
 ### A note on `TRUSTED_PROXY_CIDRS`
 
@@ -94,8 +113,8 @@ the one a client can write freely.
 
 Operating an open relay means running a free, anonymous, encrypted blob forwarder. That is
 attractive to people who want a covert channel rather than a clipboard. The defaults are what keep
-that impractical: a small retained size, a short TTL, a per room daily quota, connection caps, and
-memory only storage.
+that impractical: a small retained size, a short TTL, per room daily quotas for clips and for
+files, a daily file transfer budget for the whole relay, connection caps, and memory only storage.
 
 If you run one publicly, publish an abuse contact and a short statement of what the relay retains,
 which is 24 hours of one ciphertext per active room and aggregate counters. Both of those are worth

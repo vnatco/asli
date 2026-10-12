@@ -44,6 +44,7 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm755 "target/release/asli" "$pkgdir/usr/bin/asli"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 packaging/THIRD_PARTY_LICENSES.txt "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_LICENSES.txt"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 packaging/linux/asli.desktop "$pkgdir/usr/share/applications/asli.desktop"
   # Icon=asli in the entry needs an icon of that name, or the menu shows a generic one.

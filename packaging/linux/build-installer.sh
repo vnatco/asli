@@ -208,6 +208,7 @@ build_appimage() {
     install -m 755 "$HERE/install.sh" "$appdir/usr/share/asli/install.sh"
     install -m 644 "$HERE/asli.desktop" "$appdir/usr/share/asli/asli.desktop"
     install -m 644 "$HERE/asli.svg" "$appdir/usr/share/asli/asli.svg"
+    install -m 644 "$REPO_ROOT/LICENSE" "$REPO_ROOT/packaging/THIRD_PARTY_LICENSES.txt" "$appdir/usr/share/asli/"
     # What the AppImage itself shows in a file manager and to integration tools. TryExec is left
     # out of this copy: asli is not on PATH inside the image, and a launcher would hide the entry.
     grep -v '^TryExec=' "$HERE/asli.desktop" > "$appdir/asli.desktop"
@@ -251,8 +252,8 @@ build_tarball() {
     local stage="$WORK/$BASE"
     mkdir -p "$stage"
     install -m 755 "$BUILT" "$stage/asli"
-    install -m 644 "$REPO_ROOT/LICENSE" "$REPO_ROOT/README.md" "$HERE/asli.desktop" "$HERE/asli.svg" \
-        "$HERE/systemd/asli.service" "$stage/"
+    install -m 644 "$REPO_ROOT/LICENSE" "$REPO_ROOT/packaging/THIRD_PARTY_LICENSES.txt" \
+        "$REPO_ROOT/README.md" "$HERE/asli.desktop" "$HERE/asli.svg" "$HERE/systemd/asli.service" "$stage/"
     install -m 644 "$REPO_ROOT/packaging/icons/asli-256.png" "$stage/asli.png"
     tar -C "$WORK" --owner=0 --group=0 --numeric-owner --sort=name -czf "$out" "$BASE"
     ok "$out"

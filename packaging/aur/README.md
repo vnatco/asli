@@ -6,8 +6,10 @@ want the second one.
 
 ## Before every release
 
-The checksums in both files are placeholders. Replace them, or the package will not build in a
-clean chroot:
+Set `pkgver` in both files to the version being released.
+
+Both files carry `sha256sums=('SKIP')`, which turns checksum verification off. Replace it with the
+real sums before publishing:
 
 ```sh
 cd packaging/aur
@@ -37,7 +39,7 @@ cd aur-asli
 cp ../PKGBUILD .
 makepkg --printsrcinfo > .SRCINFO
 git add PKGBUILD .SRCINFO
-git commit -m "Initial import: asli 0.1.0"
+git commit -m "Initial import: asli <version>"
 git push
 ```
 
@@ -50,6 +52,6 @@ file, not from the `PKGBUILD`, so a stale one shows users the wrong version.
 
 ```sh
 makepkg --printsrcinfo > .SRCINFO
-git commit -am "asli 0.2.0"
+git commit -am "asli <version>"
 git push
 ```

@@ -28,12 +28,13 @@ It is `setup.ps1 -Install` for someone who has never opened a terminal:
   the owner's machine; the uninstaller removes that one too, in case an earlier build wrote it.
 - Checks both shortcuts with `asli.exe shortcut check`, and stops with an error, exit code 2 when
   silent, if either would not work. Asli is not started after a failed install.
+- Installs `LICENSE.txt` and `THIRD_PARTY_LICENSES.txt` beside the programs.
 - Registers itself under Settings, Apps (and Add or Remove Programs) with the Asli icon, its
   version and publisher.
 - Starts Asli. Its finish page says to look for the icon by the clock.
 
 The uninstaller, reached from Settings, Apps, Asli, Uninstall, stops Asli and removes all of that:
-the files, the Start menu and Startup shortcuts, the old `Run` values, and the Apps entry. It
+the files (the two licence files included), the Start menu and Startup shortcuts, the old `Run` values, and the Apps entry. It
 leaves the account key in Credential Manager and the settings and history in
 `%APPDATA%\vnat\asli`, so reinstalling needs no rejoining. `uninstall.exe /S` does the same
 silently, and so does the installer: `asli-<version>-windows-x86_64.exe /S`.
@@ -111,7 +112,7 @@ That warning is accurate. It means the publisher is unverified, not that the fil
 be malicious. Verify the download yourself before trusting it:
 
 ```powershell
-Get-FileHash .\asli-0.1.0-windows-x86_64.exe -Algorithm SHA256
+Get-FileHash .\asli-<version>-windows-x86_64.exe -Algorithm SHA256
 ```
 
 Compare the result against the `SHA256SUMS` file attached to the release.
@@ -129,20 +130,26 @@ The plan is the **SignPath Foundation**, which provides free code signing for qu
 source projects. It requires an OSI approved licence with no commercial dual licensing and an
 actively maintained project, both of which hold here.
 
-## Untested
+## What has been checked, and where
 
-Compiled with NSIS 3.11 under Wine and run there silently, from binaries cross built with
-llvm-mingw: the files, the Apps entry, and the uninstaller removing all of them and leaving the
-settings, were all checked. The welcome page was seen. Wine has no PowerShell, so there
-`asli.exe shortcut create` fails: that proved the failure path, where the install stops with exit
-code 2, writes no Start menu entry and does not start Asli, but not the success path.
-`shortcut check`'s reader was run against a real `.lnk` that Wine's shell wrote, and found an
-environment block planted in it. Nothing more:
+Under Wine: compiled with NSIS 3.11 and run silently, from binaries cross built with llvm-mingw.
+The files, the Apps entry, and the uninstaller removing all of them and leaving the settings were
+all checked. The welcome page was seen. Wine has no PowerShell, so there `asli.exe shortcut create`
+fails: that proved the failure path, where the install stops with exit code 2, writes no Start menu
+entry and does not start Asli. `shortcut check`'s reader was run against a real `.lnk` that Wine's
+shell wrote, and found an environment block planted in it.
 
-- `build-installer.ps1` has not run on Windows. Neither has the MSVC build with the static runtime,
-  nor the `dumpbin` check.
-- Real Windows: clicking through the pages, SmartScreen, both shortcuts being written and passing
-  the check, the Start menu entry starting Asli with its icon, Asli starting at the end and at the
-  next sign in, and the Apps entry's icon.
-- The new small icon sizes on a real taskbar and Start menu, at 100, 125, 150 and 200 % scale, and
+On the owner's Windows 11 PC, earlier builds met the two problems described above: the `Run` key that
+Explorer ignored at logon, and the Start menu entry that NSIS's `CreateShortcut` wrote and Windows
+could not resolve. The same machine is where `shortcut check` refused a shortcut carrying a
+`%USERPROFILE%` icon block. Asli itself runs there every day.
+
+Not recorded here as checked, on real Windows, with the current installer:
+
+- `build-installer.ps1` from start to finish, the MSVC build with the static runtime, and the
+  `dumpbin` check.
+- Clicking through the pages, SmartScreen, both shortcuts being written and passing the check, the
+  Start menu entry starting Asli with its icon, Asli starting at the end and at the next sign in,
+  and the Apps entry's icon.
+- The small icon sizes on a real taskbar and Start menu, at 100, 125, 150 and 200 % scale, and
   the running window's taskbar icon coming from the resource.

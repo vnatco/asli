@@ -3,10 +3,8 @@
 How Asli is put together, and why. The security design lives in `PROTOCOL.md` and
 `THREAT_MODEL.md`; this document is about structure, threads and data flow.
 
-> **Status.** Every crate exists and the relay is deployed. Text and images sync in both
-> directions on Linux, verified against a live relay. The Windows and macOS clipboard backends are
-> written, but no Win32 or AppKit call in them has been observed running yet, so treat anything
-> specific to those two platforms as designed rather than proven.
+> **Status.** Every crate exists and the relay is deployed. Text, images and files move between
+> Linux, Windows 11 and macOS machines in daily use, against the live relay.
 
 ## 1. The shape of the system
 
@@ -23,7 +21,7 @@ How Asli is put together, and why. The security design lives in `PROTOCOL.md` an
    |    +--------+---------+  |            |             |            |
    |             | ClipEvent  |            |             |            |
    |    +--------v---------+  |            |    +--------v---------+  |
-   |    | asli-core        |  |            |    | asli-core        |  |
+   |    | asli-net         |  |            |    | asli-net         |  |
    |    |  state machine   |  |            |    |  state machine   |  |
    |    |  dedup and loop  |  |            |    |  dedup and loop  |  |
    |    |  protocol codec  |  |            |    |  protocol codec  |  |
@@ -45,26 +43,32 @@ How Asli is put together, and why. The security design lives in `PROTOCOL.md` an
                         +------------------------+
 ```
 
+The dedup and loop guards inside `asli-net` come from `asli-core`. Not drawn: files can also go
+straight from one device to the other over TCP on the local network, sealed with `asli-crypto`,
+without the relay (section 4.4).
+
 The relay holds no secret, no database and no file. It routes ciphertext by room id, excludes the
-sender, enforces quotas, and keeps at most the most recent small clip per room so a device that was
-switched off can catch up.
+sender, enforces quotas, and keeps at most the most recent small clip per room, which a device that
+was switched off can ask for.
 
 ## 2. Crate layout
 
-| Crate | Owns | Status |
-|---|---|---|
-| `asli-crypto` | Key derivation, identity and room id, join token, AEAD sealing and opening, chunk sealing, the handshake signature. No I/O, no threads, no sockets. | Done |
-| `asli-core` | Content normalization, the echo guard and the replay guard. No I/O. | Done |
-| `asli-net` | The wire envelope, the handshake, the reconnect state machine and backoff, and the clip and chunk paths over a WebSocket. | Done |
-| `asli-clipboard` | The `ClipboardWatcher` trait plus one backend per platform. All the operating system ugliness lives here and nowhere else. | Linux verified. Windows and macOS written, not yet observed running |
-| `asli-history` | The local clipboard history, encrypted at rest under a key derived from the account key. | Done |
-| `asli-ui` | The compiled Slint markup for the window, kept apart so every hand written crate can forbid unsafe code. | Done |
-| `asli-app` | The `asli` binary: tray and menu, the window, configuration, keychain access, autostart, notifications, the single instance lock, the list of devices on the account, and the wiring between the rest. | Linux done |
-| `server/` | The Node relay. TypeScript, `ws`, in memory. | Deployed |
+| Crate | Owns |
+|---|---|
+| `asli-crypto` | Key derivation, identity and room id, AEAD sealing and opening for clips, chunks and announcements, the handshake signature, per device keys and signed cards (`device`), join codes, approval and the sealed grant (`enroll`), the replacement key handed out on removal (`rekey`), file offers, answers and pieces (`file`), the key and framing of a direct transfer (`direct`), sealed device to device messages (`msg`), and the version a device reports (`about`). The retired join token parser is kept only to recognise and refuse old tokens. No I/O, no threads, no sockets. |
+| `asli-core` | Content normalization, the echo guard and the replay guard. No I/O. |
+| `asli-net` | The wire envelope, the handshake, the reconnect state machine and backoff, and the clip, chunk, announcement and `msg` paths over a WebSocket. |
+| `asli-clipboard` | The `ClipboardWatcher` trait plus one backend per platform. All the operating system ugliness lives here and nowhere else. |
+| `asli-dnd` | Files dropped on the window under Wayland, which winit does not handle there. The one crate with an `unsafe` call, kept apart so every other crate can forbid it. |
+| `asli-history` | The local clipboard history, encrypted at rest under a key derived from the account key. |
+| `asli-ui` | The compiled Slint markup for the window, kept apart so every hand written crate can forbid unsafe code. |
+| `asli-app` | The `asli` binary (and `asliw` on Windows, which opens no console): command line, tray and menu, the window, configuration, keychain access, autostart, notifications, the single instance lock, the list of devices on the account and their pinned keys, joining and approval, removal by rekey, file transfer through the relay and directly on the local network, and the wiring between the rest. |
+| `server/` | The Node relay. TypeScript, `ws`, in memory. |
 
 The split exists for one practical reason: `asli-core` and `asli-crypto` have no I/O, so the
 integration test can drive two headless clients against a real relay with no display server and no
-clipboard. That is what makes continuous integration meaningful for a GUI application.
+clipboard. There is no hosted CI, by choice: the tests, format check and clippy are run locally,
+and the platform behaviour is checked by running the app on each system.
 
 ## 3. Threading model
 
@@ -76,7 +80,8 @@ Shaped by platform constraints rather than preference.
 | Tray (Linux only) | Polls the tray and menu channels and refreshes the labels | The Linux tray is StatusNotifierItem over D-Bus, which runs its own service thread and needs no user interface loop |
 | Clipboard watcher | Blocking platform event loop: the Windows clipboard listener, the macOS 500 ms poll, the X11 XFixes loop, the Wayland data-control loop | Each platform wants to own a loop. The watcher sends observations over a channel and never touches the network |
 | Clipboard writer | Takes ownership of the clipboard for received clips, and on X11 and Wayland keeps serving it | X11 and Wayland have no clipboard storage, so whoever copied must answer every paste. Windows and macOS keep the data themselves, so there the writer only writes |
-| Daemon | A current thread Tokio runtime: the WebSocket, TLS, reconnect timers, heartbeat | The socket is the only real I/O |
+| Daemon | A current thread Tokio runtime: the WebSocket, TLS, reconnect timers, heartbeat | The socket is the main I/O |
+| Short lived workers | Hashing a file before it is offered, each side of a direct transfer on the local network, joining and approving a device, and notifications that ask a question | Each blocks on a file, a socket or the person, and none of that may hold up the clipboard |
 
 Communication is by channels, in one direction each way: the watcher sends local changes inward, and
 the network task sends received clips outward to the writer. Nothing shares a lock across a platform
@@ -101,7 +106,8 @@ main thread with a timer tolerance, and hands its result to the core over a chan
 6. Check the loop guards (section 5). If this is our own echo, stop.
 7. Check the size cap. Over the cap means skipped with a visible notification, never a silent drop.
 8. Build the inner plaintext (content type, device id, sequence number, timestamp, content), pad it
-   to a bucket, and seal it with the epoch key. `asli-crypto` does this part today.
+   to a bucket, and seal it with the epoch key. An image too large for one message is sealed as a
+   run of chunks instead.
 9. Send the public envelope to the relay. The relay broadcasts it to the other connections in the
    room and retains it if it is small enough.
 
@@ -132,9 +138,27 @@ main thread with a timer tolerance, and hands its result to the core over a chan
    connection count last went down. Nothing reports a departure, so the device that does not
    answer a lower count is the one that left.
 
-The list is kept in a small file beside the configuration, tagged with the account it belongs to,
-so "last seen two days ago" survives a restart and joining another account starts it over. Only
-the Home screen and the history's "from" line read it.
+The list is kept in a small file beside the configuration (`devices.json`), tagged with the account
+it belongs to, so "last seen two days ago" survives a restart and joining another account starts it
+over. It also holds each device's public keys, pinned from its signed card, which file offers and
+answers are checked against. The Home screen, the history's "from" line and file transfer read it.
+
+### 4.4 A file sent to another machine
+
+1. The sender hashes the file on a worker thread, then sends a signed offer to the one device it is
+   for, as a sealed `msg` through the relay. If this machine has an address on a local network, the
+   offer names it, and the sender listens on a port of its own while the offer waits.
+2. The receiver checks the signature against the key it pinned for that device, and refuses an
+   offer that is too old, from too far in the future, or made on a connection the sender has left.
+   Otherwise it asks the person, and nothing more happens until they answer.
+3. On Accept, the receiver tries the sender's local addresses for a moment. If one answers and the
+   first piece opens under the key made for this transfer, the file comes over that TCP connection.
+   If none answers, or nothing arrives within 15 seconds, the receiver answers through the relay
+   and the file comes in sealed pieces as `msg` frames, which the relay forwards and never stores.
+   With **Same Network Only** on, the relay is never used for the file, and the transfer fails
+   instead.
+4. The receiver writes to a partial file, checks the whole file's hash, and only then moves it into
+   place. A transfer that stops moving for a minute is abandoned.
 
 ## 5. Loop prevention, in three layers
 
@@ -144,10 +168,13 @@ the platform backends, so the logic is tested once rather than four times.
 1. **Origin id.** Every clip carries `device_id` inside the ciphertext. Drop anything with our own.
    This catches the case hashing misses: a reconnecting device that fetches the retained clip and
    would otherwise rebroadcast its own message.
-2. **Content hash ring.** Twenty entries of the hash of the normalized payload, inserted both when
-   we write a received clip and when we send a local one, each with a 10 to 30 second TTL. The TTL
-   is the important part: without it, deliberately copying the same text twice stops working, which
-   is a bug several competing tools have shipped.
+2. **Content hash ring.** Twenty entries of the hash of the normalized payload, inserted just
+   before we write a received clip to the clipboard, never when we send a local one, each expiring
+   after 15 seconds (`asli-core`'s default, used by the session in `asli-net`). The app keeps a
+   second ring of the same kind at the clipboard itself, with a 5 second TTL, so our own write is
+   recognised before it is logged or recorded in the history. The TTL is the important part:
+   without it, deliberately copying the same text twice stops working, which is a bug several
+   competing tools have shipped.
 3. **Platform sequence anchor.** Snapshot the operating system counter immediately after our own
    write and ignore the matching event. Available on Windows, macOS and X11. Wayland data-control
    has no owner field, so there only layers 1 and 2 apply.
@@ -186,8 +213,9 @@ honestly rather than pretending to be offline.
 
 ## 7. Configuration and secrets
 
-The root secret and the configuration are stored separately, and only the secret goes to
-the keychain.
+The keys and the configuration are stored separately, and only the keys go to the keychain: one
+entry holds the account key followed by this device's own key, so macOS asks once rather than
+twice.
 
 | Platform | Secret | Configuration |
 |---|---|---|
@@ -197,13 +225,18 @@ the keychain.
 
 The Linux case has a real failure mode that must be handled as a first class state rather than a
 panic: a bare Hyprland or Sway session with no `gnome-keyring-daemon` and no `kwallet` running has
-no Secret Service provider at all. The fallback chain is Secret Service, then an encrypted file in
-the configuration directory with a clear user facing explanation that it is weaker. See
-`THREAT_MODEL.md` for what that weakness actually means.
+no Secret Service provider at all. The fallback is a file, `secret.key` in the configuration
+directory. It is not encrypted: it is a plain file readable only by its owner (mode 0600 on Linux
+and macOS; on Windows the profile's own access control), and `asli status` says when it is in use
+and that it is weaker. See `THREAT_MODEL.md` for what that weakness actually means.
 
-Configuration holds the relay URL, launch at login, enabled content types, the size limit,
-notification preferences, the device id and the name this device announces to the others (empty
-meaning the computer's own name). It never holds key material.
+`config.json` holds `relay_url`, `max_content_bytes` (the largest clip to send), `notifications`,
+`autostart`, `device_id`, `keep_history` and `history_entries`, `device_name` (what this device
+announces to the others, empty meaning the computer's own name), `same_network_only`,
+`ask_right_away` (whether a file offer is asked about at once rather than only on Home), and
+`key_never_exported`, which records that this account's key was never shown in a retired join
+token. It never holds key material. Beside it are `state.json` (the outgoing sequence number),
+`devices.json`, `replay.json` (the replay guard's memory) and `history.bin`.
 
 ## 8. What is deliberately not here
 
@@ -211,8 +244,10 @@ meaning the computer's own name). It never holds key material.
   memory and forgets it.
 - **No synced history.** The history is local to each device and encrypted at rest. The relay
   never holds more than the one most recent clip.
-- **No peer to peer.** No mDNS, no NAT traversal, no libp2p. A relay is one moving part instead of
-  five, and it works on networks where discovery does not.
+- **No peer to peer for clips, and no discovery.** No mDNS, no NAT traversal, no libp2p. Clips
+  always go through the relay. Files go directly over the local network only when the offer, which
+  travels through the relay, names an address the receiver can reach; anything else falls back to
+  the relay.
 - **No plugin system, no scripting, no extension API.** The attack surface of a clipboard tool
   should be as small as its job.
 - **No telemetry.** Nothing is collected, so there is nothing to opt out of.

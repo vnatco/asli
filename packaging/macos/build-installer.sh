@@ -219,6 +219,7 @@ make_bundle() {
     install -m 755 "$BINARY" "$APP/Contents/MacOS/asli"
     install -m 644 "$HERE/Info.plist" "$APP/Contents/Info.plist"
     install -m 644 "$HERE/asli.icns" "$APP/Contents/Resources/asli.icns"
+    install -m 644 "$REPO_ROOT/LICENSE" "$REPO_ROOT/packaging/THIRD_PARTY_LICENSES.txt" "$APP/Contents/Resources/"
     printf 'APPL????' > "$APP/Contents/PkgInfo"
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"

@@ -6,318 +6,157 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing is tagged yet and there are no downloads. What exists today:
-
-### Working, and verified against a live relay
-
-- Text sync in both directions on Linux, over X11 and over Wayland.
-- Wayland through `ext-data-control-v1` with a `wlr-data-control` fallback.
-  Both are required: KDE removed the wlr protocol in Plasma 6.4, and older
-  wlroots compositors predate the ext one.
-- X11 through XFixes, which is also the GNOME path, because GNOME declines to
-  implement either data control protocol.
-- Images, sealed and sent in chunks, with the chunk index and count bound in
-  each chunk's associated data so a relay cannot reorder or truncate them
-  undetectably.
-- A tray icon through StatusNotifierItem, needing no GTK and no
-  libappindicator, only a D-Bus session.
-- Autostart on Linux through an XDG desktop entry.
-- Recovery from a relay restart, with full jitter backoff.
-- Content marked sensitive by a password manager is never read, let alone sent.
-
-- A window with six screens, opened from the tray: first run, join, the join token, history,
-  status and settings.
-- A local clipboard history, encrypted at rest.
-- One running instance per configuration. Launching again brings the running one forward instead
-  of starting a second connection.
-- `setup.sh --install` installs the binary, the application entry and icon, and launch at login,
-  and `--uninstall` removes all of it.
-
-- Windows: the daemon, tray, window and launch at login, with `asliw.exe`, a console free copy
-  of the program for login and the Start menu. `setup.ps1 -Install` installs, starts and
-  uninstalls it. Images are written to the clipboard as PNG and as a bitmap.
-
-- macOS: the daemon, the menu bar icon, the window and the login item (a launchd agent), with all
-  pasteboard access on the main thread. `setup.sh --install` builds `~/Applications/Asli.app`, so it
-  stays out of the Dock. Type checked from Linux; not yet run on a Mac.
-- `setup.sh --install` stops a running copy and starts the new one, so it also updates.
+The first release. Asli runs on Linux, Windows 10 and 11, and macOS 11 or later, and is in daily
+use on Linux, Windows 11 and macOS against the public relay.
 
 ### Added
 
-- Joining with a code and an approval, in place of the join string. **Add a Device** makes a code
-  that works once, for ten minutes, and carries no key. The new device types it, both devices show
-  the same six digits, and the account key crosses only once the person approves, sealed to the new
-  device alone. Someone who glimpses a code can neither join with it nor trick the new device into
-  joining an account of theirs. `asli add` and `asli join` do the same from a terminal. See protocol
-  section 18.
-- Every device has a key of its own, kept beside the account key. Devices sign a card saying who
-  they are, and each device's key is pinned the first time it is seen, so one device cannot take
-  another's place in the list.
-- Removing a device. **Remove** on Home, or `asli remove <name>`, gives every other device a new
-  account key sealed to its own key, and the removed device forgets the account. Local history moves
-  to the new key with everything else. Devices offline at the time, or still on an older version,
-  have to join again, and the window names them before anything happens.
-- Replacing the account key, for an account whose key was shown as a join string by an earlier
-  version, which may still be in a screenshot. Status offers it; `asli rekey` does it from a
-  terminal.
-- `asli devices` lists the devices on the account.
-- Sending a file to another device. Drop it on the window and pick the device, or press **Send
-  file** beside it on Home; `asli send <device> <file>` does the same from a terminal. The other
-  device shows who it is from, by that device's own key, and asks before anything is written
-  (`asli accept` and `asli decline` from a terminal). It moves through the relay in sealed pieces,
-  is never stored there, is checked against the hash the sender signed, and is saved under a name
-  the receiver makes safe, marked as downloaded. Up to 4 GiB a file. See protocol section 18.8.
-- Files between two devices on the same network go straight from one to the other, encrypted
-  under a key made for that transfer and sealed to the receiver, at the speed of the network. When
-  they cannot reach each other, the file goes through the relay instead. The first time it sends a
-  file, Windows may ask whether Asli may accept connections on private networks; saying no leaves
-  files going through the relay.
-- Same Network Only, in Settings. A device with it on approves a new device only when that device
-  reaches it on the local network, so a join code is useless to anyone elsewhere, and sends and
-  receives files only there, never through the relay. Clips still sync from anywhere.
-- Paired devices shows which version of Asli each device runs, and Status says when another device
-  runs a newer one than this. `asli devices` and `asli status` show it too, and the window shows its
-  own version at the foot of the sidebar. The version goes up with every change. When this device is
-  behind, the warning on Home has Download New Version, which opens the latest release in the
-  browser. A dropped file that no device can receive now says why, naming the devices
-  that need updating.
-- A device that joins another account says goodbye first, and the devices of the account it left
-  take it off their lists. A machine that joins again with its own key replaces its old keyless
-  entry, and an entry that cannot be removed the usual way has a Forget button.
-- Accepting a file asks where to save it, in the system's Save dialog, starting where the last one
-  went. A received file has Show in Folder, which opens its folder with the file selected and never
-  opens the file itself.
-- Add a Device has Copy Code, which copies the join code on this device only, and a request to join
-  has room to read.
-- Something waiting for you shows everywhere until it is dealt with: a count on Home for a file
-  offered here, a count on Add a Device for a device asking to join, a red dot on the tray icon, and
-  a notification when a device asks to join. All of them clear as soon as it is answered.
-- Full screen captures sync. Images up to 32 MB go, in paced pieces on the relay's bulk allowance,
-  where before anything over 700 KB was refused at both ends; text still syncs up to 700 KB, the
-  relay's limit for one message. Largest Clip to Sync offers 1, 4, 16 and 32 MB, and installs on
-  the old 700 KB default move to 32 MB. A copy too large to read is now notified instead of
-  vanishing without a word.
-- Device and file rows, the sidebar foot, and every icon, dot, badge and button that sits in
-  a row are centred to the pixel. Centring by position was ignored inside layouts and left items
-  2 to 3 pixels high.
-- Clicking the tray icon, or launching Asli again while it runs, opens Status, the main page,
-  instead of History.
-- The window is drawn on the GPU, which allows real shadows, glows and rounded gradients, and falls
-  back to the software renderer by itself where there is no working graphics driver.
-- A new look: the window is lit by the accent colours, cards are glass with hairline rings, the
-  primary buttons are gradients with a coloured glow, and words are set in Figtree and headings and
-  numbers in Outfit, both bundled. The sidebar shows how each screen stands under its name, and its
-  highlight glides between items. Status is now Home.
-- Sending on Home. Send File on a device takes one file or several and sends them straight there;
-  that device's row turns into Waiting for Confirmation with Cancel, then a progress bar, then a
-  moment of Sent, Declined or Cancelled, then Send File again. Files dropped on the window gather
-  under Ready to Send, between the connection and the devices, with a button for each device, All
-  Devices, and Done. Dragging files over the window from any screen shows Home.
-- Several files offered at once by one device are one question, Accept All and Decline All, saved
-  into a folder you choose.
-- Dropping files on the window works on Wayland too.
-- Files another device sends are asked about right away, with Accept and Decline: in a
-  notification with buttons on Linux, and a small window in the corner of the screen on Windows
-  and macOS, or there too when no notification service answers within a few seconds. It closes by
-  itself once answered anywhere. A switch in Settings, on by default.
-- Every label, button, title and menu item is in Title Case.
-- History, redone: clips grouped under Today, Yesterday or the day they were copied, each with a
-  tinted tile for its kind or a rounded thumbnail, the device it came from, when, and its size, with
-  the row lighting up when copied again.
-- Add a Device, redone: the three steps laid out with what happens at each, the time a code has
-  left counting down under its QR code, and the number to compare set large in the request.
-- Settings, redone: grouped into Relay, This Device, Files and History, each setting with a tile
-  that lights up when it is on. Save and Revert rise from the bottom only when something has
-  changed, and say Saved before sinking away.
-- The welcome cards, the drop overlay and the Join Another Account question in the same look, and
-  files waiting under Ready to Send have a file icon.
-- The tray menu's status line is in Title Case: Synced, 2 Connected.
-- The scrollbar keeps clear of the content pane's rounded corners and border: a slim thumb inset
-  from the edge, which shows while scrolling, when the pointer comes near, and briefly as a screen
-  opens, then fades. Dragging it now keeps the thumb under the pointer instead of running ahead.
-- Each device shows the mark of its operating system: Windows, Apple or the Linux penguin, from
-  Simple Icons (CC0), scaled and centred on the same grid as the other icons.
-- Icons sit exactly in the middle of their tiles. The device icon was drawn three and a half units
-  left of centre, and the bell, network, offline and back icons up to two units off; every icon is
-  now centred on its grid, and a tile sizes its icon to whole pixels.
-- One spacing around the content: the same 12 px gap from the pane to the window's edges and to the
-  sidebar, the first sidebar item level with the pane's top and the connection card level with its
-  bottom, and the logo, the sidebar's tiles and the connection dot on one centre line. Inside the
-  pane, every screen ends 28 px below its last card, the same as at the sides; Settings adds room
-  only while its save bar is up.
-- Waiting for Confirmation no longer shimmers. The device list was clipped to its rounded corners,
-  which made it a layer redrawn on every frame of the waiting animation, and its words moved by
-  up to a pixel as it was; the rows now round their own corners and the words hold still.
-- Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
-  device list and history, tells the other devices so they take it off their lists, and
-  returns to the first screen.
+#### Clipboard sync
 
-- Installers, one build script per operating system, each writing into `dist/` with the version
-  and architecture in the name and a `SHA256SUMS` over the set. `packaging/README.md` has the flow,
-  and `packaging/release.sh` uploads the result to a draft GitHub release.
-  - Linux: an AppImage that installs itself for the current user when opened, and starts Asli;
-    a `.deb`, an `.rpm` and a tarball, all from one machine with no containers. The binary is built
-    against glibc 2.28, so it runs on Debian 10, Ubuntu 18.10, RHEL 8 and anything newer rather
-    than only on the distribution that built it.
-  - Windows: a per user installer, with no administrator prompt, that installs both executables,
-    adds the Start menu entry, turns on start at login, registers an uninstaller in Settings, Apps,
-    and starts Asli. Unsigned, so SmartScreen warns once.
-  - macOS: a universal disk image for Apple silicon and Intel, signed with a Developer ID,
-    notarized and stapled when the signing variables are set.
-- The macOS bundle has an icon, `asli.icns`, in the installer and in `setup.sh --install` alike.
+- Text and images sync between your own machines, end to end encrypted with XChaCha20-Poly1305.
+  Text travels in one message, up to the relay's limit (700 KiB on the public relay); images up to
+  32 MiB travel in sealed pieces whose order and count are bound into each piece, so a relay
+  cannot reorder or truncate them unnoticed. **Largest Clip to Sync** in Settings lowers the cap.
+- Linux over X11 through XFixes, and over Wayland through `ext-data-control-v1` with a
+  `wlr-data-control` fallback. GNOME Wayland works through XWayland, because GNOME implements
+  neither data control protocol. Windows through the clipboard listener, writing images as PNG and
+  as a bitmap. macOS through a pasteboard poll on the main thread.
+- Content a password manager marks as sensitive is never read, sent or recorded. There is no
+  setting that changes this.
+- Three layers keep a received clip from being sent back: the sender's device id inside the
+  ciphertext, a short lived hash of what was just written, and the platform's own change counter
+  where there is one. Copying the same text twice on purpose still syncs.
+- Replay protection that survives restarts: message ids and per device sequence numbers are saved,
+  so a relay cannot resend old clips, and sync does not depend on clocks being exact. A device
+  whose clock is far off is told so.
+- A copy made while offline, or as the connection dropped, is sent on reconnecting, newest only.
+- The relay keeps the most recent clip of each account, up to 64 KiB, for up to 24 hours. A device
+  that was off fetches it only when asked, with **Paste Last Synced Clip** in the tray menu or
+  **Paste It Here** on Home, so it never overwrites a newer local copy.
 
-### Changed
+#### Devices and joining
 
-- The join string is retired: it was the account key itself, and anyone who ever saw one held the
-  account for good. Current versions neither show nor accept it, and `asli show` now makes a join
-  code. A device joining gets a new device id along with its new keys.
-- The relay forwards a new sealed message type, `msg`, between the devices of a room or to one
-  connection, never storing it. It carries device cards, joining and key changes, and is what file
-  transfer will use. The relay must be updated before clients use it; older clients ignore it.
+- **Create a New Account** makes a 32 byte account key, kept in the OS keychain (Windows
+  Credential Manager, macOS Keychain, Linux Secret Service), never shown. Where Linux has no
+  Secret Service, it falls back to an owner only file and `asli status` says so.
+- **Add a Device** makes a join code that works once, for ten minutes, and carries no key. The new
+  device types it under **Join an Existing Account**, both show the same six digits, and the
+  account key crosses only once the person approves, sealed to the new device's own key. **Copy
+  Code** copies the code. `asli add` and `asli join` do the same from a terminal; `asli join` reads
+  the code from stdin, never the command line.
+- Every device has a key of its own beside the account key, and signs a card naming itself and its
+  operating system. Each device's key is pinned the first time it is seen, so one device cannot
+  take another's place.
+- Home lists every device on the account, with its operating system mark, whether it is online or
+  when it was last seen, and the version of Asli it runs. When another device runs a newer
+  version, Home says so and offers **Download New Version**.
+- **Remove** on Home, or `asli remove`, gives every other device a new account key sealed to its
+  own key; the removed device can read nothing sent after. Devices offline at the time, or on a
+  version too old to take part, have to join again, and the window names them first. `asli rekey`
+  replaces the key and keeps every device.
+- **Leave This Account** in Settings, or `asli leave`, signs this device out, deleting its account
+  key, device list and history, and the other devices take it off their lists. **Join Another
+  Account** does the same before joining a new one.
+- **Same Network Only** in Settings: a device with it on approves a new device only when that
+  device reaches it on the local network, and sends and receives files only there. Clips still
+  sync from anywhere.
 
-- Windows builds link the C runtime statically, so they start on a machine without the Visual C++
-  redistributable.
-- On Linux, `setup.sh --install` and `--uninstall` now run `packaging/linux/install.sh`, the same
-  script the AppImage runs, and install a copy of it at `~/.local/share/asli/install.sh` so
-  uninstalling needs nothing else.
-- The Linux login and menu entries name the program in `TryExec`, so a desktop ignores them once the
-  program has been removed, as a package manager removing the `.deb` or `.rpm` leaves them behind.
-- The Arch packages install the icon their menu entry names, depend on fontconfig, and `asli-bin`
-  follows the new tarball name. It is x86_64 only, since no aarch64 tarball is built.
-- The window is redesigned throughout: its own title bar, a sidebar with icons and the sync state
-  at its foot, a welcome screen with two ways in, a join screen with a way back, a status card
-  whose colour, label and action follow the connection, and new icons for the application and the
-  tray. The tray icon carries the state as a badge: green when synced, grey when paused, red when
-  the relay cannot be reached, blinking while connecting.
-- Devices now tell each other their name and operating system, sealed like a clip, and Status
-  lists every device on the account with whether it is online or when it was last seen. The name
-  defaults to the computer's own and can be changed in Settings. The relay forwards these
-  announcements without storing them and cannot read them. See section 7.12 of the protocol.
-- History says which device each clip came from, shows images as thumbnails with their size, and
-  can copy an entry to this device alone without sending it anywhere.
-- The join string's QR code uses the lowest error correction level, which is enough for a screen
-  and makes its modules larger and easier for a camera to read.
-- Sync no longer depends on clocks being right. The message ids and sequence numbers that refuse
-  a replayed clip are now saved across restarts, so the freshness window, which used to be two
-  minutes and carried that job alone, is now a 24 hour sanity bound. A device in the wrong time
-  zone syncs normally, and one more than 12 hours off is told so.
+#### File transfer
 
-### Fixed
+- Files up to 4 GiB each, to one device at a time. Drop files on the window, where they wait under
+  **Ready to Send** for a device or **All Devices**, or use **Send File** beside a device on Home,
+  or `asli send <device> <file>`.
+- The receiver sees who sent it, checked against that device's pinned key, and nothing is written
+  until someone accepts. With **Ask About Files Right Away** on (the default) the question comes at
+  once, in a notification with buttons on Linux and a small window in the corner of the screen on
+  Windows and macOS; it is always on Home too, and `asli transfers`, `asli accept` and
+  `asli decline` answer from a terminal. Several files from one device are one question.
+- Accepting asks where to save. The file is written under a name the receiver makes safe, checked
+  against the hash the sender signed, and marked as downloaded from the internet on Windows and
+  macOS. **Show in Folder** opens its folder and never the file.
+- On the same local network the file goes directly between the two devices over TCP, sealed under
+  a key made for that transfer. Otherwise, or when nothing arrives directly within 15 seconds, it
+  goes through the relay in sealed pieces that are never stored there.
+- Offers are refused when more than a day old, more than a day in the future, or made on a
+  connection the sender has since left. A waiting offer ends once the other device has been gone
+  for 20 seconds, and a transfer that stops moving for a minute is abandoned.
 
-- A clip of several lines drew past its row in History, over the next one, and pushed its time
-  and size out of view. A preview is now always one line: line breaks, tabs and other runs of
-  whitespace become single spaces, and the row says how many lines the clip has. Previews are
-  worked out from the stored text each time the list is drawn, so entries saved before this are
-  fixed too. Each row also clips what it draws, so nothing can paint outside it again.
+#### History
 
-- On Windows, a window closed and opened again drew only the text in its lists: no title bar, no
-  sidebar, no card backgrounds, with the desktop showing through. The software renderer repainted
-  only what had changed, while Windows had discarded the rest. A closed window is now dropped and a
-  new one built at the next open, in the same place and size, so every open paints the whole
-  window. Close and reopen were checked under Wayland and X11, sixteen times each, with memory
-  flat; not yet on Windows or macOS.
+- A local list of what was copied on any device, encrypted at rest under a key derived from the
+  account key, 100 entries by default, grouped by day with thumbnails for images, the device each
+  came from, and its size. Clicking an entry puts it back on every device's clipboard, or on this
+  device only. It can be turned off and cleared, and it moves to the new key when the account is
+  rekeyed.
 
-- The Windows installer's Start menu entry failed with "Windows can't find ..." and had no icon.
-  NSIS wrote it with an environment variable block naming the target as `%USERPROFILE%\...`, which
-  Windows preferred to the real path and could not resolve. Every shortcut is now written by
-  `asli.exe` itself, the same code as the working Startup entry, and read back and checked after
-  writing, at the end of the install, and when the installer is built.
-- On a dark Start menu or taskbar the Windows icon was a near black tile at small sizes. Its 16 to
-  48 pixel sizes are now drawn for contrast, a bright tile with a light mark, and the running
-  window uses them rather than scaling down the 256 pixel picture.
+#### Window and tray
 
-- `asli join` no longer takes the token as a command line argument. `/proc/<pid>/cmdline` is
-  world readable on Linux, so any other local user could read the account key out of the process
-  list while a join was running, and the shell wrote it to its history file as well. The token is
-  read from stdin now, and the old form is refused with an explanation rather than a parser error
-  that printed the key back out.
-- The join string is no longer drawn until it is asked for. Opening the Join String screen shows
-  a Reveal button, and leaving the screen hides the string again, so a window left open on it is
-  not a standing display of the account key.
-- A device's sequence number can no longer jump an implausible distance in one step. The high
-  water mark is persisted and never lowered, so a single clip claiming a peer's device id with
-  `seq = u64::MAX` parked that peer's mark out of reach and stopped it syncing on every device,
-  across restarts, until the replay store was edited by hand.
-- The per device sequence map is bounded. It was keyed by a sender chosen device id with no cap,
-  which made it the one collection in the tree that an account member could grow without limit.
-- A decrypted clip is wiped when it is dropped rather than left legible in a freed allocation,
-  where it reached swap and hibernation images. This covers clips the crypto layer still owns:
-  ones the replay guard rejected, ones of a content type the client does not handle, and every
-  error path.
-- The relay caps a frame at four kilobytes until the connection has authenticated. A `hello` is
-  under two hundred bytes, and anyone who had done nothing but open a socket could previously
-  make the relay parse a megabyte of JSON per frame.
-- `SECURITY.md` has a real security contact address in place of the TODO placeholder.
-- On Linux, a notification service that never answered froze the tray: every menu click after the
-  first notification did nothing. Notifications are now sent from a thread of their own.
-- A connection left dead by sleep or a network change was never noticed: the tray said Synced
-  and nothing arrived. The client now pings, and reconnects after 70 seconds of silence.
-- A copy made just as the network dropped was lost with the connection. It is now sent again on
-  the next one unless the relay confirmed it. Copies made while offline are no longer thrown away
-  on reconnect, and a backlog goes out as its newest copy only.
-- After a few disconnects every reconnect waited the full 30 seconds, and after one quota close
-  an hour, for the rest of the run. A stable connection now resets the pacing.
-- The history list did not update while open.
-- The notifications switch, size cap and relay address took effect only after a restart.
-- The relay: anyone could fill its room table for a day; a slow receiver was never disconnected;
-  a clip parked behind a slow link could arrive after a newer one; images to slow receivers
-  arrived broken; and per room quota state was never reclaimed.
-- Paste It Here did nothing: a stored clip that was asked for was treated like one that was not,
-  and a stored clip this device had sent itself was dropped without a word.
-- The Windows executables and window had the generic program icon.
-- Clicking the tray icon did not bring an open window to the front.
-- The Status and Join screens could not scroll, so a short window cut them off.
-- The join token clear could erase something copied after it, such as a password from a password
-  manager or a file. The clear now happens only if the clipboard still holds the token.
-- Restoring a history entry did not sync it to the other devices.
-- On Wayland the writer stalled for two seconds after every write, and a hung application pasting
-  a large image could freeze it for good. Offers for the middle click selection leaked.
-- On X11 content over 1 MiB arrived cut, a copy made during a read was lost, large incremental
-  transfers were abandoned, and one failed reply ended the writer.
-- A clip queued at the wrong moment could wait unwritten until the next one arrived, and a clip
-  queued just before the token clear was dropped.
-- A connection that stayed up for more than 1000 copies, then crashed, restarted below sequence
-  numbers it had already used, and its clips were dropped as replays.
-- A locked keychain at login looked like no account, and first run offered to replace it.
-- When the relay refused this device for good, the app vanished without saying why. It now stays
-  in the tray with the reason.
-- Opening the app from Finder, Launchpad or by double clicking `asliw.exe` did nothing.
-- Windows: large screenshots offered only as bitmaps were refused, some bitmaps decoded as
-  transparent or shifted, and Quit left a dead icon behind.
-- macOS: every copy could raise the pasteboard alert when reads were not allowed, and each
-  notification left a zombie process.
-- Login and menu entries broke on install paths containing spaces or percent signs, and a login
-  entry pointing at a binary that had moved was never repaired.
-- Our own clipboard writes could come back through the watcher on Wayland, and be logged as queued
-  and recorded in the history twice. The session never sent them, but the history was wrong.
+- A tray icon (StatusNotifierItem on Linux, needing only a D-Bus session) whose badge shows the
+  state: synced, paused, offline, connecting, and a red dot while something waits for an answer.
+  Its menu has Pause Sync, Paste Last Synced Clip, Add a Device, Join Another Account, History,
+  Home, Settings, Copy Diagnostics and Quit.
+- A window with Home, History, Add a Device and Settings, drawn by Slint on the GPU, falling back
+  to the software renderer where there is no working graphics driver. Text is set in Figtree,
+  Outfit and JetBrains Mono, all bundled.
+- **Copy Diagnostics** puts a short report on the clipboard, with no clipboard content in it.
+- Dropping files on the window works on Windows, macOS, X11 and Wayland.
+- One running instance per configuration; launching again brings the window forward.
+- Start at login: an XDG autostart entry on Linux, a Startup folder shortcut on Windows, a launchd
+  agent on macOS.
 
-- On a fresh install with no account, the first run window never opened. Work scheduled for the
-  window before its event loop started was silently dropped.
-- On Wayland, every received clip after the first was advertised on the clipboard but pasted as
-  nothing. The compositor's cancellation of our previous write arrived after the new write and
-  cleared it.
-- Launch at login could start Asli twice, because the app and the uninstaller used different names
-  for the same entry.
+#### Command line
 
-### Written but unverified
+- `asli create`, `join`, `add`, `devices`, `remove`, `rekey`, `leave` and `reset` for the account;
+  `send`, `transfers`, `accept` and `decline` for files; `status`, `autostart`, `run` and `tray`
+  for the rest. `asli --help` describes each.
 
-- Windows on real hardware. The Windows build has run under Wine against the live relay: text in
-  both directions, no echo of received clips, the key in Credential Manager, the login entry, the
-  tray, and a second launch handing over to the first. Wine is not Windows, and the window itself
-  could not be drawn there, so none of it counts until it has run on Windows 11.
-- The macOS backend. Same position: no AppKit call in it has been observed running, and the
-  behaviour of the macOS 15.4 pasteboard alert is inferred from documentation rather than observed.
+#### Relay
 
-- The installer build scripts on real hardware. The Linux one has run, and its AppImage installed,
-  started and uninstalled in an isolated session on Arch. The Windows installer has only been
-  compiled and run under Wine, from a cross built binary, and `build-installer.ps1` has not run on
-  Windows. The macOS script has not run at all: no signing, notarization or disk image has been
-  made yet.
+- A Node relay with one runtime dependency (`ws`), no database and nothing on disk. Devices prove
+  themselves with an Ed25519 signature over a fresh challenge, and the room id is a hash of the
+  public key, so the relay holds no credential.
+- It forwards clips, image pieces, device announcements and sealed device to device messages
+  (`msg`), which carry device cards, joining, key changes and files.
+- Every limit is an environment variable, checked at startup: frame size (4 KiB until a connection
+  has authenticated), per connection rates, a 50 MiB daily clip quota per room, separate bulk
+  budgets for files and images of 4 GiB per room and 32 GiB per relay a day, connection caps, and
+  backpressure that disconnects a receiver that cannot keep up.
+- Logs are built from an allowlist of named fields, with room ids salted per process.
+- `server/docker-compose.yml` runs it behind Caddy for self hosting.
 
-### Known gaps
+#### Security
 
-- No release has been tagged, so no artifact has been published.
+- Decrypted content is wiped from memory when dropped, including on every error path.
+- Sequence numbers cannot be pushed out of reach by one hostile clip, and every per device table
+  is bounded.
+
+#### Installers
+
+- Linux: an AppImage that installs itself for the current user, a `.deb`, an `.rpm` and a
+  `.tar.gz`, all built against glibc 2.28. Arch packages `asli` and `asli-bin` in
+  `packaging/aur`.
+- Windows: a per user installer with no administrator prompt, which adds the Start menu entry,
+  turns on start at login, registers an uninstaller and starts Asli.
+- macOS: a universal disk image for Apple silicon and Intel, signed with a Developer ID, notarized
+  and stapled.
+- Every package carries `THIRD_PARTY_LICENSES.txt`. `setup.sh` and `setup.ps1` build and install
+  from source.
+
+### Known limitations
+
+- No forward secrecy. Removing a device stops it reading what comes after; what it already
+  received, it keeps.
+- Clips and announcements are authenticated by the account key only, not signed by each device, so
+  any device on the account could claim to be another in a clip.
+- The Windows installer is unsigned, so SmartScreen warns once. The first time a file is sent,
+  Windows may ask whether Asli may accept connections on private networks; saying no leaves files
+  going through the relay.
 - Dragging Asli to the Trash on macOS leaves its launchd agent behind, pointing at nothing. It
-  starts nothing, but it stays until removed by hand or Start at login is turned off first.
-- macOS on real hardware, including the three pasteboard permission questions.
-- No libsodium interop check yet; the frozen vectors pin our own output only.
+  starts nothing, but stays until removed by hand or **Start at Login** is turned off first.
+- The behaviour of the macOS 15.4 pasteboard alert is inferred from documentation; it is not
+  enabled by default and has not been seen.
+- river cannot be supported: it implements no clipboard manager protocol. On GNOME Wayland sync
+  depends on XWayland.
+- Linux builds are x86_64 only.
+- The frozen test vectors pin this implementation's own output; no check against libsodium has
+  been done yet.

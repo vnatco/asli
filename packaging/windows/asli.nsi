@@ -98,6 +98,7 @@ Section "Asli" SecMain
   File "${SRCDIR}\asliw.exe"
   File "/oname=asli.ico" "${REPO}\packaging\windows\asli.ico"
   File "/oname=LICENSE.txt" "${REPO}\LICENSE"
+  File "/oname=THIRD_PARTY_LICENSES.txt" "${REPO}\packaging\THIRD_PARTY_LICENSES.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; The Start menu entry, written by asli.exe with the same code that writes the Startup one, so
@@ -175,6 +176,7 @@ Section "Uninstall"
   Delete "$INSTDIR\asliw.exe"
   Delete "$INSTDIR\asli.ico"
   Delete "$INSTDIR\LICENSE.txt"
+  Delete "$INSTDIR\THIRD_PARTY_LICENSES.txt"
   Delete "$INSTDIR\uninstall.exe"
   ; Only if empty, so nothing a person put there is lost.
   RMDir "$INSTDIR"

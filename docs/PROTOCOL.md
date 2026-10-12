@@ -1,7 +1,6 @@
 # Asli wire protocol, version 1
 
 Status: **normative specification, implemented.** The Rust client and the Node relay both speak this protocol, and the two are checked against each other by shared test vectors in `testdata/vectors.json`. Text and images have been exercised against a live relay.
-Rust source.
 
 Protocol version: `1`. Suite identifier: `asli-v1`.
 
@@ -15,26 +14,31 @@ This document specifies:
 
 - the transport and framing between an Asli client and an Asli relay,
 - the key hierarchy derived from a device's root secret,
-- the join token format used for onboarding,
+- the join code, approval and grant used to add a device (section 18.5), and the retired join token
+  it replaced (section 5),
 - the authentication handshake,
 - the authenticated encryption of clipboard events,
 - the validation every receiver must perform,
 - the relay's obligations, limits and retention rules,
-- close codes, error codes and reconnection behaviour.
+- close codes, error codes and reconnection behaviour,
+- device keys, removing a device, and sending a file between devices (section 18).
 
 This document does not specify: clipboard capture per operating system, tray behaviour, keychain
-storage, or the relay's internal data structures. Those live in the architecture notes, and
-in `docs/PLATFORM_NOTES.md` once written.
+storage, or the relay's internal data structures. Those live in `docs/ARCHITECTURE.md` and
+`docs/PLATFORM_NOTES.md`.
 
 ### 1.1 Design constraints that explain the shape of this protocol
 
 1. The relay is untrusted. It MUST be able to route and rate limit without learning anything about
    clipboard content, and it MUST NOT hold any value that would let it, or anyone who steals its
    state, join a room.
-2. Onboarding is one string. Every device derives everything from the same 32 byte root secret, with
-   no per-device enrollment step and no server-side registration.
-3. The protocol is versioned in-band so that a future change (binary framing, image chunking, key
-   rotation, per-device keys) does not require a flag day.
+2. There is no server-side registration. Every device on an account derives the room identity and
+   the content keys from the same 32 byte root secret. As first designed, onboarding was one string
+   that carried that secret (section 5); it has since been replaced by a single use join code and an
+   approval on a device already on the account, which hands the secret over sealed to the new
+   device's own key (section 18.5).
+3. The protocol is versioned in-band so that a later change (chunked images, device keys, device to
+   device messages) does not require a flag day.
 
 ---
 
@@ -82,9 +86,9 @@ Implementations MUST NOT accept base64url (`-` and `_`) as an alternative in the
 MUST NOT emit it. A single encoding is specified deliberately, because accepting two invites a
 decoder mismatch that would surface as an authentication failure with no useful diagnostic.
 
-Note that the join token (section 5) and the `room_id` string (section 4.4) use Crockford base32
-instead, for human handling and QR density. Those are the only two exceptions, and neither travels in
-the JSON envelope as base64.
+Note that the join code (section 18.5), the retired join token (section 5) and the `room_id` string
+(section 4.4) use Crockford base32 instead, for human handling. Those are the only exceptions, and
+none travels in the JSON envelope as base64.
 
 ---
 
@@ -158,12 +162,14 @@ send binary frames.
 
 XChaCha20-Poly1305 has no RFC. Its normative reference, `draft-irtf-cfrg-xchacha`, expired without
 becoming a standard. The de facto specification is libsodium's implementation, so an implementation
-MUST verify its output against libsodium (section 16, layer 3) rather than assuming compatibility.
+SHOULD verify its output against libsodium rather than assume compatibility. The reference
+implementation has not done so yet: that check is planned (section 16, layer 3).
 
 ### 4.2 Key hierarchy
 
 ```
-secret          32 bytes, OS CSPRNG, stored in the OS keychain, never transmitted after onboarding
+secret          32 bytes, OS CSPRNG, stored in the OS keychain, never transmitted except sealed
+                to one device's own key in a join grant or a rekey (section 18)
 
 PRK             = HKDF-Extract(salt = "asli/v1/root-salt", IKM = secret)          -> 32 bytes
 sign_seed       = HKDF-Expand(PRK, info = "asli/v1/device-sign",            L = 32)
@@ -208,7 +214,7 @@ root secret. Two consequences are load bearing:
 
 ### 4.4 Crockford base32
 
-`room_id` and the join token use Crockford base32.
+`room_id`, the join code and the retired join token use Crockford base32.
 
 | Property | Value |
 |---|---|
@@ -216,7 +222,7 @@ root secret. Two consequences are load bearing:
 | Excluded letters | `I`, `L`, `O`, `U` |
 | Case emitted | Uppercase |
 | Padding | None |
-| Check symbol | Not used (this protocol carries its own checksum in the join token) |
+| Check symbol | Not used (the join code and the join token carry their own checksum) |
 
 Encoders MUST emit uppercase without padding. Decoders MUST accept lowercase, MUST map `I` and `L` to
 `1` and `O` to `0` as Crockford specifies, and MUST reject `U` and any other character outside the
@@ -308,7 +314,8 @@ join tokens.
    auth_ok      auth_fail  -> close (see section 12)
        |
        v
-   [READY]  clip, fetch_last, presence, ping, pong, error
+   [READY]  clip, clip_begin, clip_chunk, clip_end, announce, msg,
+            fetch_last, presence, ping, pong, error
 ```
 
 Requirements:
@@ -375,7 +382,7 @@ Client to server. MUST be the first message.
 | `type` | string | | yes | `"hello"` |
 | `suites` | array of string | | yes | Suites the client supports, in preference order. MUST contain at least `"asli-v1"` |
 | `enc` | array of string | | yes | Envelope encodings supported. v1 clients MUST send exactly `["json"]` |
-| `client` | string | | no | Short client identifier and version, for example `"asli/0.1.0"`. MUST NOT contain a hostname, username, or any other identifying value |
+| `client` | string | | no | Short client identifier and version. The reference client sends `"asli/"` and its version, for example `"asli/1.0.0"`. MUST NOT contain a hostname, username, or any other identifying value |
 
 ```json
 {
@@ -383,7 +390,7 @@ Client to server. MUST be the first message.
   "type": "hello",
   "suites": ["asli-v1"],
   "enc": ["json"],
-  "client": "asli/0.1.0"
+  "client": "asli/1.0.0"
 }
 ```
 
@@ -470,7 +477,7 @@ Server to client. The connection enters `[READY]`.
 |---|---|---|---|---|
 | `v` | integer | | yes | `1` |
 | `type` | string | | yes | `"auth_ok"` |
-| `conn_id` | string | opaque, at most 64 characters | yes | Server assigned connection identifier, for diagnostics and log correlation |
+| `conn_id` | string | opaque, at most 64 characters | yes | Server assigned connection identifier, for diagnostics, log correlation and addressing a `msg` (section 7.13). The reference relay issues `c_` and 8 lowercase hex digits |
 | `peers` | integer | | yes | Number of connections currently in the room, including this one |
 | `has_retained` | boolean | | yes | Whether the relay currently holds a retained clip for this room |
 | `stored_at` | integer | | no | Server receive time of the retained clip, milliseconds since the Unix epoch. Present only when `has_retained` is true |
@@ -479,7 +486,7 @@ Server to client. The connection enters `[READY]`.
 {
   "v": 1,
   "type": "auth_ok",
-  "conn_id": "c_9fK2xQ",
+  "conn_id": "c_3f9a1c2e",
   "peers": 2,
   "has_retained": true,
   "stored_at": 1789455600000
@@ -655,7 +662,7 @@ same fields, and differ only in position: `clip_begin` is index 0 of a message w
 
 A sender MUST emit chunks in ascending index order on one connection, and MUST NOT interleave two
 chunked messages. A receiver MUST NOT rely on either: ordering is enforced cryptographically by
-section 9.5, not by arrival order.
+section 9.6, not by arrival order.
 
 ### 7.12 `announce`
 
@@ -728,9 +735,9 @@ without a disconnect:
 - A client that does not know `announce` receives one as an unknown type, which section 14 already
   requires it to ignore.
 - A relay that does not know `announce` answers it with `error` `UNKNOWN_TYPE` and keeps the
-  connection open. `announce` is the only type a conforming client sends that a conforming relay can
-  fail to know, so a client that has announced on the current connection MUST treat that error as
-  "this relay does not forward announcements": it absorbs the error rather than surfacing it, and
+  connection open. `announce` and `msg` (section 7.13) are the only types a conforming client sends
+  that a conforming relay can fail to know, so a client that has announced on the current connection
+  MUST treat that error as "this relay does not forward announcements": it absorbs the error rather than surfacing it, and
   sends no further announcement until its next connection, which may be to an updated relay. The
   cost against an old relay is one message per connection.
 - No field is added to any existing message. Every v1 message rejects unknown fields, so advertising
@@ -777,7 +784,10 @@ one opaque type for all of them, and a kind added later needs no relay change.
   under backpressure would strand a device with nothing saying why, so a receiver already past the
   hard backpressure limit is disconnected instead, as for chunks (section 11.5), and recovers by
   reconnecting.
-- The room quota is charged.
+- It is charged to the bulk transfer budgets of section 11.4 (4 GiB per room and 32 GiB per relay in
+  any 24 hours), not to the room quota, and for what leaves the relay: a `msg` to the whole room is
+  charged once per receiving connection. When a budget is spent the relay answers `error`
+  `QUOTA_EXCEEDED` and keeps the connection open.
 
 `conn_id` values are the relay's own, per connection, and say nothing about the device. A relay that
 addresses connections differently MUST still accept exactly the `conn_id` it issued.
@@ -848,7 +858,7 @@ AAD is a fixed 51 byte, length prefixed byte string. It MUST NOT be serialized J
 ```
 AAD = "asli/v1/aad"                 (11 bytes)
    || u8(v)                          protocol version                  (1)
-   || u8(type_code)                  1 for clip, 5 for announce       (1)
+   || u8(type_code)                  1 clip, 5 announce, 6 msg        (1)
    || u32be(epoch)                                                     (4)
    || u8(16) || room_id_bytes                                          (1 + 16)
    || u8(16) || msg_id                                                 (1 + 16)
@@ -879,12 +889,12 @@ header length = 1 + 1 + 17 + 8 + 8 + 4 = 39 bytes
 | Field | Type | Meaning |
 |---|---|---|
 | `inner_version` | u8 | `1`. Independent of the protocol version, so the sealed layout can evolve separately |
-| `content_type` | u8 | `1` = `text/plain; charset=utf-8`. `2` = `image/png`, specified but not implemented in v1 |
+| `content_type` | u8 | `1` = `text/plain; charset=utf-8`. `2` = `image/png` (section 9.7) |
 | `device_id` | 16 bytes | Random, generated once per device installation, persisted. Never sent outside the ciphertext |
 | `seq` | u64be | Per device monotonic counter, persisted across restarts, incremented once per sent clip |
 | `ts_ms` | u64be | Client wall clock at capture, milliseconds since the Unix epoch |
 | `content_len` | u32be | Length of `content` in bytes, so de-padding needs no heuristics |
-| `content` | bytes | UTF-8 text for `content_type` 1 |
+| `content` | bytes | UTF-8 text for `content_type` 1, PNG bytes for `content_type` 2 |
 | `padding` | zero bytes | Length is `padded_len - 39 - content_len` |
 
 Text content MUST be normalized before sealing: strip a UTF-8 BOM, strip a single trailing NUL,
@@ -948,9 +958,7 @@ diagnostics, and MUST NOT be retried or reported to the relay. A verification fa
 corruption or an active attack, and neither warrants a response that would confirm anything to the
 relay.
 
----
-
-### 9.5 Sealing and opening a chunk
+### 9.6 Sealing and opening a chunk
 
 A chunked message is encoded and padded exactly as a single clip would be, by section 9.2 and
 section 9.3, and only then split. That order matters: padding the whole message hides the true
@@ -995,7 +1003,7 @@ Receiver rules, all of which MUST hold:
   plaintext decodes. A partial assembly is discarded.
 - `chunk_count` above 4096 is rejected outright, so a hostile count cannot drive an allocation.
 
-### 9.6 Image content
+### 9.7 Image content
 
 Images travel as PNG and nothing else in v1. One format on the wire means no transcoding
 ambiguity, no format sniffing on the receiving side, and no second decoder to harden. A client that
@@ -1031,10 +1039,12 @@ bound the number of `device_id` values it tracks, because `device_id` is chosen 
 an account member can otherwise mint them without limit; the reference client keeps 64 and evicts
 the oldest.
 
-Note the limit of checks 4 and 4b, honestly. Every device in a room shares one signing key, so a
-forged `seq` from a room member is indistinguishable from an honest one, and the bound limits the
-damage rather than preventing it. Per device signing keys would fix it, along with the
-unauthenticated `announce` of section 7.12, and both are left to a future version.
+Note the limit of checks 4 and 4b, honestly. Clips are sealed under the account key alone and carry
+no per device signature, so a forged `seq` from a room member is indistinguishable from an honest
+one, and the bound limits the damage rather than preventing it. Devices now have keys of their own
+(section 18.1), and the device card, the file offer and answer, and the other section 18 messages
+are signed with them, but clips and the older `announce` of section 7.12 are not: signing clips per
+device is left to a future version.
 
 A receiver still running the old windows is compatible with one running these, since nothing on
 the wire changed: it is only less tolerant of clocks.
@@ -1048,8 +1058,8 @@ the same window, which it could already do by dropping it.
 ### 10.1 Retained clips
 
 A clip delivered with `retained: true` MUST NOT be written to the system clipboard automatically on
-connect. The client SHOULD offer it as an explicit action, for example a tray item reading "Paste
-last synced clip".
+connect. The client SHOULD offer it as an explicit action; the reference client has a tray item,
+Paste Last Synced Clip, which sends `fetch_last` and writes what comes back.
 
 If an implementation does apply retained clips automatically, it MUST compare the inner `ts_ms`
 against the timestamp of the last clip applied locally and MUST NOT overwrite a newer local
@@ -1075,7 +1085,8 @@ event its own write produces can be suppressed.
 ### 11.1 Forwarding
 
 - The relay forwards `clip`, the three chunk types and `announce` to every connection in the room
-  except the sender.
+  except the sender, and `msg` either to every connection in the room except the sender or, with
+  `to`, to that one connection (section 7.13).
 - The relay MUST NOT forward any other message type between clients.
 - The relay MUST NOT decrypt, inspect, transform, re-encode or persist plaintext, because it holds no
   key capable of any of that. It MUST NOT log `ct`, `n`, `sig`, `pub_key` or any decoded form.
@@ -1171,7 +1182,7 @@ The 4000 to 4999 range is reserved for private application use and requires no r
 | 4007 | Rate limited | no | Back off with a 60 second floor |
 | 4008 | Room daily quota exceeded | no | Back off with a 1 hour floor, surface it in the tray |
 | 4009 | Too many connections (IP, room or global) | no | Back off with a long floor |
-| 4010 | Server shutting down | no | Reconnect with backoff and jitter |
+| 4010 | Server shutting down. Reserved: the reference relay closes with 1001 when it shuts down, and never sends 4010 | no | Reconnect with backoff and jitter |
 
 Codes 4002, 4003 and 4004 are **permanent**. A client MUST represent them as explicit terminal states
 in its connection state machine rather than letting "do not retry" be an emergent property. A client
@@ -1186,7 +1197,7 @@ different meaning in a later version.
 | Code | Meaning | Connection stays open |
 |---|---|---|
 | `RATE_LIMITED` | A rate limit tier was exceeded. `retry_after_ms` is present | yes |
-| `QUOTA_EXCEEDED` | The room's daily byte quota is exhausted. `retry_after_ms` is present | yes |
+| `QUOTA_EXCEEDED` | The room's daily byte quota is exhausted, or one of the daily bulk transfer budgets of section 11.4, the room's or the relay's. `retry_after_ms` is present. For the room quota on clips and announcements the relay then closes with 4008; for a bulk budget the connection stays open | yes, except as noted |
 | `MESSAGE_TOO_LARGE` | The message exceeded `max_frame_bytes` or another announced limit | yes |
 | `MALFORMED` | The message failed validation but not fatally | yes |
 | `UNKNOWN_TYPE` | The `type` field is not in the section 7 registry | yes |
@@ -1233,7 +1244,7 @@ Requirements:
 | `epoch` in the public header, bound in AAD | Key rotation without re-onboarding |
 | `inner_version` inside the ciphertext | The sealed layout can change independently of the envelope |
 | Type code registry, section 7 | A future chunked message cannot collide with a v1 `clip` in AAD |
-| `error` `UNKNOWN_TYPE` on a type the client added later | How a client learns that the relay predates `announce`, section 7.12 |
+| `error` `UNKNOWN_TYPE` on a type the client added later | How a client learns that the relay predates `announce` or `msg`, sections 7.12 and 7.13 |
 
 Compatibility policy:
 
@@ -1248,12 +1259,12 @@ Compatibility policy:
 ### 14.1 What rotation does and does not provide
 
 Bumping `epoch` derives a fresh `enc_key`. Because every device derives any epoch from the root
-secret, a device that was offline during a rotation catches up with no coordination, which preserves
-the stateless property that makes one string onboarding possible.
+secret, a device that was offline during a rotation catches up with no coordination.
 
-Rotation does **not** provide device revocation. A revoked device still holds the root secret and can
-derive every past and future epoch. In v1, revocation means: create a new account, re-onboard the
-devices you still trust, and abandon the old room. Documentation MUST NOT imply otherwise.
+Rotation does **not** provide device revocation. A removed device still holds the root secret and
+can derive every past and future epoch of it. Removing a device is therefore not an epoch bump but a
+new root secret, handed to every device that stays and to no other (section 18.6). Documentation
+MUST NOT imply that bumping `epoch` removes anyone.
 
 ---
 
@@ -1283,9 +1294,11 @@ This section summarizes. `docs/THREAT_MODEL.md` is authoritative.
 ### 15.3 Properties this protocol does not claim
 
 - **No forward secrecy.** A root secret compromised at any time decrypts every ciphertext an observer
-  archived, past and future. Fixing this requires a ratchet, which is incompatible with stateless one
-  string onboarding.
-- **No post compromise security and no device revocation in v1**, per section 14.1.
+  archived under it, past and future, until the account key is replaced (section 18.6). Fixing this
+  requires a ratchet, which this design does not have.
+- **No automatic post compromise security.** Removing a device, or replacing the account key, is a
+  deliberate step a person takes (section 18.6). Until then, a device or a key copy that should no
+  longer have access still has it; afterwards it keeps everything it could already read.
 - **No key commitment.** XChaCha20-Poly1305 is not key committing. With a single key this is
   harmless, and `epoch` in AAD is a partial mitigation, but the limitation must be revisited before
   any feature that puts two keys in play at once.
@@ -1295,10 +1308,13 @@ This section summarizes. `docs/THREAT_MODEL.md` is authoritative.
 
 ### 15.4 Handling requirements
 
-- The join token and the root secret MUST NOT be logged, at any level, by client or relay.
-- A client MUST suppress its own capture of the join token when it is copied to the clipboard during
-  onboarding, by recording its normalized hash in the loop prevention ring **before** writing it, by
-  setting the platform exclusion formats, and by clearing the clipboard after a timeout.
+- The root secret, the device secret, the join code and the retired join token MUST NOT be logged, at
+  any level, by client or relay.
+- The join code carries no part of the root secret, so a client copies it to the clipboard like any
+  other text. A client that still shows a section 5 token, which carries the root secret, MUST
+  suppress its own capture of it when it is copied, by recording its normalized hash in the loop
+  prevention ring **before** writing it, by setting the platform exclusion formats, and by clearing
+  the clipboard after a timeout. The reference client no longer shows one.
 - Implementations SHOULD zero key material in memory when it is no longer needed, while documenting
   that this does not defend against swap, hibernation images or a memory capture of a running
   process.
@@ -1315,35 +1331,36 @@ Four layers:
 
 | Layer | Source | Purpose |
 |---|---|---|
-| 1, upstream primitives | RFC 8439 (ChaCha20 and the AEAD), draft-irtf-cfrg-xchacha-03 sections 2.2.1, A.1 and A.3.1 (HChaCha20 and the XChaCha AEAD), RFC 5869 SHA-256 cases, RFC 8032 (Ed25519) | Proves the primitives are driven correctly |
+| 1, upstream primitives | RFC 8439 (ChaCha20 and the AEAD), draft-irtf-cfrg-xchacha-03 (HChaCha20 and the XChaCha AEAD), RFC 5869 SHA-256 cases, RFC 8032 (Ed25519) | Not repeated in this repository: the primitives come from the `chacha20poly1305`, `hkdf`, `sha2` and `ed25519-dalek` crates, and this project relies on those crates for them |
 | 2, project known answer | `testdata/vectors.json` | Freezes this specification's own constructions |
-| 3, libsodium interop | A script that verifies layer 2 ciphertext with libsodium | Proves the libsodium compatibility claim rather than assuming it. Runs on every build, not only at release |
+| 3, libsodium interop | Planned, not done: a script that verifies layer 2 ciphertext with libsodium | Would prove the libsodium compatibility claim rather than assume it. No such check exists yet |
 | 4, negative | Listed below | Every failure mode must fail closed |
 
 ### 16.1 Expected shape of `testdata/vectors.json`
 
 For a fixed test secret of `00 01 02 ... 1f` (32 bytes), the file records, as lowercase hex unless
-noted:
+noted. Rust (`crates/asli-crypto/tests/vectors.rs`, `crates/asli-net/tests/handshake_vectors.rs`)
+and the relay (`server/test/auth.test.ts`) both check against it, and
+`crates/asli-crypto/examples/gen_vectors.rs` generates it.
 
 | Key | Value |
 |---|---|
+| `comment`, `suite`, `protocol_version` | What the file is, `"asli-v1"`, and `1` |
 | `secret` | The 32 byte test secret |
 | `prk` | HKDF-Extract output |
 | `sign_seed` | 32 bytes |
 | `pub_key` | 32 bytes |
 | `room_id_bytes` | 16 bytes |
 | `room_id` | The 26 character Crockford base32 string |
-| `join_token` | The full 64 character token, including the `asli1_` prefix |
-| `join_checksum` | 3 bytes |
-| `enc_key_0`, `enc_key_1` | 32 bytes each, for epochs 0 and 1 |
-| `aad` | The exact 51 AAD bytes for a fixed `epoch`, `msg_id` and room |
-| `nonce` | The fixed 24 byte nonce used for the sealing vector |
-| `inner` | The exact padded inner plaintext bytes for a fixed content string |
-| `ciphertext` | The exact sealed output, ciphertext with tag appended |
-| `sig_input` | The exact 121 byte signature input for a fixed `nonce_s` and `nonce_c` |
-| `sig` | The 64 byte signature |
-| `chunked` | A four chunk message: the fixed `msg_id`, `content`, `chunk_bytes`, `chunk_count`, `padded_plaintext_len`, and per chunk the `idx`, `final`, `type_code`, `nonce`, the exact 61 AAD bytes and the exact ciphertext |
-| `announce` | One announcement: the fixed `msg_id`, `device_id`, `ts_ms`, `name`, `os`, `nonce`, the exact 51 AAD bytes with type code 5, the exact 256 byte `plaintext` and the exact ciphertext |
+| `enc_key_epoch_0`, `enc_key_epoch_1` | 32 bytes each, for epochs 0 and 1 |
+| `join_token` | The full 64 character retired join token (section 5), including the `asli1_` prefix |
+| `clip` | One sealed clip: the fixed `epoch`, `msg_id`, `device_id`, `seq`, `ts_ms`, `content_utf8` and `nonce`, the exact 51 `aad` bytes, `padded_plaintext_len`, and the exact `ciphertext` with tag appended |
+| `chunked` | A four chunk message: the fixed `epoch`, `msg_id`, `device_id`, `seq`, `ts_ms`, `content_type`, `content`, `chunk_bytes`, `chunk_count`, `padded_plaintext_len`, and in `chunks`, per chunk, the `idx`, `final`, `type_code`, `nonce`, the exact 61 `aad` bytes and the exact `ciphertext` |
+| `announce` | One announcement: the fixed `epoch`, `msg_id`, `device_id`, `ts_ms`, `name`, `os`, `nonce`, the exact 51 `aad` bytes with type code 5, the exact 256 byte `plaintext` and the exact `ciphertext` |
+| `auth` | The handshake: the fixed `nonce_s`, `nonce_c` and `client_time_ms`, the exact 121 byte `sig_input`, and the 64 byte `signature` |
+
+The section 18 constructions (device keys, sealed boxes, the join code, `msg`) have no entries in
+this file yet; they are covered by unit tests in `crates/asli-crypto` only.
 
 ### 16.2 Negative tests
 
@@ -1375,10 +1392,11 @@ Each of these MUST fail closed:
 | Feature | Status | Notes |
 |---|---|---|
 | `bin1` binary framing | Reserved, not implemented | Section 3.2. Negotiated through `enc` in `hello` |
-| Image content (`content_type` 2) | Specified and implemented at the transport layer | PNG only, see section 9.6. Clipboard capture of images is a client concern and lands separately |
-| Chunked transfer | Specified and implemented | See sections 7.11 and 9.5 |
+| Image content (`content_type` 2) | Specified and implemented | PNG only, see section 9.7. The reference client captures and writes clipboard images on every platform it supports |
+| Chunked transfer | Specified and implemented | See sections 7.11 and 9.6 |
 | Per device keys, approved joining, removing a device | Specified and implemented | Section 18 |
-| Files as a content type | Not planned | Out of scope |
+| Sending files | Specified and implemented | Not a clip `content_type`: files travel as `msg` kinds 16 to 20, section 18.8 |
+| Per device signatures on clips | Not specified | Section 10 |
 
 ---
 
@@ -1602,7 +1620,11 @@ cancel  = u8(1) || offer_id[16]
   sender's connection id. A receiver MUST check the signature against the signing key pinned for
   `from_device_id` (section 18.3) and MUST ignore an offer from a device it has not pinned, or one
   not addressed to its own device id. `chunk_bytes` is 262144. `name` is at most 255 bytes and is
-  untrusted.
+  untrusted. The reference client refuses an offer for more than 4 GiB.
+- **Stale offers.** A relay can hold on to a signed offer and send it again later. A receiver MUST
+  ignore an offer whose `ts_ms` is more than a day old or more than a day in the future (the section
+  10 window), and one whose `reply_to` is not the connection the sender is on now, when it knows that
+  connection: answered, it would go nowhere.
 - **Answer.** Signed by the receiving device and sent to `reply_to`. The sender MUST accept it only
   from the device the offer named, checked against that device's pinned key. `reply_to` in the
   answer is the receiver's connection, which the pieces are addressed to.
@@ -1619,7 +1641,9 @@ A sender MUST pace its pieces under the relay's `msg` byte rate (section 11.4): 
 drops for rate leaves the receiver waiting for it, since pieces are accepted only in order. The
 reference client sends at most 5 MiB of file a second. A transfer that makes no progress for 60
 seconds is given up on by either side, and a transfer under way does not survive a reconnection: the
-connection ids it was addressed to are gone.
+connection ids it was addressed to are gone. For the same reason an offer still waiting for an
+answer ends, on either side, once the other device has been off the connection the offer names for
+20 seconds, gone offline or restarted; a device that is offline itself does not apply this check.
 
 #### 18.8.1 Directly, on the same network
 
@@ -1647,7 +1671,10 @@ Each side counts its own frames from zero. The hello can be made only by the dev
 the transfer key, so it stands in for the answer, and no `answer` is sent through the relay. A
 sender MUST NOT read a frame longer than a piece plus 16 bytes, or a hello longer than 64. If no
 address answers in time, the receiver sends its answer through the relay and the transfer goes as
-above. A direct transfer does not depend on the relay connection and survives it dropping.
+above. A receiver that connects but gets no first piece that opens under the transfer key within 15
+seconds also sends its answer through the relay; a sender that receives an answer through the relay
+while sending directly stops the direct send and starts again from the first piece through the relay.
+A direct transfer does not depend on the relay connection and survives it dropping.
 
 A device set to Same Network Only (section 18.5.1) makes an offer only when it can name a local
 address, and accepts one only if it reaches the sender directly, cancelling it otherwise rather than
@@ -1687,8 +1714,9 @@ old to send one shows as an older version.
 leave = u8(1) || from_device_id[16] || u64be(ts_ms) || signature, label "asli/v2/leave"
 ```
 
-A device about to join another account sends a `leave` to the room it is leaving and waits briefly
-for the relay to have read it. A device that hears one, signed by the key pinned for that device,
+A device leaving its account, because the person chose Leave This Account (`asli leave`) or is joining
+another account, sends a `leave` to the room it is leaving and waits briefly for the relay to have
+read it. A device that hears one, signed by the key pinned for that device,
 takes it off its list. It is a courtesy, not a security step: the leaving
 device keeps nothing of the old account, and one that has to be shut out is removed instead
 (section 18.6). A device offline at the time never hears it, so clients also drop an entry with no

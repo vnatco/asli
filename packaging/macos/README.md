@@ -90,7 +90,8 @@ build on the Mac that made it. `packaging/release.sh` refuses to publish it.
 1. Builds `aarch64-apple-darwin` and `x86_64-apple-darwin` release binaries against macOS 11, the
    floor `Info.plist` declares, and joins them with `lipo`. Missing targets are reported with
    `rustup target add`. `ASLI_MAC_ARCHS=arm64` builds one architecture, named `...-macos-aarch64.dmg`.
-2. Assembles Asli.app from `Info.plist` (version filled in from `Cargo.toml`) and `asli.icns`.
+2. Assembles Asli.app from `Info.plist` (version filled in from `Cargo.toml`) and `asli.icns`, with
+   `LICENSE` and `THIRD_PARTY_LICENSES.txt` in `Contents/Resources`.
 3. Signs it with the hardened runtime, a secure timestamp and `entitlements.plist`, which is empty
    because Asli needs none of the runtime's exceptions; the file says why for each.
 4. Notarizes the app (as a zip) and staples the ticket to it, so it also opens offline once it is
@@ -110,8 +111,8 @@ On another Mac, after downloading it with a browser (so it carries the quarantin
 copy has):
 
 ```sh
-spctl --assess --type open --context context:primary-signature -vv asli-0.1.0-macos-universal.dmg
-xcrun stapler validate asli-0.1.0-macos-universal.dmg
+spctl --assess --type open --context context:primary-signature -vv asli-<version>-macos-universal.dmg
+xcrun stapler validate asli-<version>-macos-universal.dmg
 ```
 
 Both should say accepted and valid, with `source=Notarized Developer ID`. Then double click it, drag
@@ -128,7 +129,7 @@ starts at login. This is the same agent `setup.sh --install` sets up.
 Dragging Asli to the Trash removes the app, but **not the launchd agent**: macOS runs nothing when an
 app is trashed. The agent then points at a program that is not there, so at login launchd logs a
 failure and starts nothing; there is nothing on screen. To remove it too, before trashing, turn off
-**Start at login** in Asli's Settings, or afterwards:
+**Start at Login** in Asli's Settings, or afterwards:
 
 ```sh
 launchctl bootout gui/$(id -u)/dev.vnat.asli 2>/dev/null
