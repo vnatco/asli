@@ -357,9 +357,14 @@ write_checksums() {
 }
 
 cleanup() {
-    [ -n "$WORK" ] && [ -d "$WORK/mnt" ] && hdiutil detach -quiet "$WORK/mnt" 2>/dev/null
-    [ -n "$WORK" ] && [ -d "$WORK/verify" ] && hdiutil detach -quiet "$WORK/verify" 2>/dev/null
-    [ -n "$WORK" ] && rm -rf "$WORK"
+    # Each step is allowed to fail: an image already detached is the usual case here, and macOS's
+    # bash 3.2 lets a failed test inside this trap end the script with status 1 under set -e,
+    # turning a finished build into a reported failure.
+    if [ -n "$WORK" ]; then
+        if [ -d "$WORK/mnt" ]; then hdiutil detach -quiet "$WORK/mnt" 2>/dev/null || true; fi
+        if [ -d "$WORK/verify" ]; then hdiutil detach -quiet "$WORK/verify" 2>/dev/null || true; fi
+        rm -rf "$WORK" || true
+    fi
     # A run that fails part way leaves no image behind that looks finished.
     if [ "$FINISHED" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ -n "$OUT" ]; then
         rm -f "$OUT"
