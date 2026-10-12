@@ -1152,9 +1152,14 @@ fn refresh_invite(window: &AppWindow) {
     let Some((view, expires_at_ms)) = snapshot else {
         return;
     };
-    let left_s = expires_at_ms.saturating_sub(asli_net::client::now_ms()) / 1000;
+    let remaining_ms = expires_at_ms.saturating_sub(asli_net::client::now_ms());
+    let seconds = remaining_ms / 1000;
     window.set_invite_nearby_only(view.nearby_only);
-    window.set_invite_remaining(format!("{}:{:02}", left_s / 60, left_s % 60).into());
+    #[allow(clippy::cast_precision_loss)]
+    window.set_invite_left(
+        (remaining_ms as f32 / asli_crypto::enroll::CODE_LIFETIME_MS as f32).clamp(0.0, 1.0),
+    );
+    window.set_invite_remaining(format!("{}:{:02}", seconds / 60, seconds % 60).into());
     let rows: Vec<AskRow> = view
         .asking
         .iter()
@@ -3591,7 +3596,7 @@ mod tests {
         assert_eq!(shown.state, SyncState::Connecting);
         assert!(shown.detail.contains("attempt 3"), "{}", shown.detail);
 
-        let mut offline = status("Offline, retrying");
+        let mut offline = status("Offline, Retrying");
         offline.retry_at_ms = Some(now + 23_500);
         let shown = present(&offline, false, "asli.vnat.dev", now);
         assert_eq!(shown.state, SyncState::Error);

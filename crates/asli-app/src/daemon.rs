@@ -304,7 +304,7 @@ impl Status {
     pub fn line(&self) -> String {
         match self.peers {
             0 => self.state.clone(),
-            n => format!("{}, {n} connected", self.state),
+            n => format!("{}, {n} Connected", self.state),
         }
     }
 }
@@ -1525,14 +1525,14 @@ fn judge_outcome(
                 stop_with(controls, status, fatal.user_message());
                 return true;
             }
-            "Offline, retrying".clone_into(&mut status.state);
+            "Offline, Retrying".clone_into(&mut status.state);
         }
         Ok(other) => {
-            "Offline, retrying".clone_into(&mut status.state);
+            "Offline, Retrying".clone_into(&mut status.state);
             eprintln!("{}", log_line("disconnected", &format!("{other:?}")));
         }
         Err(err) => {
-            "Offline, retrying".clone_into(&mut status.state);
+            "Offline, Retrying".clone_into(&mut status.state);
             eprintln!("{}", log_line("connection_failed", &err.to_string()));
         }
     }
@@ -1946,16 +1946,16 @@ mod tests {
             ..Status::default()
         };
         on_action(&Action::Presence { peers: 3 }, &stub, &mut status, 0);
-        assert_eq!(status.line(), "Synced, 3 connected");
+        assert_eq!(status.line(), "Synced, 3 Connected");
     }
 
     #[test]
     fn the_status_line_omits_a_zero_count() {
         let status = Status {
-            state: "Offline, retrying".to_owned(),
+            state: "Offline, Retrying".to_owned(),
             ..Status::default()
         };
-        assert_eq!(status.line(), "Offline, retrying");
+        assert_eq!(status.line(), "Offline, Retrying");
     }
 
     #[test]

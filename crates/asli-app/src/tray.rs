@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn icon_state_follows_the_status_line() {
         assert_eq!(
-            IconState::from_status("Synced, 2 connected", false),
+            IconState::from_status("Synced, 2 Connected", false),
             IconState::Connected
         );
         assert_eq!(IconState::from_status("Synced", true), IconState::Paused);
@@ -741,7 +741,7 @@ mod tests {
             IconState::Connecting
         );
         assert_eq!(
-            IconState::from_status("Offline, retrying", false),
+            IconState::from_status("Offline, Retrying", false),
             IconState::Offline
         );
         assert_eq!(

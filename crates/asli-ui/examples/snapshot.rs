@@ -368,7 +368,7 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.9".into());
+    ui.set_app_version("0.1.10".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
@@ -382,6 +382,7 @@ fn sample(ui: &AppWindow) {
     ui.set_clipboard_backend("Wayland, wlr data control".into());
     ui.set_invite_code(SAMPLE_TOKEN.into());
     ui.set_invite_remaining("9:41".into());
+    ui.set_invite_left(0.97);
     ui.set_invite_state(InviteState::Waiting);
     ui.set_invite_asking(ModelRc::new(VecModel::from(vec![AskRow {
         name: "DESKTOP-7Q".into(),

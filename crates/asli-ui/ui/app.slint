@@ -434,7 +434,8 @@ component CaptionButton inherits Rectangle {
     }
 }
 
-// A card on the first run screen: one of the two ways in.
+// A choice on the welcome screen: a tile, a title and a line, lifting under the pointer. The
+// primary one is lit with the accent.
 component ChoiceCard {
     in property <bool> primary: false;
     in property <string> title;
@@ -455,73 +456,66 @@ component ChoiceCard {
 
     property <bool> hover: touch.has-hover && enabled;
 
-    if root.primary: SoftShadow {
+    Rectangle {
         y: card.y;
-        radius: 14px;
-        offset-y: 4px;
-        blur: 12px;
-        spread: -2px;
-        strength: 0.45;
+        opacity: root.primary || root.hover ? 1 : 0;
+        animate opacity { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        Glow {
+            tint: root.primary ? #6D7CFF59 : #00000099;
+            radius: 18px;
+            blur: 30px;
+            lift: 10px;
+            inset: 10px;
+        }
     }
 
     card := Rectangle {
-        // Lifts a pixel under the pointer and settles back when pressed.
-        y: root.hover && !touch.pressed ? -1px : 0px;
+        // Lifts under the pointer and settles back when pressed.
+        y: root.hover && !touch.pressed ? -2px : 0px;
         width: 100%;
         height: 100%;
-        border-radius: 14px;
-        border-width: root.primary ? 0px : 1px;
-        background: root.primary ? transparent : Theme.raised-1;
-        border-color: root.hover ? Theme.border-strong : Theme.border-subtle;
-        animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-        animate y { duration: 80ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-
-        if root.primary: GradientFill {
-            radius: 14px;
-            angle: 145deg;
-            from: Theme.hero-from;
-            to: Theme.hero-to;
-        }
-        if root.primary: Rectangle {
-            border-radius: 14px;
-            border-width: 1px;
-            border-color: root.hover ? Theme.accent : Theme.accent-border;
-            animate border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-        }
+        border-radius: 18px;
+        border-width: 1px;
+        background: root.primary
+            ? @linear-gradient(145deg, #6D7CFF26 0%, #4FE3C10D 100%)
+            : (root.hover ? Theme.raised-2 : Theme.raised-1);
+        border-color: root.primary
+            ? (root.hover ? Theme.accent : Theme.accent-border)
+            : (root.hover ? Theme.border-strong : Theme.border-subtle);
+        animate border-color, background { duration: 160ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        animate y { duration: 220ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
 
         VerticalLayout {
-            padding: 16px;
+            padding: 18px;
             spacing: 0px;
 
             HorizontalLayout {
                 alignment: start;
-                Rectangle {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: 9px;
-                    border-width: 1px;
-                    background: root.primary ? Theme.accent-soft : Theme.raised-2;
-                    border-color: root.primary ? Theme.accent-border : Theme.border;
-
-                    if !root.busy: Icon {
-                        source: root.icon;
-                        size: 16px;
-                        tint: root.primary ? Theme.link : Theme.text-2;
-                    }
-                    if root.busy: Spinner {
-                        size: 16px;
+                if !root.busy: Tile {
+                    icon: root.icon;
+                    on: root.primary;
+                    size: 40px;
+                }
+                if root.busy: Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    border-radius: 12px;
+                    background: Theme.accent-soft;
+                    Spinner {
+                        size: 18px;
                         tint: Theme.link;
                     }
                 }
             }
-            Rectangle { height: 12px; }
+            Rectangle { height: 16px; }
             Text {
                 text: root.title;
                 color: Theme.text;
-                font-size: 13px;
+                font-family: Theme.display;
+                font-size: 16px;
                 font-weight: 600;
             }
-            Rectangle { height: 3px; }
+            Rectangle { height: 4px; }
             Caption {
                 text: root.body;
             }
@@ -533,7 +527,7 @@ component ChoiceCard {
         y: -4px;
         width: parent.width + 8px;
         height: parent.height + 8px;
-        border-radius: 18px;
+        border-radius: 22px;
         border-width: 2px;
         border-color: Theme.focus;
         opacity: focus.has-focus ? 1 : 0;
@@ -554,6 +548,60 @@ component ChoiceCard {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
+    }
+}
+
+// One step of adding a device: its tile, its number, what happens, and a fading line on to the
+// next step.
+component Step inherits Rectangle {
+    in property <image> icon;
+    in property <int> number;
+    in property <string> title;
+    in property <string> body;
+    in property <bool> on: false;
+    in property <bool> leads-on: true;
+
+    horizontal-stretch: 1;
+    min-height: step-body.min-height;
+    preferred-height: step-body.preferred-height;
+
+    if root.leads-on: Rectangle {
+        x: 52px;
+        y: 19px;
+        width: root.width - 52px;
+        height: 2px;
+        border-radius: 1px;
+        background: @linear-gradient(90deg, #6D7CFF80 0%, #6D7CFF00 100%);
+    }
+
+    step-body := VerticalLayout {
+        spacing: 0px;
+        HorizontalLayout {
+            alignment: start;
+            Tile {
+                icon: root.icon;
+                on: root.on;
+                size: 40px;
+            }
+        }
+        Rectangle { height: 14px; }
+        Text {
+            text: "STEP " + root.number;
+            color: root.on ? Theme.accent-2 : Theme.link;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+        }
+        Rectangle { height: 4px; }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: 13.5px;
+            font-weight: 650;
+            wrap: word-wrap;
+        }
+        Rectangle { height: 3px; }
+        Caption { text: root.body; }
     }
 }
 
@@ -585,45 +633,115 @@ component DetailRow inherits HorizontalLayout {
     }
 }
 
-// A switch with its title and explanation, in the This Device card.
+// A setting that takes a value rather than a switch: its tile, title and explanation, with the
+// field underneath, lined up with the title.
+component FieldRow inherits VerticalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> detail;
+    in property <color> detail-color: Theme.text-3;
+    in property <bool> dim: false;
+    in property <bool> last: false;
+
+    VerticalLayout {
+        padding-top: 13px;
+        padding-bottom: 14px;
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 0px;
+
+        HorizontalLayout {
+            spacing: 14px;
+            VerticalLayout {
+                alignment: center;
+                Tile {
+                    icon: root.icon;
+                    size: 34px;
+                    tint: root.dim ? Theme.text-4 : Theme.text-2;
+                }
+            }
+            VerticalLayout {
+                spacing: 2px;
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.title;
+                    color: root.dim ? Theme.text-4 : Theme.text;
+                    font-size: 13.5px;
+                    font-weight: 650;
+                }
+                Caption {
+                    text: root.detail;
+                    color: root.detail-color;
+                }
+            }
+        }
+        Rectangle { height: 10px; }
+        HorizontalLayout {
+            padding-left: 48px;
+            @children
+        }
+    }
+    if !root.last: Divider { }
+}
+
+// A switch with its tile, title and explanation, in a Settings card. The tile lights up with the
+// switch, and the row brightens under the pointer.
 component SettingRow inherits VerticalLayout {
     in property <string> title;
     in property <string> detail;
+    in property <image> icon;
     in property <bool> mono-detail: false;
     in property <bool> last: false;
     in-out property <bool> checked;
     callback toggled(bool);
 
-    HorizontalLayout {
-        padding-top: 13px;
-        padding-bottom: 13px;
-        padding-left: 16px;
-        padding-right: 16px;
-        spacing: 16px;
+    Rectangle {
+        background: row-touch.has-hover ? #FFFFFF06 : transparent;
+        animate background { duration: 140ms; }
+        height: row-body.preferred-height;
+        row-touch := TouchArea { }
 
-        VerticalLayout {
-            spacing: 2px;
-            alignment: center;
-            horizontal-stretch: 1;
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: 13px;
-                font-weight: 500;
-            }
-            Caption {
-                text: root.detail;
-                font-family: root.mono-detail ? Theme.mono : "";
-                wrap: root.mono-detail ? char-wrap : word-wrap;
-            }
-        }
+        row-body := HorizontalLayout {
+            padding-top: 13px;
+            padding-bottom: 13px;
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 14px;
 
-        VerticalLayout {
-            alignment: center;
-            Toggle {
-                label: root.title;
-                checked <=> root.checked;
-                toggled(on) => { root.toggled(on); }
+            VerticalLayout {
+                alignment: center;
+                Tile {
+                    icon: root.icon;
+                    on: root.checked;
+                    size: 34px;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 2px;
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: 13.5px;
+                    font-weight: 650;
+                }
+                Caption {
+                    text: root.detail;
+                    font-family: root.mono-detail ? Theme.mono : "";
+                    wrap: root.mono-detail ? char-wrap : word-wrap;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Toggle {
+                    label: root.title;
+                    checked <=> root.checked;
+                    toggled(on) => { root.toggled(on); }
+                }
             }
         }
     }
@@ -681,6 +799,8 @@ export component AppWindow inherits Window {
     in property <image> qr;
     in property <string> invite-code: "";
     in property <string> invite-remaining: "";
+    // How much of the join code's ten minutes is left, from 1 down to 0.
+    in property <float> invite-left: 1;
     in property <bool> invite-nearby-only: false;
     in property <InviteState> invite-state: InviteState.idle;
     in property <[AskRow]> invite-asking: [];
@@ -1398,10 +1518,10 @@ export component AppWindow inherits Window {
                                 content-height: invite-screen.preferred-height;
 
                                 invite-screen := VerticalLayout {
-                                    padding-top: 20px;
-                                    padding-bottom: 24px;
-                                    padding-left: 24px;
-                                    padding-right: 24px;
+                                    padding-top: 22px;
+                                    padding-bottom: 26px;
+                                    padding-left: 28px;
+                                    padding-right: 28px;
                                     spacing: 0px;
                                     alignment: start;
 
@@ -1413,57 +1533,94 @@ export component AppWindow inherits Window {
                                     }
                                     Rectangle { height: 18px; }
 
-                                    if root.invite-state == InviteState.idle: VerticalLayout {
-                                        spacing: 0px;
-                                        HorizontalLayout {
-                                            alignment: start;
-                                            Button {
-                                                text: "Create a Join Code";
-                                                kind: ButtonKind.primary;
-                                                pad-x: 14px;
-                                                clicked => { root.open-invite(); }
-                                            }
-                                        }
-                                        Rectangle { height: 14px; }
-                                        HorizontalLayout {
-                                            spacing: 7px;
-                                            VerticalLayout {
-                                                alignment: center;
-                                                Icon {
-                                                    source: Icons.shield;
-                                                    size: 13px;
-                                                    tint: Theme.text-3;
+                                    if root.invite-state == InviteState.idle: Card {
+                                        height: steps-card.preferred-height;
+                                        steps-card := VerticalLayout {
+                                            padding-top: 20px;
+                                            padding-bottom: 18px;
+                                            padding-left: 20px;
+                                            padding-right: 20px;
+                                            spacing: 0px;
+
+                                            HorizontalLayout {
+                                                spacing: 16px;
+                                                Step {
+                                                    number: 1;
+                                                    icon: Icons.key;
+                                                    on: true;
+                                                    title: "Create a Code Here";
+                                                    body: "One code lets in one device, within ten minutes.";
+                                                }
+                                                Step {
+                                                    number: 2;
+                                                    icon: Icons.device;
+                                                    title: "Type It on the New Device";
+                                                    body: "There, choose Join an Existing Account and enter it.";
+                                                }
+                                                Step {
+                                                    number: 3;
+                                                    icon: Icons.check;
+                                                    leads-on: false;
+                                                    title: "Approve It Here";
+                                                    body: "Once both devices show the same six digits.";
                                                 }
                                             }
-                                            Caption {
-                                                text: "A code works once, for ten minutes, and lets nobody in until you approve them here. It does not contain your account key.";
-                                                horizontal-stretch: 1;
-                                                wrap: word-wrap;
-                                                vertical-alignment: center;
+                                            Rectangle { height: 20px; }
+                                            Divider { }
+                                            Rectangle { height: 16px; }
+                                            HorizontalLayout {
+                                                spacing: 16px;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Button {
+                                                        text: "Create a Join Code";
+                                                        kind: ButtonKind.primary;
+                                                        icon: Icons.plus;
+                                                        show-icon: true;
+                                                        clicked => { root.open-invite(); }
+                                                    }
+                                                }
+                                                HorizontalLayout {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 8px;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Icon {
+                                                            source: Icons.shield;
+                                                            size: 14px;
+                                                            tint: Theme.accent-2;
+                                                        }
+                                                    }
+                                                    Caption {
+                                                        text: "Nobody gets in until you approve them here, and the code does not contain your account key.";
+                                                        horizontal-stretch: 1;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
 
                                     if root.invite-state == InviteState.waiting: HorizontalLayout {
-                                        spacing: 20px;
+                                        spacing: 22px;
 
                                         // The QR plate is white whatever the theme: a symbol
                                         // inverted by a dark theme is unreadable to most cameras.
                                         VerticalLayout {
                                             alignment: start;
+                                            spacing: 0px;
                                             Rectangle {
                                                 width: 171px;
                                                 height: 171px;
-                                                SoftShadow {
-                                                    radius: 14px;
-                                                    offset-y: 12px;
-                                                    blur: 32px;
-                                                    spread: -6px;
-                                                    strength: 0.6;
-                                                    steps: 14;
+                                                Glow {
+                                                    tint: #6D7CFF59;
+                                                    radius: 16px;
+                                                    blur: 30px;
+                                                    lift: 10px;
+                                                    inset: 8px;
                                                 }
                                                 Rectangle {
-                                                    border-radius: 14px;
+                                                    border-radius: 16px;
                                                     background: #FFFFFF;
                                                     Image {
                                                         x: 12px;
@@ -1475,6 +1632,34 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                             }
+                                            Rectangle { height: 16px; }
+                                            HorizontalLayout {
+                                                width: 171px;
+                                                height: 16px;
+                                                Text {
+                                                    text: "EXPIRES IN";
+                                                    color: Theme.text-3;
+                                                    font-size: 10.5px;
+                                                    font-weight: 700;
+                                                    letter-spacing: 1.2px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+                                                Text {
+                                                    text: root.invite-remaining;
+                                                    color: root.invite-left < 0.2 ? Theme.warning : Theme.text;
+                                                    font-family: Theme.display;
+                                                    font-size: 13px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            Rectangle { height: 7px; }
+                                            ProgressBar {
+                                                width: 171px;
+                                                thickness: 3px;
+                                                progress: root.invite-left;
+                                            }
                                         }
 
                                         VerticalLayout {
@@ -1485,16 +1670,16 @@ export component AppWindow inherits Window {
                                             Overline { text: "JOIN CODE"; }
                                             Rectangle { height: 8px; }
                                             Rectangle {
-                                                border-radius: 10px;
+                                                border-radius: 12px;
                                                 border-width: 1px;
                                                 background: Theme.input;
                                                 border-color: Theme.border;
-                                                height: code-text.preferred-height + 22px;
+                                                height: code-text.preferred-height + 24px;
 
                                                 code-text := TextInput {
-                                                    x: 12px;
-                                                    y: 11px;
-                                                    width: parent.width - 24px;
+                                                    x: 14px;
+                                                    y: 12px;
+                                                    width: parent.width - 28px;
                                                     text: root.invite-code;
                                                     read-only: true;
                                                     color: Theme.text;
@@ -1503,20 +1688,14 @@ export component AppWindow inherits Window {
                                                     letter-spacing: 0.4px;
                                                     wrap: char-wrap;
                                                     single-line: false;
-                                                    selection-background-color: #4C8DFF66;
+                                                    selection-background-color: #6D7CFF66;
                                                     selection-foreground-color: Theme.text;
                                                 }
                                             }
-                                            Rectangle { height: 8px; }
+                                            Rectangle { height: 10px; }
                                             HorizontalLayout {
                                                 spacing: 8px;
-                                                Caption {
-                                                    text: "Works once. Expires in " + root.invite-remaining + "."
-                                                        + (root.invite-nearby-only ? " Only a device on this network can use it." : "");
-                                                    wrap: word-wrap;
-                                                    horizontal-stretch: 1;
-                                                    vertical-alignment: center;
-                                                }
+                                                alignment: start;
                                                 Button {
                                                     text: "Copy Code";
                                                     small: true;
@@ -1527,65 +1706,155 @@ export component AppWindow inherits Window {
                                                 Button {
                                                     text: "Cancel";
                                                     small: true;
+                                                    kind: ButtonKind.ghost;
                                                     clicked => { root.close-invite(); }
                                                 }
                                             }
+                                            if root.invite-nearby-only: VerticalLayout {
+                                                padding-top: 10px;
+                                                Caption { text: "Only a device on this network can use it."; }
+                                            }
                                             Rectangle { height: 16px; }
 
-                                            if root.invite-asking.length == 0: Caption {
-                                                text: "On the new device, choose Join an Existing Account and type this code. Its request appears here.";
-                                                wrap: word-wrap;
+                                            if root.invite-asking.length == 0: Rectangle {
+                                                height: 64px;
+                                                border-radius: 16px;
+                                                border-width: 1px;
+                                                border-color: Theme.border-subtle;
+                                                background: #FFFFFF06;
+                                                HorizontalLayout {
+                                                    padding-left: 16px;
+                                                    padding-right: 16px;
+                                                    spacing: 12px;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 10px;
+                                                            height: 10px;
+                                                            border-radius: 5px;
+                                                            background: Theme.accent-2.with-alpha(0.2);
+                                                            Rectangle {
+                                                                width: 6px;
+                                                                height: 6px;
+                                                                border-radius: 3px;
+                                                                background: Theme.accent-2;
+                                                                // A slow breath while it waits.
+                                                                opacity: 0.55 + 0.45 * sin(animation-tick() / 1600ms * 360deg);
+                                                            }
+                                                        }
+                                                    }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: 2px;
+                                                        horizontal-stretch: 1;
+                                                        Text {
+                                                            height: 18px;
+                                                            text: "Waiting for the New Device";
+                                                            color: Theme.text;
+                                                            font-size: 13px;
+                                                            font-weight: 650;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        Text {
+                                                            height: 16px;
+                                                            text: "Its request appears here as soon as the code is typed.";
+                                                            color: Theme.text-3;
+                                                            font-size: 12px;
+                                                            vertical-alignment: center;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+                                                }
                                             }
 
                                             for ask[i] in root.invite-asking: VerticalLayout {
                                                 padding-bottom: 10px;
-                                                Card {
+                                                Rectangle {
                                                     height: ask-body.preferred-height;
-                                                    ask-body := VerticalLayout {
-                                                        padding-top: 14px;
-                                                        padding-bottom: 14px;
-                                                        padding-left: 16px;
-                                                        padding-right: 16px;
-                                                        spacing: 0px;
-                                                        Text {
-                                                            text: ask.name + " Wants to Join";
-                                                            color: Theme.text;
-                                                            font-size: 13.5px;
-                                                            font-weight: 600;
-                                                            overflow: elide;
-                                                        }
-                                                        if ask.os != "": Text {
-                                                            text: ask.os;
-                                                            color: Theme.text-3;
-                                                            font-size: 11.5px;
-                                                        }
-                                                        Rectangle { height: 10px; }
-                                                        Caption {
-                                                            text: "Approve only if the new device shows:";
-                                                        }
-                                                        Rectangle { height: 4px; }
-                                                        Text {
-                                                            text: ask.comparison;
-                                                            color: Theme.text;
-                                                            font-size: 26px;
-                                                            font-weight: 600;
-                                                            font-family: Theme.mono;
-                                                            letter-spacing: 2px;
-                                                        }
-                                                        Rectangle { height: 12px; }
-                                                        HorizontalLayout {
-                                                            spacing: 8px;
-                                                            alignment: start;
-                                                            Button {
-                                                                text: "Approve";
-                                                                kind: ButtonKind.primary;
-                                                                icon: Icons.check;
-                                                                show-icon: true;
-                                                                clicked => { root.approve-request(i); }
+                                                    Glow {
+                                                        tint: #6D7CFF40;
+                                                        radius: 18px;
+                                                        blur: 28px;
+                                                        lift: 8px;
+                                                        inset: 10px;
+                                                    }
+                                                    Rectangle {
+                                                        border-radius: 18px;
+                                                        background: @linear-gradient(135deg, #6D7CFF1F 0%, #4FE3C10F 100%);
+                                                        border-width: 1px;
+                                                        border-color: Theme.accent-border;
+                                                        ask-body := VerticalLayout {
+                                                            padding: 16px;
+                                                            spacing: 0px;
+                                                            HorizontalLayout {
+                                                                spacing: 12px;
+                                                                VerticalLayout {
+                                                                    alignment: center;
+                                                                    Tile {
+                                                                        icon: Icons.device;
+                                                                        on: true;
+                                                                        size: 40px;
+                                                                    }
+                                                                }
+                                                                VerticalLayout {
+                                                                    alignment: center;
+                                                                    spacing: 2px;
+                                                                    horizontal-stretch: 1;
+                                                                    Text {
+                                                                        height: 18px;
+                                                                        text: ask.name + " Wants to Join";
+                                                                        color: Theme.text;
+                                                                        font-size: 14px;
+                                                                        font-weight: 650;
+                                                                        vertical-alignment: center;
+                                                                        overflow: elide;
+                                                                    }
+                                                                    if ask.os != "": Text {
+                                                                        height: 16px;
+                                                                        text: ask.os;
+                                                                        color: Theme.text-2;
+                                                                        font-size: 12px;
+                                                                        vertical-alignment: center;
+                                                                    }
+                                                                }
                                                             }
-                                                            Button {
-                                                                text: "Decline";
-                                                                clicked => { root.decline-request(i); }
+                                                            Rectangle { height: 14px; }
+                                                            Caption { text: "Approve only if the new device shows this number:"; }
+                                                            Rectangle { height: 8px; }
+                                                            Rectangle {
+                                                                height: 58px;
+                                                                border-radius: 12px;
+                                                                border-width: 1px;
+                                                                background: Theme.input;
+                                                                border-color: Theme.border-subtle;
+                                                                Text {
+                                                                    width: parent.width;
+                                                                    height: parent.height;
+                                                                    text: ask.comparison;
+                                                                    color: Theme.text;
+                                                                    font-family: Theme.display;
+                                                                    font-size: 30px;
+                                                                    font-weight: 600;
+                                                                    letter-spacing: 6px;
+                                                                    horizontal-alignment: center;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                            }
+                                                            Rectangle { height: 14px; }
+                                                            HorizontalLayout {
+                                                                spacing: 8px;
+                                                                alignment: start;
+                                                                Button {
+                                                                    text: "Approve";
+                                                                    kind: ButtonKind.primary;
+                                                                    icon: Icons.check;
+                                                                    show-icon: true;
+                                                                    clicked => { root.approve-request(i); }
+                                                                }
+                                                                Button {
+                                                                    text: "Decline";
+                                                                    clicked => { root.decline-request(i); }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1594,20 +1863,49 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    if root.invite-state == InviteState.finished: VerticalLayout {
-                                        spacing: 0px;
-                                        Banner {
-                                            kind: root.invite-good ? BannerKind.info : BannerKind.warning;
-                                            icon: root.invite-good ? Icons.check : Icons.alert;
-                                            title: root.invite-message;
-                                        }
-                                        Rectangle { height: 14px; }
-                                        HorizontalLayout {
-                                            alignment: start;
-                                            Button {
-                                                text: "Add Another Device";
-                                                pad-x: 14px;
-                                                clicked => { root.open-invite(); }
+                                    if root.invite-state == InviteState.finished: Card {
+                                        height: done-body.preferred-height;
+                                        done-body := HorizontalLayout {
+                                            padding: 18px;
+                                            spacing: 14px;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                if root.invite-good: Tile {
+                                                    icon: Icons.check;
+                                                    on: true;
+                                                    size: 44px;
+                                                }
+                                                if !root.invite-good: Rectangle {
+                                                    width: 44px;
+                                                    height: 44px;
+                                                    border-radius: 13px;
+                                                    background: Theme.warning.with-alpha(0.14);
+                                                    border-width: 1px;
+                                                    border-color: Theme.warning-border;
+                                                    Icon {
+                                                        source: Icons.alert;
+                                                        size: 20px;
+                                                        tint: Theme.warning;
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                text: root.invite-message;
+                                                color: Theme.text;
+                                                font-size: 14px;
+                                                font-weight: 650;
+                                                wrap: word-wrap;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Button {
+                                                    text: "Add Another Device";
+                                                    icon: Icons.plus;
+                                                    show-icon: true;
+                                                    clicked => { root.open-invite(); }
+                                                }
                                             }
                                         }
                                     }
@@ -2450,7 +2748,7 @@ export component AppWindow inherits Window {
                                                                 VerticalLayout {
                                                                     alignment: center;
                                                                     Icon {
-                                                                        source: Icons.text;
+                                                                        source: Icons.file;
                                                                         size: 14px;
                                                                         tint: Theme.text-3;
                                                                     }
@@ -2819,251 +3117,354 @@ export component AppWindow inherits Window {
                                 content-height: settings-screen.preferred-height;
 
                                 settings-screen := VerticalLayout {
-                                    padding-top: 20px;
-                                    padding-bottom: 24px;
-                                    padding-left: 24px;
-                                    padding-right: 24px;
+                                    padding-top: 22px;
+                                    // Room for the save bar, which rises over the bottom.
+                                    padding-bottom: 84px;
+                                    padding-left: 28px;
+                                    padding-right: 28px;
                                     spacing: 0px;
                                     alignment: start;
 
                                     Title { text: "Settings"; }
-                                    Rectangle { height: 14px; }
+                                    Rectangle { height: 4px; }
+                                    Subtitle { text: "How this device syncs, what it asks you, and what it keeps."; }
+                                    Rectangle { height: 18px; }
+
+                                    if root.settings-note != "": VerticalLayout {
+                                        padding-bottom: 16px;
+                                        Banner {
+                                            kind: BannerKind.info;
+                                            icon: Icons.refresh;
+                                            title: root.settings-note;
+                                        }
+                                    }
 
                                     Overline { text: "RELAY"; }
                                     Rectangle { height: 8px; }
                                     Card {
                                         height: relay-card.preferred-height;
                                         relay-card := VerticalLayout {
-                                            padding-top: 14px;
-                                            padding-bottom: 14px;
-                                            padding-left: 16px;
-                                            padding-right: 16px;
-                                            spacing: 0px;
-
-                                            Label { text: "Relay Address"; }
-                                            Rectangle { height: 6px; }
-                                            TextField {
-                                                placeholder: "wss://asli.vnat.dev/v1";
-                                                monospace: true;
-                                                invalid: root.relay-invalid;
-                                                text <=> root.relay-url;
-                                            }
-                                            Rectangle { height: 6px; }
-                                            if !root.relay-invalid: Caption {
-                                                text: "Passes sealed bytes between your devices. It cannot read them.";
-                                            }
-                                            if root.relay-invalid: HorizontalLayout {
-                                                spacing: 6px;
-                                                Icon {
-                                                    source: Icons.alert;
-                                                    size: 14px;
-                                                    tint: Theme.error;
-                                                    y: 1px;
-                                                }
-                                                Caption {
-                                                    text: "Must start with wss:// or ws://";
-                                                    color: Theme.error;
+                                            FieldRow {
+                                                icon: Icons.shield;
+                                                title: "Relay Address";
+                                                detail: root.relay-invalid
+                                                    ? "Must start with wss:// or ws://"
+                                                    : "Passes sealed bytes between your devices. It cannot read them.";
+                                                detail-color: root.relay-invalid ? Theme.danger-soft : Theme.text-3;
+                                                TextField {
                                                     horizontal-stretch: 1;
+                                                    placeholder: "wss://asli.vnat.dev/v1";
+                                                    monospace: true;
+                                                    invalid: root.relay-invalid;
+                                                    text <=> root.relay-url;
                                                 }
                                             }
-                                            Rectangle { height: 14px; }
-                                            Label { text: "Largest Clip to Sync"; }
-                                            Rectangle { height: 6px; }
-                                            Select {
-                                                options: ["1 MB", "4 MB", "16 MB", "32 MB"];
-                                                current <=> root.size-cap-index;
-                                            }
-                                            Rectangle { height: 6px; }
-                                            Caption {
-                                                text: "Images up to this size sync, full screen captures included; anything bigger is skipped. Text syncs up to 700 KB, the relay's limit for one message.";
-                                                wrap: word-wrap;
+                                            FieldRow {
+                                                icon: Icons.image;
+                                                title: "Largest Clip to Sync";
+                                                detail: "Images up to this size sync, full screen captures included. Text syncs up to 700 KB, the relay's limit for one message.";
+                                                last: true;
+                                                Select {
+                                                    horizontal-stretch: 1;
+                                                    options: ["1 MB", "4 MB", "16 MB", "32 MB"];
+                                                    current <=> root.size-cap-index;
+                                                }
                                             }
                                         }
                                     }
 
-                                    Rectangle { height: 16px; }
+                                    Rectangle { height: 20px; }
                                     Overline { text: "THIS DEVICE"; }
                                     Rectangle { height: 8px; }
                                     Card {
                                         height: device-card.preferred-height;
                                         device-card := VerticalLayout {
-                                            VerticalLayout {
-                                                padding-top: 13px;
-                                                padding-bottom: 13px;
-                                                padding-left: 16px;
-                                                padding-right: 16px;
-                                                spacing: 0px;
-                                                Text {
-                                                    text: "Device Name";
-                                                    color: Theme.text;
-                                                    font-size: 13px;
-                                                    font-weight: 500;
-                                                }
-                                                Rectangle { height: 6px; }
+                                            FieldRow {
+                                                icon: Icons.device;
+                                                title: "Device Name";
+                                                detail: "How your other devices list this one. Sent to them sealed, like a clip.";
                                                 TextField {
+                                                    horizontal-stretch: 1;
                                                     placeholder: "This Computer";
                                                     text <=> root.device-name;
                                                 }
-                                                Rectangle { height: 6px; }
-                                                Caption { text: "How your other devices list this one. Sent to them sealed, like a clip."; }
                                             }
-                                            Divider { }
                                             SettingRow {
+                                                icon: Icons.bell;
                                                 title: "Notifications";
                                                 detail: "A short message when a clip arrives or something goes wrong.";
                                                 checked <=> root.notifications;
                                                 toggled(on) => { root.set-notifications(on); }
                                             }
                                             SettingRow {
+                                                icon: Icons.power;
                                                 title: "Start at Login";
                                                 detail: root.autostart-detail;
                                                 mono-detail: true;
+                                                last: true;
                                                 checked <=> root.autostart;
                                                 toggled(on) => { root.set-autostart(on); }
                                             }
+                                        }
+                                    }
+
+                                    Rectangle { height: 20px; }
+                                    Overline { text: "FILES"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: files-card.preferred-height;
+                                        files-card := VerticalLayout {
                                             SettingRow {
+                                                icon: Icons.download;
                                                 title: "Ask About Files Right Away";
                                                 detail: "When another device sends files, ask with Accept and Decline in the corner of the screen. Off, they wait on Home.";
                                                 checked <=> root.ask-right-away;
                                                 toggled(on) => { root.set-ask-right-away(on); }
                                             }
                                             SettingRow {
+                                                icon: Icons.network;
                                                 title: "Same Network Only";
                                                 detail: "Approve a new device, and send or receive a file, only when the other device is on this network. Clips still sync from anywhere.";
+                                                last: true;
                                                 checked <=> root.same-network-only;
                                                 toggled(on) => { root.set-same-network-only(on); }
                                             }
+                                        }
+                                    }
+
+                                    Rectangle { height: 20px; }
+                                    Overline { text: "HISTORY"; }
+                                    Rectangle { height: 8px; }
+                                    Card {
+                                        height: history-card.preferred-height;
+                                        history-card := VerticalLayout {
                                             SettingRow {
+                                                icon: Icons.history;
                                                 title: "Keep History";
                                                 detail: "Stored on this device only, encrypted with your account key. Anything marked as a password is never recorded.";
                                                 checked <=> root.keep-history;
                                                 toggled(on) => { root.set-keep-history(on); }
                                             }
-                                            VerticalLayout {
-                                                padding-top: 13px;
-                                                padding-bottom: 13px;
-                                                padding-left: 16px;
-                                                padding-right: 16px;
-                                                spacing: 0px;
-                                                Text {
-                                                    text: "Keep at Most";
-                                                    color: root.keep-history ? Theme.text : Theme.text-4;
-                                                    font-size: 13px;
-                                                    font-weight: 500;
-                                                }
-                                                Rectangle { height: 6px; }
+                                            FieldRow {
+                                                icon: Icons.trash;
+                                                title: "Keep at Most";
+                                                detail: "Older entries are dropped first.";
+                                                dim: !root.keep-history;
+                                                last: true;
                                                 Select {
-                                                    options: ["25 entries", "50 entries", "100 entries", "250 entries"];
+                                                    horizontal-stretch: 1;
+                                                    options: ["25 Entries", "50 Entries", "100 Entries", "250 Entries"];
                                                     enabled: root.keep-history;
                                                     current <=> root.retention-index;
                                                 }
-                                                Rectangle { height: 6px; }
-                                                Caption { text: "Older entries are dropped first."; }
                                             }
                                         }
                                     }
 
-                                    Rectangle { height: 14px; }
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Button {
-                                            text: root.settings-saving ? "Saving…" : "Save";
-                                            kind: ButtonKind.primary;
-                                            pad-x: 18px;
-                                            busy: root.settings-saving;
-                                            enabled: root.settings-dirty && !root.relay-invalid;
-                                            clicked => { root.save-settings(); }
-                                        }
-                                        Button {
-                                            text: "Revert";
-                                            kind: ButtonKind.ghost;
-                                            pad-x: 16px;
-                                            enabled: root.settings-dirty && !root.settings-saving;
-                                            clicked => { root.revert-settings(); }
-                                        }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        HorizontalLayout {
-                                            spacing: 5px;
-                                            if root.settings-saved-flash && !root.settings-dirty: VerticalLayout {
-                                                alignment: center;
-                                                Icon {
-                                                    source: Icons.check;
-                                                    size: 13px;
-                                                    tint: Theme.success;
-                                                }
-                                            }
-                                            Text {
-                                                text: root.settings-dirty ? "Unsaved Changes"
-                                                    : root.settings-saved-flash ? "Saved" : "All Changes Saved";
-                                                color: root.settings-dirty ? Theme.warning
-                                                    : root.settings-saved-flash ? Theme.success : Theme.text-4;
-                                                font-size: 11.5px;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                    if root.settings-note != "": VerticalLayout {
-                                        padding-top: 10px;
-                                        Caption { text: root.settings-note; }
-                                    }
-
-                                    Rectangle { height: 20px; }
+                                    Rectangle { height: 24px; }
                                     Overline {
                                         text: "DANGER";
                                         danger: true;
                                     }
                                     Rectangle { height: 8px; }
                                     Rectangle {
-                                        border-radius: 14px;
+                                        border-radius: 18px;
                                         border-width: 1px;
-                                        background: #F2555A0D;
-                                        border-color: Theme.error-border;
+                                        background: @linear-gradient(135deg, #FF4D5E14 0%, #FF8A5C08 100%);
+                                        border-color: #FF4D5E47;
                                         height: danger-card.preferred-height;
 
                                         danger-card := VerticalLayout {
-                                            padding-top: 14px;
-                                            padding-bottom: 14px;
-                                            padding-left: 16px;
-                                            padding-right: 16px;
-                                            spacing: 12px;
-                                            Text {
-                                                text: root.confirm-leave
-                                                    ? "Leave the account on this device? Its account key, device list and history are deleted here. Your other devices take it off their lists and keep working."
-                                                    : "Leave This Account signs this device out: its account key, device list and history are deleted here, and your other devices take it off their lists. Joining another account does the same, then joins the new one.";
-                                                color: root.confirm-leave ? Theme.text : Theme.text-2;
-                                                font-size: 12px;
-                                                wrap: word-wrap;
-                                            }
-                                            if !root.confirm-leave: HorizontalLayout {
-                                                alignment: start;
-                                                spacing: 8px;
-                                                Button {
-                                                    text: "Leave This Account";
-                                                    kind: ButtonKind.danger;
-                                                    clicked => { root.confirm-leave = true; }
-                                                }
-                                                Button {
-                                                    text: "Join Another Account";
-                                                    kind: ButtonKind.destructive;
-                                                    clicked => { root.confirm-join-other = true; }
-                                                }
-                                            }
-                                            if root.confirm-leave: HorizontalLayout {
-                                                alignment: start;
-                                                spacing: 8px;
-                                                Button {
-                                                    text: "Leave";
-                                                    kind: ButtonKind.danger;
-                                                    clicked => {
-                                                        root.confirm-leave = false;
-                                                        root.leave-account();
+                                            HorizontalLayout {
+                                                padding: 16px;
+                                                spacing: 14px;
+                                                VerticalLayout {
+                                                    alignment: start;
+                                                    Rectangle {
+                                                        width: 34px;
+                                                        height: 34px;
+                                                        border-radius: 10px;
+                                                        background: #FF4D5E24;
+                                                        border-width: 1px;
+                                                        border-color: #FF4D5E47;
+                                                        Icon {
+                                                            source: Icons.back;
+                                                            size: 16px;
+                                                            tint: Theme.danger-soft;
+                                                        }
                                                     }
                                                 }
-                                                Button {
-                                                    text: "Cancel";
-                                                    kind: ButtonKind.ghost;
-                                                    clicked => { root.confirm-leave = false; }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 0px;
+                                                    Text {
+                                                        text: root.confirm-leave ? "Leave the Account on This Device?" : "Leave This Account";
+                                                        color: Theme.text;
+                                                        font-size: 13.5px;
+                                                        font-weight: 650;
+                                                    }
+                                                    Rectangle { height: 2px; }
+                                                    Caption {
+                                                        text: root.confirm-leave
+                                                            ? "Its account key, device list and history are deleted here. Your other devices take it off their lists and keep working."
+                                                            : "Signs this device out: its account key, device list and history are deleted here, and your other devices take it off their lists.";
+                                                        color: root.confirm-leave ? Theme.text-2 : Theme.text-3;
+                                                    }
+                                                    Rectangle { height: 12px; }
+                                                    if !root.confirm-leave: HorizontalLayout {
+                                                        alignment: start;
+                                                        Button {
+                                                            text: "Leave This Account";
+                                                            kind: ButtonKind.danger;
+                                                            small: true;
+                                                            clicked => { root.confirm-leave = true; }
+                                                        }
+                                                    }
+                                                    if root.confirm-leave: HorizontalLayout {
+                                                        alignment: start;
+                                                        spacing: 8px;
+                                                        Button {
+                                                            text: "Leave";
+                                                            kind: ButtonKind.danger;
+                                                            small: true;
+                                                            clicked => {
+                                                                root.confirm-leave = false;
+                                                                root.leave-account();
+                                                            }
+                                                        }
+                                                        Button {
+                                                            text: "Cancel";
+                                                            kind: ButtonKind.ghost;
+                                                            small: true;
+                                                            clicked => { root.confirm-leave = false; }
+                                                        }
+                                                    }
                                                 }
+                                            }
+                                            Rectangle {
+                                                height: 1px;
+                                                background: #FF4D5E26;
+                                            }
+                                            HorizontalLayout {
+                                                padding: 16px;
+                                                spacing: 14px;
+                                                VerticalLayout {
+                                                    alignment: start;
+                                                    Rectangle {
+                                                        width: 34px;
+                                                        height: 34px;
+                                                        border-radius: 10px;
+                                                        background: #FF4D5E24;
+                                                        border-width: 1px;
+                                                        border-color: #FF4D5E47;
+                                                        Icon {
+                                                            source: Icons.key;
+                                                            size: 16px;
+                                                            tint: Theme.danger-soft;
+                                                        }
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 0px;
+                                                    Text {
+                                                        text: "Join Another Account";
+                                                        color: Theme.text;
+                                                        font-size: 13.5px;
+                                                        font-weight: 650;
+                                                    }
+                                                    Rectangle { height: 2px; }
+                                                    Caption { text: "Leaves this account the same way, then joins the new one with a join code."; }
+                                                    Rectangle { height: 12px; }
+                                                    HorizontalLayout {
+                                                        alignment: start;
+                                                        Button {
+                                                            text: "Join Another Account";
+                                                            kind: ButtonKind.destructive;
+                                                            small: true;
+                                                            clicked => { root.confirm-join-other = true; }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Unsaved changes: a bar that rises from the bottom edge, says Saved for
+                            // a moment once they are, and sinks away.
+                            save-bar := Rectangle {
+                                property <bool> up: root.settings-dirty || root.settings-saving || root.settings-saved-flash;
+                                width: min(parent.width - 56px, 460px);
+                                height: 54px;
+                                x: floor((parent.width - self.width) / 2px) * 1px;
+                                y: self.up ? parent.height - self.height - 16px : parent.height + 24px;
+                                opacity: self.up ? 1 : 0;
+                                animate y { duration: 420ms; easing: cubic-bezier(0.3, 1.18, 0.5, 1); }
+                                animate opacity { duration: 200ms; }
+
+                                Glow {
+                                    tint: #000000CC;
+                                    radius: 16px;
+                                    blur: 32px;
+                                    lift: 12px;
+                                    inset: 6px;
+                                }
+                                Rectangle {
+                                    border-radius: 16px;
+                                    background: Theme.menu-fill;
+                                    border-width: 1px;
+                                    border-color: root.settings-dirty ? Theme.warning-border : Theme.success-border;
+                                    animate border-color { duration: 200ms; }
+                                    TouchArea { }
+
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 9px;
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 26px;
+                                                height: 26px;
+                                                border-radius: 8px;
+                                                background: root.settings-dirty ? Theme.warning.with-alpha(0.16) : Theme.success.with-alpha(0.16);
+                                                Icon {
+                                                    source: root.settings-dirty ? Icons.alert : Icons.check;
+                                                    size: 14px;
+                                                    tint: root.settings-dirty ? Theme.warning : Theme.success;
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            text: root.settings-dirty ? "Unsaved Changes" : "Saved";
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                            font-weight: 650;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        if root.settings-dirty || root.settings-saving: VerticalLayout {
+                                            alignment: center;
+                                            Button {
+                                                text: "Revert";
+                                                kind: ButtonKind.ghost;
+                                                small: true;
+                                                enabled: root.settings-dirty && !root.settings-saving;
+                                                clicked => { root.revert-settings(); }
+                                            }
+                                        }
+                                        if root.settings-dirty || root.settings-saving: VerticalLayout {
+                                            alignment: center;
+                                            Button {
+                                                text: root.settings-saving ? "Saving…" : "Save";
+                                                kind: ButtonKind.primary;
+                                                small: true;
+                                                pad-x: 16px;
+                                                busy: root.settings-saving;
+                                                enabled: root.settings-dirty && !root.relay-invalid;
+                                                clicked => { root.save-settings(); }
                                             }
                                         }
                                     }
@@ -3071,33 +3472,55 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // A file dragged over the window: drop it to choose a device.
+                        // Files dragged over the window: drop them to get them ready to send.
                         if root.drop-hover: Rectangle {
-                            background: #0B0E14E6;
-                            Rectangle {
+                            background: #0F0E14F2;
+                            drop-zone := Rectangle {
                                 x: 16px;
                                 y: 16px;
                                 width: parent.width - 32px;
                                 height: parent.height - 32px;
-                                border-radius: 14px;
-                                border-width: 2px;
-                                border-color: Theme.link;
+                                border-radius: 20px;
+                                border-width: 1.5px;
+                                // The ring breathes, slowly, while something hovers.
+                                property <float> breath: 0.5 + 0.5 * sin(animation-tick() / 1800ms * 360deg);
+                                background: @radial-gradient(circle, #6D7CFF2E 0%, #6D7CFF0A 55%, #6D7CFF00 100%);
+                                border-color: Theme.accent.with-alpha(0.45 + 0.4 * self.breath);
+
                                 VerticalLayout {
                                     alignment: center;
-                                    spacing: 10px;
+                                    spacing: 0px;
                                     HorizontalLayout {
                                         alignment: center;
-                                        Icon {
-                                            source: Icons.send;
-                                            size: 28px;
-                                            tint: Theme.link;
+                                        Rectangle {
+                                            width: 72px;
+                                            height: 72px;
+                                            // Bobs a few pixels, in time with the ring.
+                                            Rectangle {
+                                                y: -4px * drop-zone.breath;
+                                                Tile {
+                                                    icon: Icons.send;
+                                                    on: true;
+                                                    size: 72px;
+                                                }
+                                            }
                                         }
                                     }
+                                    Rectangle { height: 22px; }
                                     Text {
                                         text: "Drop to Get It Ready to Send";
                                         color: Theme.text;
-                                        font-size: 15px;
+                                        font-family: Theme.display;
+                                        font-size: 22px;
                                         font-weight: 600;
+                                        letter-spacing: -0.3px;
+                                        horizontal-alignment: center;
+                                    }
+                                    Rectangle { height: 6px; }
+                                    Text {
+                                        text: "Then send it to one device, or to all of them, from Home.";
+                                        color: Theme.text-2;
+                                        font-size: 13px;
                                         horizontal-alignment: center;
                                     }
                                 }
@@ -3119,69 +3542,84 @@ export component AppWindow inherits Window {
 
             // Confirmation before leaving this account, over a scrim.
             if root.confirm-join-other: Rectangle {
-                background: #00000099;
+                background: #07060ABF;
 
                 TouchArea {
                     clicked => { root.confirm-join-other = false; }
                 }
 
-                SoftShadow {
-                    x: (parent.width - 420px) / 2;
-                    y: (parent.height - dialog.preferred-height) / 2;
+                dialog-box := Rectangle {
                     width: 420px;
                     height: dialog.preferred-height;
-                    radius: 14px;
-                    offset-y: 12px;
-                    blur: 32px;
-                    spread: -6px;
-                    strength: 0.6;
-                    steps: 14;
-                }
+                    x: floor((parent.width - self.width) / 2px) * 1px;
+                    y: floor((parent.height - self.height) / 2px) * 1px;
 
-                Rectangle {
-                    width: 420px;
-                    height: dialog.preferred-height;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: 14px;
-                    border-width: 1px;
-                    background: Theme.raised-2;
-                    border-color: Theme.border;
+                    Glow {
+                        tint: #000000E6;
+                        radius: 20px;
+                        blur: 40px;
+                        lift: 16px;
+                        inset: 8px;
+                    }
+                    Rectangle {
+                        border-radius: 20px;
+                        border-width: 1px;
+                        background: Theme.menu-fill;
+                        border-color: Theme.border;
 
-                    TouchArea { }
+                        TouchArea { }
 
-                    dialog := VerticalLayout {
-                        padding: 20px;
-                        spacing: 0px;
-                        Text {
-                            text: "Join Another Account?";
-                            color: Theme.text;
-                            font-size: 15px;
-                            font-weight: 620;
-                            letter-spacing: -0.1px;
-                        }
-                        Rectangle { height: 6px; }
-                        Text {
-                            text: "This device leaves its current account. Your other devices keep syncing with each other, and the current account can only be rejoined with its join string.";
-                            color: Theme.text-2;
-                            font-size: 12.5px;
-                            wrap: word-wrap;
-                        }
-                        Rectangle { height: 18px; }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: end;
-                            Button {
-                                text: "Cancel";
-                                kind: ButtonKind.ghost;
-                                clicked => { root.confirm-join-other = false; }
+                        dialog := VerticalLayout {
+                            padding: 22px;
+                            spacing: 0px;
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    width: 40px;
+                                    height: 40px;
+                                    border-radius: 12px;
+                                    background: #FF4D5E24;
+                                    border-width: 1px;
+                                    border-color: #FF4D5E47;
+                                    Icon {
+                                        source: Icons.key;
+                                        size: 18px;
+                                        tint: Theme.danger-soft;
+                                    }
+                                }
                             }
-                            Button {
-                                text: "Continue";
-                                kind: ButtonKind.danger;
-                                clicked => {
-                                    root.confirm-join-other = false;
-                                    root.open-screen(Screen.Join);
+                            Rectangle { height: 14px; }
+                            Text {
+                                text: "Join Another Account?";
+                                color: Theme.text;
+                                font-family: Theme.display;
+                                font-size: 19px;
+                                font-weight: 600;
+                                letter-spacing: -0.2px;
+                            }
+                            Rectangle { height: 6px; }
+                            Text {
+                                text: "This device leaves its current account. Your other devices keep syncing with each other, and this device can only come back with a new join code.";
+                                color: Theme.text-2;
+                                font-size: 12.5px;
+                                wrap: word-wrap;
+                            }
+                            Rectangle { height: 20px; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: end;
+                                Button {
+                                    text: "Cancel";
+                                    kind: ButtonKind.ghost;
+                                    clicked => { root.confirm-join-other = false; }
+                                }
+                                Button {
+                                    text: "Continue";
+                                    kind: ButtonKind.danger;
+                                    clicked => {
+                                        root.confirm-join-other = false;
+                                        root.open-screen(Screen.Join);
+                                    }
                                 }
                             }
                         }
