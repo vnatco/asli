@@ -459,7 +459,7 @@ fn human(bytes: u64) -> String {
     } else if bytes >= 1024 {
         format!("{:.0} KB", value / 1024.0)
     } else {
-        format!("{bytes} bytes")
+        format!("{bytes} B")
     }
 }
 

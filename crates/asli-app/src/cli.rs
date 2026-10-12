@@ -580,6 +580,8 @@ fn say_goodbye(paths: &Paths) {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    println!("The other devices of the old account could not be told this one is leaving, so they");
+    println!("still list it. Press Forget beside it on any of them to take it off.");
 }
 
 /// Shows a join code for another device and approves it, in the terminal.
@@ -673,7 +675,9 @@ fn status(paths: &Paths) -> Result<()> {
             println!(
                 "               this account's key was shown as an old style join string, and"
             );
-            println!("               may still be in a screenshot. Replace it from Home in the window.");
+            println!(
+                "               may still be in a screenshot. Replace it from Home in the window."
+            );
         }
     } else {
         println!("Account:       none yet. Run 'asli create' or 'asli join'");

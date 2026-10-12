@@ -218,6 +218,8 @@ struct Shared {
     answer: Option<(MsgKind, Vec<u8>, InviteOutcome)>,
     /// Set once the relay has read the answer.
     confirmed: bool,
+    /// Set when an answer could not even be made, which ends the invitation with the reason.
+    failed: Option<String>,
 }
 
 fn run_invitation(
@@ -310,6 +312,9 @@ fn run_invitation(
                             if let Some((kind, body)) = decide(command, approver, &room, &shared) {
                                 let _ = local_tx.send(answer_event(kind, body)).await;
                             }
+                            if shared.lock().is_ok_and(|s| s.failed.is_some()) {
+                                return;
+                            }
                         }
                     }
                 }
@@ -321,12 +326,8 @@ fn run_invitation(
             };
             set_listening(view, false);
 
-            if let Ok(shared) = shared.lock() {
-                if shared.confirmed {
-                    if let Some((_, _, outcome)) = &shared.answer {
-                        return outcome.clone();
-                    }
-                }
+            if let Some(outcome) = settled(&shared) {
+                return outcome;
             }
             if result.is_none() && over() {
                 return InviteOutcome::Expired;
@@ -545,14 +546,21 @@ fn decide(
     let (kind, body, outcome) = match command {
         InviteCommand::Approve(id) => {
             let request = shared.requests.iter().find(|r| r.request_id == id)?;
-            let body = enroll::grant(
+            let made = enroll::grant(
                 &approver.device,
                 room,
                 request,
                 &approver.account_secret,
                 approver.never_exported,
-            )
-            .ok()?;
+            );
+            let body = match made {
+                Ok(body) => body,
+                Err(err) => {
+                    eprintln!("{}", log_line("grant_failed", &err.to_string()));
+                    shared.failed = Some(format!("the approval could not be made: {err}"));
+                    return None;
+                }
+            };
             (
                 MsgKind::JoinGrant,
                 body,
@@ -560,12 +568,35 @@ fn decide(
             )
         }
         InviteCommand::Decline(id) => {
-            let body = enroll::decline(&approver.device, room, &id).ok()?;
+            let body = match enroll::decline(&approver.device, room, &id) {
+                Ok(body) => body,
+                Err(err) => {
+                    eprintln!("{}", log_line("decline_failed", &err.to_string()));
+                    shared.failed = Some(format!("the answer could not be made: {err}"));
+                    return None;
+                }
+            };
             (MsgKind::JoinDecline, body, InviteOutcome::Declined)
         }
     };
     shared.answer = Some((kind, body.clone(), outcome));
     Some((kind, body))
+}
+
+/// How the invitation ended, once it has: an answer the relay confirmed, or one that could not
+/// be made.
+fn settled(shared: &Arc<Mutex<Shared>>) -> Option<InviteOutcome> {
+    let shared = shared.lock().ok()?;
+    if let Some(why) = &shared.failed {
+        return Some(InviteOutcome::Failed(why.clone()));
+    }
+    if shared.confirmed {
+        return shared
+            .answer
+            .as_ref()
+            .map(|(_, _, outcome)| outcome.clone());
+    }
+    None
 }
 
 fn set_listening(view: &Arc<Mutex<InviteView>>, listening: bool) {
@@ -606,6 +637,9 @@ impl std::fmt::Debug for JoinOutcome {
     }
 }
 
+/// How long joining or adding a device waits for the relay before saying it cannot reach it.
+pub const OFFLINE_GRACE: Duration = Duration::from_secs(5);
+
 /// What the new device shows while it waits.
 #[derive(Debug, Default)]
 pub struct JoinView {
@@ -620,6 +654,7 @@ pub struct JoinAttempt {
     comparison: String,
     view: Arc<Mutex<JoinView>>,
     cancel: Arc<AtomicBool>,
+    started: std::time::Instant,
 }
 
 /// Who is asking.
@@ -673,6 +708,7 @@ impl JoinAttempt {
             comparison,
             view,
             cancel,
+            started: std::time::Instant::now(),
         })
     }
 
@@ -686,6 +722,13 @@ impl JoinAttempt {
     #[must_use]
     pub fn asked(&self) -> bool {
         self.view.lock().is_ok_and(|view| view.asked)
+    }
+
+    /// Whether the request is still not out a few seconds in: the relay cannot be reached, and
+    /// the attempt keeps trying.
+    #[must_use]
+    pub fn stuck_offline(&self) -> bool {
+        !self.asked() && self.started.elapsed() > OFFLINE_GRACE
     }
 
     /// Takes the outcome once there is one. Returns it once.

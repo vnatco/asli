@@ -176,9 +176,33 @@ impl Paths {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            if let Err(err) = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)) {
+                eprintln!(
+                    "{}",
+                    crate::clipboard_io::log_line(
+                        "config_dir_permissions",
+                        &format!("{}: {err}", dir.display())
+                    )
+                );
+            }
         }
         Ok(Self { dir })
+    }
+
+    /// Deletes a file this application keeps. One that is already gone is what was wanted; any
+    /// other failure is logged, since the file outlives the deletion that was asked for.
+    pub fn forget(path: &std::path::Path) {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => eprintln!(
+                "{}",
+                crate::clipboard_io::log_line(
+                    "remove_failed",
+                    &format!("{}: {err}", path.display())
+                )
+            ),
+        }
     }
 
     /// Path of the settings file.

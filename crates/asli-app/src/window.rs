@@ -548,6 +548,11 @@ fn show(screen: Screen) {
         eprintln!("{}", log_line("window_failed", &err.to_string()));
         return;
     }
+    // Only now: the drop target joins the window's Wayland connection, which exists once the
+    // window has been shown. Tried before that, it found none, and with nothing on this side to
+    // answer a drag the compositor left it hanging over the window.
+    #[cfg(target_os = "linux")]
+    watch_wayland_drops(&window);
     #[cfg(target_os = "windows")]
     use_resource_icon(&window);
     if already_open && !wayland_session() {
@@ -968,6 +973,11 @@ fn start_join(raw: &str) -> Result<String> {
 
 /// Acts on how asking to join ended, once it has.
 fn refresh_join(window: &AppWindow) {
+    let stuck = JOINING.with_borrow(|slot| {
+        slot.as_ref()
+            .is_some_and(|(attempt, _, _)| attempt.stuck_offline())
+    });
+    window.set_join_reachable(!stuck);
     let outcome = JOINING.with_borrow(|slot| {
         slot.as_ref()
             .and_then(|(attempt, _, _)| attempt.take_outcome())
@@ -1207,6 +1217,11 @@ fn refresh_invite(window: &AppWindow) {
     let remaining_ms = expires_at_ms.saturating_sub(asli_net::client::now_ms());
     let seconds = remaining_ms / 1000;
     window.set_invite_nearby_only(view.nearby_only);
+    // Through the relay, a request can only arrive while the relay is reached. On the local
+    // network alone, it does not matter.
+    let open_for_ms = asli_crypto::enroll::CODE_LIFETIME_MS.saturating_sub(remaining_ms);
+    let grace_ms = u64::try_from(crate::enroll::OFFLINE_GRACE.as_millis()).unwrap_or(u64::MAX);
+    window.set_invite_reachable(view.listening || view.nearby_only || open_for_ms < grace_ms);
     #[allow(clippy::cast_precision_loss)]
     window.set_invite_left(
         (remaining_ms as f32 / asli_crypto::enroll::CODE_LIFETIME_MS as f32).clamp(0.0, 1.0),
@@ -1242,6 +1257,11 @@ fn refresh_invite(window: &AppWindow) {
     let (message, good) = match outcome {
         InviteOutcome::Approved(name) => (format!("{name} is joining now."), true),
         InviteOutcome::Declined => ("Turned down. That code no longer works.".to_owned(), true),
+        InviteOutcome::Expired if !view.listening && !view.nearby_only => (
+            "The code expired while the relay could not be reached, so no device could use it."
+                .to_owned(),
+            false,
+        ),
         InviteOutcome::Expired => ("The code expired before anyone used it.".to_owned(), false),
         InviteOutcome::Failed(why) => (format!("Something went wrong: {why}"), false),
     };
@@ -1825,6 +1845,15 @@ enum Pick {
     Save(std::path::PathBuf, String),
 }
 
+/// The file dialog could not be opened at all: said, rather than leaving a button that did
+/// nothing. From any thread.
+fn picker_failed(why: &str) {
+    eprintln!("{}", log_line("pick_failed", why));
+    let _ = slint::invoke_from_event_loop(|| {
+        toast("Couldn't open the file dialog. Try again.", false);
+    });
+}
+
 /// Opens the system's own dialog to pick a folder or a place to save, on a thread of its own so
 /// the window stays responsive, and hands the result back on the window's thread.
 fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static) {
@@ -1832,6 +1861,7 @@ fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static)
         .name("asli-pick".to_owned())
         .spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+                picker_failed("could not start the dialog");
                 return;
             };
             let picked = runtime.block_on(async {
@@ -1860,7 +1890,7 @@ fn pick_then(pick: Pick, then: impl FnOnce(std::path::PathBuf) + Send + 'static)
             }
         });
     if let Err(err) = spawned {
-        eprintln!("{}", log_line("pick_failed", &err.to_string()));
+        picker_failed(&err.to_string());
     }
 }
 
@@ -1870,6 +1900,7 @@ fn pick_many_then(then: impl FnOnce(Vec<std::path::PathBuf>) + Send + 'static) {
         .name("asli-pick".to_owned())
         .spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+                picker_failed("could not start the dialog");
                 return;
             };
             let picked = runtime.block_on(async {
@@ -1886,12 +1917,12 @@ fn pick_many_then(then: impl FnOnce(Vec<std::path::PathBuf>) + Send + 'static) {
             }
         });
     if let Err(err) = spawned {
-        eprintln!("{}", log_line("pick_failed", &err.to_string()));
+        picker_failed(&err.to_string());
     }
 }
 
-/// Offers files to a device. Its row shows how that goes; only a refusal is said here.
-/// Offers each file to a device. Returns whether any of them is on its way.
+/// Offers each file to a device. Its row shows how that goes; only a refusal is said here.
+/// Returns whether any of them is on its way.
 fn send_files(paths: &[std::path::PathBuf], to: [u8; 16]) -> bool {
     let Some(context) = CONTEXT.get() else {
         return false;
@@ -1938,7 +1969,7 @@ fn show_file(index: i32) {
                 toast(&format!("Couldn't open the folder: {why}"), false);
             }
         }
-        None => toast("That File is No Longer There", false),
+        None => toast("That file is no longer there.", false),
     }
 }
 
@@ -2348,31 +2379,78 @@ fn watch_for_dropped_files(window: &AppWindow) {
         }
         EventResult::Propagate
     });
-
-    #[cfg(target_os = "linux")]
-    watch_wayland_drops(window);
 }
 
-/// Wayland, where winit reports no drops: the drop target joins its connection once, for the life
-/// of the process, and a timer passes on what it hears to whichever window is open.
+/// Wayland, where winit reports no drops: the drop target joins the window's connection once, for
+/// the life of the process, and a timer passes on what it hears to whichever window is open.
+///
+/// The connection belongs to the native window, which the toolkit makes a moment after the window
+/// is shown, so joining is tried on each tick until it works, for a few seconds at most.
 #[cfg(target_os = "linux")]
 fn watch_wayland_drops(window: &AppWindow) {
     thread_local! {
         static TARGET: RefCell<Option<asli_dnd::DropTarget>> = const { RefCell::new(None) };
         static POLL: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+        static TRIED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
-    if TARGET.with_borrow(Option::is_some) {
+    /// Ticks spent trying to join before giving up: five seconds.
+    const TRIES: u32 = 5000 / 30;
+    if TARGET.with_borrow(Option::is_some) || !wayland_session() {
         return;
     }
-    let Some(target) = asli_dnd::DropTarget::attach(window.window()) else {
+    // Each window shown gets its own five seconds. A timer that gave up for an earlier window
+    // starts again; one still trying carries on with this one.
+    TRIED.set(0);
+    let restarted = POLL.with_borrow(|slot| {
+        slot.as_ref().is_some_and(|timer| {
+            if !timer.running() {
+                timer.restart();
+            }
+            true
+        })
+    });
+    if restarted {
         return;
-    };
-    TARGET.with_borrow_mut(|slot| *slot = Some(target));
+    }
+    let handle = window.as_weak();
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(30),
-        || {
+        move || {
+            if TARGET.with_borrow(Option::is_none) {
+                let target = WINDOW
+                    .with_borrow(|window| {
+                        window
+                            .as_ref()
+                            .and_then(|window| asli_dnd::DropTarget::attach(window.window()))
+                    })
+                    .or_else(|| {
+                        handle
+                            .upgrade()
+                            .and_then(|window| asli_dnd::DropTarget::attach(window.window()))
+                    });
+                let Some(target) = target else {
+                    TRIED.set(TRIED.get() + 1);
+                    if TRIED.get() >= TRIES {
+                        eprintln!(
+                            "{}",
+                            log_line(
+                                "drop_target_failed",
+                                "no data device on the window's connection"
+                            )
+                        );
+                        POLL.with_borrow(|slot| {
+                            if let Some(timer) = slot.as_ref() {
+                                timer.stop();
+                            }
+                        });
+                    }
+                    return;
+                };
+                eprintln!("{}", log_line("drop_target", "listening for dropped files"));
+                TARGET.with_borrow_mut(|slot| *slot = Some(target));
+            }
             let events =
                 TARGET.with_borrow_mut(|slot| slot.as_mut().map(asli_dnd::DropTarget::poll));
             for event in events.unwrap_or_default() {
@@ -2385,7 +2463,21 @@ fn watch_wayland_drops(window: &AppWindow) {
                         asli_dnd::DropEvent::Left => window.set_drop_hover(false),
                         asli_dnd::DropEvent::Dropped(paths) => {
                             window.set_drop_hover(false);
+                            if paths.is_empty() {
+                                toast("Only files on this computer can be sent.", false);
+                            }
                             files_dropped(window, paths);
+                        }
+                        asli_dnd::DropEvent::Unreadable => {
+                            window.set_drop_hover(false);
+                            eprintln!(
+                                "{}",
+                                log_line(
+                                    "drop_unreadable",
+                                    "the source did not hand over its list"
+                                )
+                            );
+                            toast("Couldn't read what was dropped. Try again.", false);
                         }
                     }
                 });
@@ -2410,7 +2502,7 @@ fn files_dropped(window: &AppWindow, paths: Vec<std::path::PathBuf>) {
     }
     let skipped = READY.with_borrow_mut(|ready| ready.add(paths));
     if skipped > 0 {
-        toast("Folders Can't Be Sent, Only Files", false);
+        toast("Folders can't be sent, only files.", false);
     }
     if window.get_screen() != Screen::Status {
         window.invoke_open_screen(Screen::Status);
@@ -2651,7 +2743,7 @@ fn refresh_history(window: &AppWindow) {
             let mut meta = vec![human_bytes(entry.bytes)];
             // A clip of several lines is shown on one, so the row says it is more than that.
             if entry.lines > 1 {
-                meta.push(format!("{} lines", entry.lines));
+                meta.push(format!("{} Lines", entry.lines));
             }
             if let Some(thumbnail) = &thumbnail {
                 if thumbnail.width > 0 {
@@ -3133,7 +3225,7 @@ fn put_back(index: i32, everywhere: bool) {
         .and_then(|history| history.restore(index));
 
     let Some(clip) = clip else {
-        toast("That Entry is No Longer There", false);
+        toast("That entry is no longer there.", false);
         return;
     };
 
@@ -3259,7 +3351,7 @@ fn request_retained() {
         eprintln!("{}", log_line("paste_retained", "requested from the relay"));
         toast("Fetching the Stored Clip", true);
     } else {
-        toast("The relay has nothing new for this device", false);
+        toast("The relay has nothing new for this device.", false);
     }
 }
 
@@ -3487,7 +3579,7 @@ fn human_bytes(bytes: usize) -> String {
     } else if bytes >= 1024 {
         format!("{:.0} KB", value / 1024.0)
     } else {
-        format!("{bytes} bytes")
+        format!("{bytes} B")
     }
 }
 

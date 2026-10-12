@@ -71,7 +71,7 @@ pub fn save(paths: &Paths, room: &str, memory: &ReplayMemory) -> Result<()> {
 
 /// Forgets it, with the account.
 pub fn wipe(paths: &Paths) {
-    let _ = fs::remove_file(paths.dir.join(FILE));
+    Paths::forget(&paths.dir.join(FILE));
 }
 
 #[cfg(test)]

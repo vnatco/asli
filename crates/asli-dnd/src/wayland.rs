@@ -110,12 +110,13 @@ impl State {
         let Some(offer) = self.current.take() else {
             return;
         };
-        let paths = read_uri_list(conn, &offer).unwrap_or_default();
+        let paths = read_uri_list(conn, &offer);
         if offer.version() >= 3 {
             offer.finish();
         }
         self.forget(&offer);
-        self.events.push(DropEvent::Dropped(paths));
+        self.events
+            .push(paths.map_or(DropEvent::Unreadable, DropEvent::Dropped));
     }
 }
 

@@ -643,7 +643,7 @@ fn command_output(program: &str, args: &[&str]) -> String {
 /// It names every machine on the account, its operating system and when it was last seen, which
 /// describes the owner's setup and outlives the account it belonged to.
 pub fn wipe(paths: &Paths) {
-    let _ = std::fs::remove_file(paths.dir.join(FILE));
+    Paths::forget(&paths.dir.join(FILE));
 }
 
 #[cfg(test)]

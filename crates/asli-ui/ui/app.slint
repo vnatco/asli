@@ -891,6 +891,10 @@ export component AppWindow inherits Window {
     in property <string> join-error: "";
     // Waiting for the other device to approve this one, and the digits to compare meanwhile.
     in property <bool> join-waiting: false;
+    // Whether the request has reached the relay; false while it keeps trying to.
+    in property <bool> join-reachable: true;
+    // Whether a request for the join code on show can arrive; false while the relay is out of reach.
+    in property <bool> invite-reachable: true;
     in property <string> join-comparison: "";
 
     // History screen.
@@ -1471,8 +1475,8 @@ export component AppWindow inherits Window {
                                                 HorizontalLayout {
                                                     spacing: 8px;
                                                     Text {
-                                                        text: "Waiting for Approval…";
-                                                        color: Theme.text-3;
+                                                        text: root.join-reachable ? "Waiting for Approval…" : "Can't Reach the Relay, Retrying…";
+                                                        color: root.join-reachable ? Theme.text-3 : Theme.warning;
                                                         font-size: 12px;
                                                         vertical-alignment: center;
                                                     }
@@ -1785,12 +1789,12 @@ export component AppWindow inherits Window {
                                                             width: 10px;
                                                             height: 10px;
                                                             border-radius: 5px;
-                                                            background: Theme.accent-2.with-alpha(0.2);
+                                                            background: (root.invite-reachable ? Theme.accent-2 : Theme.warning).with-alpha(0.2);
                                                             Rectangle {
                                                                 width: 6px;
                                                                 height: 6px;
                                                                 border-radius: 3px;
-                                                                background: Theme.accent-2;
+                                                                background: root.invite-reachable ? Theme.accent-2 : Theme.warning;
                                                                 // A slow breath while it waits.
                                                                 opacity: 0.55 + 0.45 * sin(animation-tick() / 1600ms * 360deg);
                                                             }
@@ -1802,7 +1806,7 @@ export component AppWindow inherits Window {
                                                         horizontal-stretch: 1;
                                                         Text {
                                                             height: 18px;
-                                                            text: "Waiting for the New Device";
+                                                            text: root.invite-reachable ? "Waiting for the New Device" : "Can't Reach the Relay, Retrying";
                                                             color: Theme.text;
                                                             font-size: 13px;
                                                             font-weight: 650;
@@ -1810,7 +1814,9 @@ export component AppWindow inherits Window {
                                                         }
                                                         Text {
                                                             height: 16px;
-                                                            text: "Its request appears here as soon as the code is typed.";
+                                                            text: root.invite-reachable
+                                                                ? "Its request appears here as soon as the code is typed."
+                                                                : "The code works again as soon as this device reaches the relay.";
                                                             color: Theme.text-3;
                                                             font-size: 12px;
                                                             vertical-alignment: center;
@@ -2038,7 +2044,8 @@ export component AppWindow inherits Window {
                                     Banner {
                                         kind: BannerKind.info;
                                         icon: Icons.offline;
-                                        title: "Offline. History is local until you reconnect.";
+                                        title: "Offline";
+                                        body: "History is kept here until you reconnect.";
                                     }
                                 }
 

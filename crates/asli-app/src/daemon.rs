@@ -1139,9 +1139,20 @@ pub fn waiting_for_person(controls: &Controls) -> u32 {
 /// history here, and restarts at the first screen. Blocks for up to a few seconds
 /// while the goodbye reaches the relay, so it runs on a thread of its own.
 pub fn leave_account(paths: &Paths, controls: &Controls) {
-    let _ = controls
+    if !controls
         .transfers
-        .say_leaving(std::time::Duration::from_secs(3));
+        .say_leaving(std::time::Duration::from_secs(3))
+    {
+        // Left all the same: the person asked to. The others only need telling how to tidy up.
+        eprintln!(
+            "{}",
+            log_line("goodbye_unsent", "the relay did not confirm it in time")
+        );
+        notify::action_failed(
+            "The Other Devices Were Not Told",
+            "They still list this device. Press Forget beside it on any of them to take it off.",
+        );
+    }
     if let Err(err) = crate::secrets::wipe(paths) {
         eprintln!("{}", log_line("wipe_failed", &err.to_string()));
         notify::action_failed("Asli Could Not Forget the Account Key", &err.to_string());
@@ -1169,7 +1180,7 @@ pub fn forget_account_files(paths: &Paths) {
         "transfer-request.json",
         "rekey-request.json",
     ] {
-        let _ = std::fs::remove_file(paths.dir.join(name));
+        Paths::forget(&paths.dir.join(name));
     }
 }
 
@@ -1687,7 +1698,9 @@ async fn run_connection_loop(
         }
 
         // Whatever happened, the counter this connection reached must survive it.
-        let _ = raise_reservation(paths, session.seq().saturating_add(SEQ_RESERVATION));
+        if let Err(err) = raise_reservation(paths, session.seq().saturating_add(SEQ_RESERVATION)) {
+            eprintln!("{}", log_line("reservation_failed", &err.to_string()));
+        }
 
         if judge_outcome(outcome, &mut backoff, &controls, &mut status) {
             return Ok(());

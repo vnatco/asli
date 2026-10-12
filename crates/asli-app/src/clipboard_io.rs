@@ -551,11 +551,25 @@ impl Batch {
                 Ok(()) => holding |= !matches!(work, Write::ClearIfUnchanged(..)),
                 Err(err) => {
                     eprintln!("{}", log_line("clipboard_write_failed", &err.to_string()));
+                    tell_write_failed(&err.to_string());
                 }
             }
         }
         holding
     }
+}
+
+/// Says that a clip could not be put on the clipboard, at most once a minute: a clipboard that
+/// keeps refusing must not become a notification for every clip.
+fn tell_write_failed(why: &str) {
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    let now = asli_net::client::now_ms();
+    let last = LAST_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 60_000 {
+        return;
+    }
+    LAST_MS.store(now, Ordering::Relaxed);
+    crate::notify::action_failed("A Clip Could Not Be Put on the Clipboard", why);
 }
 
 /// The writer thread: take ownership of the selection, then serve it until new content arrives.

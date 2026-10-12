@@ -224,6 +224,9 @@ struct Incoming {
     replace: bool,
     /// Since when the sender has not been on the connection it offered from.
     gone_since: Option<Instant>,
+    /// The last acknowledgement, when it could not be sent: the sender waits for it, so it is
+    /// sent again on the next tick rather than left to stall the transfer.
+    owed_ack: Option<(u32, AckState)>,
 }
 
 impl Transfers {
@@ -382,6 +385,13 @@ impl Transfers {
         for outgoing in state.sending.values_mut() {
             if matches!(outgoing.stage, Stage::Moving(_)) {
                 pump(link, &mut state.pace, outgoing);
+            }
+        }
+        for incoming in state.receiving.values_mut() {
+            if let Some((received, ack)) = incoming.owed_ack {
+                if send_ack(link, incoming, received, ack).is_ok() {
+                    incoming.owed_ack = None;
+                }
             }
         }
     }
@@ -1077,6 +1087,7 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<([u8; 16], String, String,
             direct: false,
             replace: false,
             gone_since: None,
+            owed_ack: None,
         },
     );
     Some((from, peer, name, size))
@@ -1236,17 +1247,26 @@ fn on_chunk(state: &mut State, body: &[u8]) {
             return;
         }
     };
+    let state = ended.unwrap_or(AckState::Receiving);
+    incoming.owed_ack = send_ack(link, incoming, incoming.received, state)
+        .err()
+        .map(|()| (incoming.received, state));
+}
+
+/// Tells the sender how far a relayed file has got.
+fn send_ack(link: &Link, incoming: &Incoming, received: u32, state: AckState) -> Result<(), ()> {
     let ack = Ack {
-        offer_id: chunk.offer_id,
-        received: incoming.received,
-        state: ended.unwrap_or(AckState::Receiving),
+        offer_id: incoming.offer.offer_id,
+        received,
+        state,
     };
-    let _ = send_msg(
+    send_msg(
         link,
         MsgKind::FileAck,
         ack.encode(),
         &incoming.offer.reply_to,
-    );
+    )
+    .map_err(|_| ())
 }
 
 /// Writes the next piece, by whichever way it came. Returns how the transfer ended once the last
@@ -1586,24 +1606,44 @@ fn part_path_for(path: &Path) -> PathBuf {
 /// internet: Windows' Mark of the Web, macOS's quarantine. Linux has no such mark; the file is
 /// simply not executable.
 fn mark_downloaded(path: &Path) {
+    // None of these stops the file being kept; a mark that could not be set is logged. It cannot
+    // be on some disks at all: FAT and exFAT hold no Zone.Identifier stream.
+    let failed = |what: &str, why: String| {
+        eprintln!(
+            "{}",
+            log_line("mark_downloaded_failed", &format!("{what}: {why}"))
+        );
+    };
     #[cfg(target_os = "windows")]
     {
         let mut stream = path.as_os_str().to_owned();
         stream.push(":Zone.Identifier");
-        let _ = fs::write(PathBuf::from(stream), b"[ZoneTransfer]\r\nZoneId=3\r\n");
+        if let Err(err) = fs::write(PathBuf::from(stream), b"[ZoneTransfer]\r\nZoneId=3\r\n") {
+            failed("Zone.Identifier", err.to_string());
+        }
     }
     #[cfg(target_os = "macos")]
     {
         let value = format!("0081;{:x};Asli;", asli_net::client::now_ms() / 1000);
-        let _ = std::process::Command::new("/usr/bin/xattr")
+        match std::process::Command::new("/usr/bin/xattr")
             .args(["-w", "com.apple.quarantine", &value])
             .arg(path)
-            .output();
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => failed(
+                "quarantine",
+                String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            ),
+            Err(err) => failed("quarantine", err.to_string()),
+        }
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+        if let Err(err) = fs::set_permissions(path, fs::Permissions::from_mode(0o644)) {
+            failed("permissions", err.to_string());
+        }
     }
 }
 

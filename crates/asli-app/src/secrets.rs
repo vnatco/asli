@@ -141,7 +141,22 @@ pub fn store(paths: &Paths, account: &[u8; 32], device: &[u8; 32]) -> Result<Sto
             Ok(()) => {
                 // A previous run may have left a file fallback behind. Two copies of the key is
                 // one copy too many, and the one being dropped is overwritten, not just unlinked.
-                let _ = shred_secret_file(&paths.secret_file());
+                let file = paths.secret_file();
+                if let Err(err) = shred_secret_file(&file) {
+                    // A plaintext copy of the key left on disk is worth telling the person about:
+                    // it is theirs to delete.
+                    eprintln!(
+                        "{}",
+                        crate::clipboard_io::log_line("secret_file_left", &err.to_string())
+                    );
+                    crate::notify::action_failed(
+                        "An Old Copy of the Key is Still on Disk",
+                        &format!(
+                            "Delete {} by hand. It holds the account key.",
+                            file.display()
+                        ),
+                    );
+                }
                 return Ok(Store::Keychain);
             }
             // A keychain that is there but locked must not be bypassed. The key would go to the

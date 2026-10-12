@@ -26,7 +26,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 const FIRST_PIECE: Duration = Duration::from_secs(15);
 /// How long a sender listens for an offer nobody answers.
 const LISTEN_FOR: Duration = Duration::from_mins(15);
-/// Connections that fail to prove they hold the key before the sender stops listening.
+/// Connections that fail to prove they hold the key before the sender notes it in the log.
 const MAX_STRANGERS: u32 = 16;
 /// Largest frame other than a piece.
 const SMALL_FRAME: usize = 64;
@@ -118,9 +118,15 @@ fn serve(transfers: &Transfers, listener: &TcpListener, offer_id: OfferId, key: 
             send_file(transfers, socket, stream, offer_id);
             return;
         }
+        // Not a reason to stop: the receiver may still come, and stopping would hand the file to
+        // the relay, or fail it outright with Same Network Only on, at the word of anyone on the
+        // network. Each stranger costs at most the greeting's few seconds.
         strangers += 1;
-        if strangers >= MAX_STRANGERS {
-            return;
+        if strangers == MAX_STRANGERS {
+            eprintln!(
+                "{}",
+                log_line("file_direct_strangers", "many connections without the key")
+            );
         }
     }
 }

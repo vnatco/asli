@@ -173,6 +173,9 @@ fn last_ending(listed: &[Listed], device: &[u8; 16]) -> Option<Ending> {
 pub struct Moments {
     busy: Vec<[u8; 16]>,
     showing: HashMap<[u8; 16], (Instant, Ending)>,
+    /// When it last looked. An ending that happened while nobody was looking, the window closed
+    /// for an hour say, is old news, not a moment to show.
+    looked: Option<Instant>,
 }
 
 impl Moments {
@@ -183,6 +186,13 @@ impl Moments {
         listed: &[Listed],
         now: Instant,
     ) {
+        if self
+            .looked
+            .is_some_and(|looked| now.saturating_duration_since(looked) > MOMENT)
+        {
+            self.busy.clear();
+        }
+        self.looked = Some(now);
         for device in std::mem::take(&mut self.busy) {
             if !sends.contains_key(&device) {
                 if let Some(ending) = last_ending(listed, &device) {
@@ -287,5 +297,21 @@ mod tests {
         ready.clear();
         assert!(ready.is_empty() && !ready.was_sent_to(&MAC));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ending_while_nobody_looked_is_not_shown_later() {
+        let start = Instant::now();
+        let mut moments = Moments::default();
+        let under_way = vec![sending(MAC, Stage::Moving(2), 4)];
+        let mut sends = device_sends(&under_way, &[]);
+        moments.apply(&mut sends, &under_way, start);
+
+        // The window was closed for an hour, and the file arrived meanwhile.
+        let done = vec![sending(MAC, Stage::Done(None), 4)];
+        let mut sends = device_sends(&done, &[]);
+        moments.apply(&mut sends, &done, start + Duration::from_secs(3600));
+        assert!(!sends.contains_key(&MAC));
+        assert!(!moments.any());
     }
 }

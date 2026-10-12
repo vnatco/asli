@@ -30,6 +30,9 @@ pub enum DropEvent {
     Left,
     /// Files were dropped on the window. Local paths only; anything else in the list is left out.
     Dropped(Vec<std::path::PathBuf>),
+    /// Something was dropped, but the list of files could not be read from the program it came
+    /// from.
+    Unreadable,
 }
 
 #[cfg(unix)]

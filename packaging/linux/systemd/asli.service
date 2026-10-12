@@ -8,7 +8,7 @@
 # session services in one place, and the two should not both be enabled at once.
 
 [Unit]
-Description=Asli clipboard sync
+Description=Asli Clipboard Sync
 Documentation=https://github.com/vnatco/asli
 After=graphical-session.target
 PartOf=graphical-session.target
