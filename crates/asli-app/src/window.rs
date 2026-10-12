@@ -1072,6 +1072,21 @@ fn wire_switches(window: &AppWindow) {
     });
 
     let handle = window.as_weak();
+    window.on_set_ask_right_away(move |on| {
+        let Some(window) = handle.upgrade() else {
+            return;
+        };
+        apply(&window, |config| config.ask_right_away = on);
+        if let Some(context) = CONTEXT.get() {
+            context
+                .controls
+                .settings
+                .ask_right_away
+                .store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
+    let handle = window.as_weak();
     window.on_set_same_network_only(move |on| {
         let Some(window) = handle.upgrade() else {
             return;
@@ -1665,21 +1680,7 @@ fn refresh_files(window: &AppWindow, transfers: &crate::transfer::Transfers) {
     let listed = transfers.list();
     // Offers are asked about one sender at a time, every file that sender offered together, oldest
     // first: several files dropped and sent at once are one question, not several.
-    let waiting: Vec<&crate::transfer::Listed> = listed
-        .iter()
-        .rev()
-        .filter(|t| t.direction == Direction::Receiving && t.stage == Stage::Offered)
-        .collect();
-    let group: Vec<&crate::transfer::Listed> = waiting
-        .first()
-        .map(|first| {
-            waiting
-                .iter()
-                .filter(|t| t.device_id == first.device_id)
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
+    let group = offer_group(&listed, None);
     OFFER_SHOWN.with_borrow_mut(|slot| *slot = group.iter().map(|t| t.id).collect());
     window.set_offer_waiting(!group.is_empty());
     window.set_offer_count(i32::try_from(group.len()).unwrap_or(i32::MAX));
@@ -1860,10 +1861,243 @@ fn show_file(index: i32) {
     }
 }
 
+/// The files one device offered and nobody has answered yet, oldest first: that device's, or the
+/// oldest sender's when none is named.
+fn offer_group(
+    listed: &[crate::transfer::Listed],
+    device: Option<[u8; 16]>,
+) -> Vec<&crate::transfer::Listed> {
+    use crate::transfer::{Direction, Stage};
+    let waiting: Vec<&crate::transfer::Listed> = listed
+        .iter()
+        .rev()
+        .filter(|t| t.direction == Direction::Receiving && t.stage == Stage::Offered)
+        .collect();
+    let Some(sender) = device.or_else(|| waiting.first().map(|t| t.device_id)) else {
+        return Vec::new();
+    };
+    waiting
+        .into_iter()
+        .filter(|t| t.device_id == sender)
+        .collect()
+}
+
+/// Devices whose offered files are being asked about right now, so a burst of offers is asked
+/// about once.
+static ASKING: std::sync::Mutex<Vec<[u8; 16]>> = std::sync::Mutex::new(Vec::new());
+
+/// Asks about the files a device just offered, right away: with a notification that carries the
+/// buttons where the desktop allows, or with a small window in the corner of the screen. From any
+/// thread. Waits a moment first, so several files sent together are one question.
+pub fn ask_about_offers(device: [u8; 16]) {
+    if let Ok(mut asking) = ASKING.lock() {
+        if asking.contains(&device) {
+            return;
+        }
+        asking.push(device);
+    }
+    let _ = std::thread::Builder::new()
+        .name("asli-ask-wait".to_owned())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            if slint::invoke_from_event_loop(move || ask_now(device)).is_err() {
+                // No window here at all: a plain notification has to do.
+                asked(device);
+                crate::notify::file_offered("Another device", "files", 0);
+            }
+        });
+}
+
+/// The question about a device's files is over, however it ended.
+fn asked(device: [u8; 16]) {
+    if let Ok(mut asking) = ASKING.lock() {
+        asking.retain(|d| *d != device);
+    }
+}
+
+fn ask_now(device: [u8; 16]) {
+    let Some(context) = CONTEXT.get() else {
+        asked(device);
+        return;
+    };
+    let listed = context.controls.transfers.list();
+    let group = offer_group(&listed, Some(device));
+    let Some(first) = group.first() else {
+        asked(device);
+        return;
+    };
+    let count = group.len();
+    let total: u64 = group.iter().map(|t| t.size).sum();
+    let size = human_bytes(usize::try_from(total).unwrap_or(usize::MAX));
+    let what = if count > 1 {
+        format!("{} and {} more  ·  {size}", first.name, count - 1)
+    } else {
+        format!("{}  ·  {size}", first.name)
+    };
+    let summary = if count > 1 {
+        format!("{} Wants to Send You {count} Files", first.peer)
+    } else {
+        format!("{} Wants to Send You a File", first.peer)
+    };
+    let from = first.peer.clone();
+    let (popup_from, popup_what) = (from.clone(), what.clone());
+    let notified = crate::notify::ask_offer(&summary, &what, move |choice| {
+        let _ = slint::invoke_from_event_loop(move || {
+            eprintln!("{}", log_line("offer_answered", &format!("{choice:?}")));
+            if choice == crate::notify::OfferChoice::Unasked {
+                // No notification service answered: ask with the window instead.
+                show_offer_popup(device, &popup_from, &popup_what, count);
+                return;
+            }
+            asked(device);
+            answer_offers(device, choice);
+        });
+    });
+    eprintln!(
+        "{}",
+        log_line(
+            "offer_asked",
+            if notified {
+                "with a notification"
+            } else {
+                "with a window"
+            }
+        )
+    );
+    if !notified {
+        show_offer_popup(device, &from, &what, count);
+    }
+    WINDOW.with_borrow(|window| {
+        if let Some(window) = window.as_ref() {
+            refresh_status(window);
+        }
+    });
+}
+
+/// Acts on the answer given in the corner of the screen.
+fn answer_offers(device: [u8; 16], choice: crate::notify::OfferChoice) {
+    let Some(context) = CONTEXT.get() else {
+        return;
+    };
+    let ids: Vec<crate::transfer::OfferId> =
+        offer_group(&context.controls.transfers.list(), Some(device))
+            .iter()
+            .map(|t| t.id)
+            .collect();
+    match choice {
+        crate::notify::OfferChoice::Accept => accept_group(ids),
+        crate::notify::OfferChoice::Decline => {
+            for id in ids {
+                context.controls.transfers.decline(&id);
+            }
+        }
+        crate::notify::OfferChoice::Later | crate::notify::OfferChoice::Unasked => {}
+    }
+    WINDOW.with_borrow(|window| {
+        if let Some(window) = window.as_ref() {
+            refresh_status(window);
+        }
+    });
+}
+
+thread_local! {
+    /// The corner window asking about offered files, and whose files they are.
+    static POPUP: RefCell<Option<(asli_ui::OfferPopup, [u8; 16], slint::Timer)>> = const { RefCell::new(None) };
+}
+
+/// Shows the small window in the corner of the screen. One at a time: a second sender waits for
+/// the first to be answered, and is then asked about.
+fn show_offer_popup(device: [u8; 16], from: &str, what: &str, count: usize) {
+    if POPUP.with_borrow(Option::is_some) {
+        asked(device);
+        return;
+    }
+    let Ok(popup) = asli_ui::OfferPopup::new() else {
+        asked(device);
+        return;
+    };
+    popup.set_from(from.into());
+    popup.set_what(what.into());
+    popup.set_count(i32::try_from(count).unwrap_or(i32::MAX));
+    popup.on_accept(move || {
+        close_offer_popup();
+        answer_offers(device, crate::notify::OfferChoice::Accept);
+    });
+    popup.on_decline(move || {
+        close_offer_popup();
+        answer_offers(device, crate::notify::OfferChoice::Decline);
+    });
+    popup.on_dismiss(close_offer_popup);
+    if let Err(err) = popup.show() {
+        eprintln!("{}", log_line("offer_window_failed", &err.to_string()));
+        asked(device);
+        return;
+    }
+    place_bottom_right(&popup);
+    // Closes by itself once the files were answered some other way, on Home or elsewhere.
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(500),
+        move || {
+            let open = CONTEXT.get().is_some_and(|c| {
+                !offer_group(&c.controls.transfers.list(), Some(device)).is_empty()
+            });
+            if !open {
+                close_offer_popup();
+            }
+        },
+    );
+    POPUP.with_borrow_mut(|slot| *slot = Some((popup, device, timer)));
+}
+
+fn close_offer_popup() {
+    // Taken out first and dropped after, since hiding can run the event loop.
+    let taken = POPUP.with_borrow_mut(Option::take);
+    if let Some((popup, device, timer)) = taken {
+        timer.stop();
+        let _ = popup.hide();
+        asked(device);
+    }
+}
+
+/// Puts a small window in the bottom right corner of its screen, clear of the taskbar or dock.
+fn place_bottom_right(popup: &asli_ui::OfferPopup) {
+    use slint::winit_030::winit::dpi::PhysicalPosition;
+    use slint::winit_030::WinitWindowAccessor as _;
+    popup.window().with_winit_window(|winit| {
+        let Some(monitor) = winit.current_monitor().or_else(|| winit.primary_monitor()) else {
+            return;
+        };
+        let scale = monitor.scale_factor();
+        // The taskbar on Windows and the dock on macOS sit along the bottom by default.
+        let reserved = if cfg!(target_os = "macos") {
+            90.0
+        } else {
+            60.0
+        };
+        let px = |logical: f64| {
+            #[allow(clippy::cast_possible_truncation)]
+            let physical = (logical * scale).round() as i32;
+            physical
+        };
+        let screen = monitor.size();
+        let outer = winit.outer_size();
+        let to_i32 = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+        let x = monitor.position().x + to_i32(screen.width) - to_i32(outer.width) - px(16.0);
+        let y = monitor.position().y + to_i32(screen.height) - to_i32(outer.height) - px(reserved);
+        winit.set_outer_position(PhysicalPosition::new(x, y));
+    });
+}
+
 /// Accepting asks where to keep the files, every time, starting where the last ones went: a Save
 /// dialog for one file, a folder for several.
 fn accept_offer() {
-    let ids = OFFER_SHOWN.with_borrow(Clone::clone);
+    accept_group(OFFER_SHOWN.with_borrow(Clone::clone));
+}
+
+/// Accepts one sender's offered files, asking where to keep them.
+fn accept_group(ids: Vec<crate::transfer::OfferId>) {
     let Some(context) = CONTEXT.get() else {
         return;
     };
@@ -2533,6 +2767,7 @@ fn load_settings(window: &AppWindow) {
     window.set_notifications(config.notifications);
     window.set_keep_history(config.keep_history);
     window.set_same_network_only(config.same_network_only);
+    window.set_ask_right_away(config.ask_right_away);
 
     let (cap_index, exact) = nearest_cap(config.max_content_bytes);
     window.set_size_cap_index(cap_index);

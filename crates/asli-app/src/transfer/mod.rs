@@ -928,7 +928,11 @@ impl Transfers {
 
     /// Acts on a file message from another device. Returns the name and sender of a newly offered
     /// file, so the caller can bring it to the person's attention.
-    pub(crate) fn on_message(&self, kind: MsgKind, body: &[u8]) -> Option<(String, String, u64)> {
+    pub(crate) fn on_message(
+        &self,
+        kind: MsgKind,
+        body: &[u8],
+    ) -> Option<([u8; 16], String, String, u64)> {
         let Ok(mut state) = self.0.lock() else {
             return None;
         };
@@ -950,7 +954,7 @@ impl Transfers {
 
 /// Records a file offered to this device. Returns the sender's name, the file's name and its size,
 /// to ask the person about.
-fn on_offer(state: &mut State, body: &[u8]) -> Option<(String, String, u64)> {
+fn on_offer(state: &mut State, body: &[u8]) -> Option<([u8; 16], String, String, u64)> {
     let link = state.link.as_ref()?;
     // Believed only when signed by the key its claimed sender pinned. The name shown is the one
     // that device's card gave, not anything the offer says.
@@ -989,7 +993,7 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<(String, String, u64)> {
             replace: false,
         },
     );
-    Some((peer, name, size))
+    Some((from, peer, name, size))
 }
 
 fn on_answer(state: &mut State, body: &[u8]) {

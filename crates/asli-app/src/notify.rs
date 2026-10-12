@@ -337,6 +337,100 @@ pub fn file_offered(from: &str, name: &str, bytes: u64) {
     );
 }
 
+/// What the person chose when asked about files offered to this device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferChoice {
+    /// Take them: choose where to save.
+    Accept,
+    /// Turn them down.
+    Decline,
+    /// Neither, for now: closed or timed out. They wait on Home.
+    Later,
+    /// The notification could not be shown at all, so nobody was asked.
+    Unasked,
+}
+
+/// An answer still to give, once.
+#[cfg(target_os = "linux")]
+type Answer = std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnOnce(OfferChoice) + Send>>>>;
+
+/// Asks about offered files with Accept and Decline on the notification itself, where the desktop
+/// draws such buttons (KDE, GNOME and most others on Linux). Waits for the answer on a thread of
+/// its own and hands it to `answer`. Returns false where notifications cannot carry buttons, so the
+/// caller asks another way.
+#[cfg(target_os = "linux")]
+pub fn ask_offer(
+    summary: &str,
+    body: &str,
+    answer: impl FnOnce(OfferChoice) + Send + 'static,
+) -> bool {
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
+
+    // Answered once, by whichever comes first: the person, or the deadline below.
+    let answer: Answer = Arc::new(Mutex::new(Some(Box::new(answer))));
+    let give = move |slot: &Answer, choice: OfferChoice| {
+        if let Some(answer) = slot.lock().ok().and_then(|mut a| a.take()) {
+            answer(choice);
+        }
+    };
+    let (shown_tx, shown_rx) = mpsc::channel::<()>();
+    let (summary, body) = (summary.to_owned(), body.to_owned());
+    let asking = Arc::clone(&answer);
+    let spawned = std::thread::Builder::new()
+        .name("asli-ask".to_owned())
+        .spawn(move || {
+            let shown = notify_rust::Notification::new()
+                .appname(APP_NAME)
+                .summary(&summary)
+                .body(&body)
+                .icon("document-save")
+                .action("accept", "Accept")
+                .action("decline", "Decline")
+                .urgency(notify_rust::Urgency::Critical)
+                .timeout(notify_rust::Timeout::Never)
+                .show();
+            let Ok(handle) = shown else {
+                give(&asking, OfferChoice::Unasked);
+                return;
+            };
+            let _ = shown_tx.send(());
+            let mut choice = OfferChoice::Later;
+            handle.wait_for_action(|action| {
+                choice = match action {
+                    "accept" => OfferChoice::Accept,
+                    "decline" => OfferChoice::Decline,
+                    _ => OfferChoice::Later,
+                };
+            });
+            give(&asking, choice);
+        });
+    if spawned.is_err() {
+        return false;
+    }
+    // A notification service that is starting, or hung, can hold the call for good, and then
+    // nobody would be asked at all. Past the deadline the caller asks another way.
+    let late = Arc::clone(&answer);
+    let _ = std::thread::Builder::new()
+        .name("asli-ask-deadline".to_owned())
+        .spawn(move || {
+            if shown_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                give(&late, OfferChoice::Unasked);
+            }
+        });
+    true
+}
+
+/// Notifications carry no buttons here; the caller asks with a window of its own.
+#[cfg(not(target_os = "linux"))]
+pub fn ask_offer(
+    _summary: &str,
+    _body: &str,
+    _answer: impl FnOnce(OfferChoice) + Send + 'static,
+) -> bool {
+    false
+}
+
 /// A device asks to join through the code on show here.
 pub fn join_requested(name: &str) {
     send(

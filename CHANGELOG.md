@@ -116,6 +116,10 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Several files offered at once by one device are one question, Accept All and Decline All, saved
   into a folder you choose.
 - Dropping files on the window works on Wayland too.
+- Files another device sends are asked about right away, with Accept and Decline: in a
+  notification with buttons on Linux, and a small window in the corner of the screen on Windows
+  and macOS, or there too when no notification service answers within a few seconds. It closes by
+  itself once answered anywhere. A switch in Settings, on by default.
 - Every label, button, title and menu item is in Title Case.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and

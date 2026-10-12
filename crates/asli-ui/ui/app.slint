@@ -736,6 +736,7 @@ export component AppWindow inherits Window {
     in-out property <bool> autostart: false;
     in-out property <bool> keep-history: true;
     in-out property <bool> same-network-only: false;
+    in-out property <bool> ask-right-away: true;
     in-out property <bool> confirm-leave: false;
     in property <string> saved-relay-url: "";
     in property <string> saved-device-name: "";
@@ -799,6 +800,7 @@ export component AppWindow inherits Window {
     callback set-autostart(bool);
     callback set-keep-history(bool);
     callback set-same-network-only(bool);
+    callback set-ask-right-away(bool);
     callback leave-account();
     callback hide-window();
     // Where the pointer is, in window coordinates, so the release can be handed back.
@@ -2876,6 +2878,12 @@ export component AppWindow inherits Window {
                                                 toggled(on) => { root.set-autostart(on); }
                                             }
                                             SettingRow {
+                                                title: "Ask About Files Right Away";
+                                                detail: "When another device sends files, ask with Accept and Decline in the corner of the screen. Off, they wait on Home.";
+                                                checked <=> root.ask-right-away;
+                                                toggled(on) => { root.set-ask-right-away(on); }
+                                            }
+                                            SettingRow {
                                                 title: "Same Network Only";
                                                 detail: "Approve a new device, and send or receive a file, only when the other device is on this network. Clips still sync from anywhere.";
                                                 checked <=> root.same-network-only;
@@ -3134,6 +3142,111 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// The small window in the corner of the screen that asks about files another device sends, so
+// nobody has to open Asli to answer. Windows and macOS; Linux asks with a notification instead.
+export component OfferPopup inherits Window {
+    in property <string> from;
+    in property <string> what;
+    in property <int> count: 1;
+    callback accept();
+    callback decline();
+    callback dismiss();
+
+    title: "Asli";
+    no-frame: true;
+    always-on-top: true;
+    width: 392px;
+    height: 148px;
+    background: #0F0E14;
+    default-font-family: Theme.ui;
+    default-font-size: 13px;
+
+    property <bool> shown: false;
+    init => { self.shown = true; }
+
+    Rectangle {
+        background: @linear-gradient(180deg, #1F1D28 0%, #13121A 100%);
+        border-width: 1px;
+        border-color: #6D7CFF66;
+        clip: true;
+
+        Rectangle {
+            x: -90px;
+            y: -110px;
+            width: 280px;
+            height: 280px;
+            background: @radial-gradient(circle, #4FE3C12E 0%, #4FE3C100 70%);
+        }
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: 260ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    Tile {
+                        icon: Icons.download;
+                        on: true;
+                        size: 40px;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text {
+                        height: 20px;
+                        text: root.count > 1
+                            ? root.from + " Wants to Send You " + root.count + " Files"
+                            : root.from + " Wants to Send You a File";
+                        color: Theme.text;
+                        font-size: 13.5px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        height: 16px;
+                        text: root.what;
+                        color: Theme.text-2;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    IconButton {
+                        icon: Icons.win-close;
+                        label: "Close";
+                        clicked => { root.dismiss(); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Button {
+                    horizontal-stretch: 1;
+                    text: root.count > 1 ? "Accept All…" : "Accept and Save As…";
+                    kind: ButtonKind.primary;
+                    icon: Icons.download;
+                    show-icon: true;
+                    clicked => { root.accept(); }
+                }
+                Button {
+                    text: root.count > 1 ? "Decline All" : "Decline";
+                    clicked => { root.decline(); }
                 }
             }
         }

@@ -229,6 +229,8 @@ pub struct LiveSettings {
     pub reconnect: Arc<AtomicBool>,
     /// Set when this device's name changed, so it announces the new one to the others.
     pub announce: Arc<AtomicBool>,
+    /// Whether offered files are asked about right away, in the corner of the screen.
+    pub ask_right_away: Arc<AtomicBool>,
 }
 
 impl LiveSettings {
@@ -238,6 +240,8 @@ impl LiveSettings {
             .store(config.notifications, Ordering::Relaxed);
         self.max_content_bytes
             .store(config.max_content_bytes, Ordering::Relaxed);
+        self.ask_right_away
+            .store(config.ask_right_away, Ordering::Relaxed);
     }
 
     fn notifications(&self) -> bool {
@@ -1032,9 +1036,13 @@ fn on_account_event(
             controls.transfers.connected(conn_id);
         }
         ClientEvent::Message { kind, body } => {
-            if let Some((from, name, bytes)) = controls.transfers.on_message(*kind, body) {
-                notify::file_offered(&from, &name, bytes);
-                crate::window::open_from_any_thread(crate::window::Screen::Status);
+            if let Some((device, from, name, bytes)) = controls.transfers.on_message(*kind, body) {
+                if controls.settings.ask_right_away.load(Ordering::Relaxed) {
+                    crate::window::ask_about_offers(device);
+                } else {
+                    notify::file_offered(&from, &name, bytes);
+                    crate::window::open_from_any_thread(crate::window::Screen::Status);
+                }
             }
         }
         ClientEvent::RelayError {

@@ -79,6 +79,15 @@ pub struct Config {
     /// network, and sends and receives files only on it, never through the relay.
     #[serde(default)]
     pub same_network_only: bool,
+    /// Whether files another device sends are asked about right away, with Accept and Decline in
+    /// the corner of the screen, rather than only on Home.
+    #[serde(default = "default_ask_right_away")]
+    pub ask_right_away: bool,
+}
+
+/// Asked right away by default: a file waiting unseen on Home leaves its sender waiting too.
+const fn default_ask_right_away() -> bool {
+    true
 }
 
 /// History is on by default, which is what every comparable tool does and what makes the feature
@@ -111,6 +120,7 @@ impl Config {
             device_name: String::new(),
             key_never_exported: false,
             same_network_only: false,
+            ask_right_away: true,
         })
     }
 
