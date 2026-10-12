@@ -368,7 +368,7 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.8".into());
+    ui.set_app_version("0.1.9".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
@@ -438,8 +438,17 @@ fn sample(ui: &AppWindow) {
             send_progress: 0.0,
         },
     ])));
-    let row = |preview: &str, meta: &str, image: bool, mono: bool| HistoryRow {
+    let row = |section: &str,
+               preview: &str,
+               source: &str,
+               when: &str,
+               meta: &str,
+               image: bool,
+               mono: bool| HistoryRow {
+        section: section.into(),
         preview: preview.into(),
+        source: source.into(),
+        when: when.into(),
         meta: meta.into(),
         is_image: image,
         mono,
@@ -447,12 +456,12 @@ fn sample(ui: &AppWindow) {
         has_thumb: false,
     };
     ui.set_history(ModelRc::new(VecModel::from(vec![
-        row("Replay protection now survives restarts, so sync no longer depends on the clocks agreeing.", "3 minutes ago · 120 bytes · from MacBook Pro", false, false),
-        row("Image, 1440 × 900", "11 minutes ago · 284 KB · from this device", true, false),
+        row("Today", "Replay protection now survives restarts, so sync no longer depends on the clocks agreeing.", "MacBook Pro", "3 Minutes Ago", "120 bytes", false, false),
+        row("", "Image", "This Device", "11 Minutes Ago", "284 KB  ·  1440 × 900", true, false),
+        row("", "wss://asli.vnat.dev/v1", "fedora-desk", "26 Minutes Ago", "21 bytes", false, true),
+        row("Yesterday", "Tests: 350 pass on Linux, and 336 pass as real Windows binaries under Wine.", "fedora-desk", "A Day Ago", "199 bytes", false, false),
         // A clip of several lines, as the history shows one: on one line, saying how many.
-        row("Dear team, the release is tagged. Notes are in the changelog. Thanks all", "3 days ago · 52 bytes · 3 lines · from this device", false, false),
-        row("wss://asli.vnat.dev/v1", "26 minutes ago · 21 bytes · from fedora-desk", false, true),
-        row("Tests: 350 pass on Linux, and 336 pass as real Windows binaries under Wine.", "1 hour ago · 199 bytes · from fedora-desk", false, false),
+        row("Thursday", "Dear team, the release is tagged. Notes are in the changelog. Thanks all", "This Device", "3 Days Ago", "52 bytes  ·  3 lines", false, false),
     ])));
     ui.set_history_note("Stored on this device only, encrypted with your account key.".into());
     ui.set_relay_url("wss://asli.vnat.dev/v1".into());

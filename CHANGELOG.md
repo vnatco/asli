@@ -121,6 +121,9 @@ Nothing is tagged yet and there are no downloads. What exists today:
   and macOS, or there too when no notification service answers within a few seconds. It closes by
   itself once answered anywhere. A switch in Settings, on by default.
 - Every label, button, title and menu item is in Title Case.
+- History, redone: clips grouped under Today, Yesterday or the day they were copied, each with a
+  tinted tile for its kind or a rounded thumbnail, the device it came from, when, and its size, with
+  the row lighting up when copied again.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and
   returns to the first screen.

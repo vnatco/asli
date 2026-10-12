@@ -69,6 +69,8 @@ slint = { version = "1.18.0", default-features = false, features = [
     "unstable-winit-030",
 ] }
 tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "time"] }
+# Local dates, for the day each history entry belongs to. Already built for the toolkit.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 zeroize = "1"
 
 # Desktop notifications over the session bus on Linux, and toasts on Windows. The default "z"

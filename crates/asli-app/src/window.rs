@@ -2533,29 +2533,24 @@ fn refresh_history(window: &AppWindow) {
         cache.retain(|key, _| entries.iter().any(|entry| entry.key == *key));
     });
 
+    let mut last_day = String::new();
     let rows: Vec<HistoryRow> = entries
         .iter()
         .enumerate()
         .map(|(index, entry)| {
             let source = if entry.from == [0u8; 16] {
-                None
+                String::new()
             } else if Some(entry.from) == own {
-                Some("from this device".to_owned())
+                "This Device".to_owned()
             } else {
-                Some(format!(
-                    "from {}",
-                    context
-                        .controls
-                        .devices
-                        .name_of(&entry.from)
-                        .unwrap_or_else(|| "another device".to_owned())
-                ))
+                context
+                    .controls
+                    .devices
+                    .name_of(&entry.from)
+                    .unwrap_or_else(|| "Another Device".to_owned())
             };
             let thumbnail = entry.is_image.then(|| thumbnail(context, index, entry.key));
-            let mut meta = vec![
-                tray::relative_time(Some(entry.ts_ms), now),
-                human_bytes(entry.bytes),
-            ];
+            let mut meta = vec![human_bytes(entry.bytes)];
             // A clip of several lines is shown on one, so the row says it is more than that.
             if entry.lines > 1 {
                 meta.push(format!("{} lines", entry.lines));
@@ -2565,16 +2560,25 @@ fn refresh_history(window: &AppWindow) {
                     meta.push(format!("{} \u{d7} {}", thumbnail.width, thumbnail.height));
                 }
             }
-            meta.extend(source);
             let preview = if entry.is_image {
                 "Image".to_owned()
             } else {
                 entry.preview.clone()
             };
+            let day = day_label(entry.ts_ms);
+            let section = if day == last_day {
+                String::new()
+            } else {
+                day.clone()
+            };
+            last_day = day;
             HistoryRow {
                 mono: !entry.is_image && looks_like_code(&preview),
                 preview: preview.into(),
-                meta: meta.join(" \u{b7} ").into(),
+                meta: meta.join("  \u{b7}  ").into(),
+                section: section.into(),
+                source: source.into(),
+                when: crate::title_case(&tray::relative_time(Some(entry.ts_ms), now)).into(),
                 is_image: entry.is_image,
                 has_thumb: thumbnail.as_ref().is_some_and(|t| t.image.is_some()),
                 thumb: thumbnail.and_then(|t| t.image).unwrap_or_default(),
@@ -2594,6 +2598,27 @@ fn refresh_history(window: &AppWindow) {
         }
         .into(),
     );
+}
+
+/// The day an entry belongs to, as a section heading: Today, Yesterday, a weekday within the
+/// week, then a date.
+fn day_label(ts_ms: u64) -> String {
+    use chrono::{Datelike as _, Local, TimeZone as _};
+    let Some(when) = i64::try_from(ts_ms)
+        .ok()
+        .and_then(|ms| Local.timestamp_millis_opt(ms).single())
+    else {
+        return String::new();
+    };
+    let today = Local::now().date_naive();
+    let day = when.date_naive();
+    match (today - day).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        2..=6 => day.format("%A").to_string(),
+        _ if day.year() == today.year() => day.format("%B %-d").to_string(),
+        _ => day.format("%B %-d, %Y").to_string(),
+    }
 }
 
 /// An image entry's thumbnail, from the cache or decoded now.

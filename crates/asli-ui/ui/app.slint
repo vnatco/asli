@@ -31,6 +31,11 @@ export enum Screen {
 export struct HistoryRow {
     preview: string,
     meta: string,
+    // The day it belongs to, on the first row of each day only: "Today", "Yesterday", "Monday".
+    section: string,
+    // Where it was copied, and how long ago.
+    source: string,
+    when: string,
     is-image: bool,
     // URLs and code read better in the monospaced face.
     mono: bool,
@@ -1617,10 +1622,10 @@ export component AppWindow inherits Window {
                                 Rectangle {
                                     height: header.preferred-height;
                                     header := HorizontalLayout {
-                                        padding-top: 20px;
+                                        padding-top: 22px;
                                         padding-bottom: 14px;
-                                        padding-left: 24px;
-                                        padding-right: 24px;
+                                        padding-left: 28px;
+                                        padding-right: 28px;
                                         spacing: 16px;
 
                                         VerticalLayout {
@@ -1672,11 +1677,6 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                         }
-                                    }
-                                    Rectangle {
-                                        y: parent.height - 1px;
-                                        height: 1px;
-                                        background: Theme.hairline;
                                     }
                                 }
 
@@ -1766,208 +1766,253 @@ export component AppWindow inherits Window {
                                         alignment: center;
                                         padding-left: 48px;
                                         padding-right: 48px;
-                                        padding-bottom: 24px;
+                                        padding-bottom: 40px;
+                                        spacing: 0px;
                                         HorizontalLayout {
                                             alignment: center;
-                                            Rectangle {
-                                                width: 64px;
-                                                height: 64px;
-                                                SoftShadow {
-                                                    radius: 18px;
-                                                    offset-y: 12px;
-                                                    blur: 32px;
-                                                    spread: -12px;
-                                                    strength: 0.8;
-                                                    steps: 14;
-                                                }
-                                              GradientFill {
-                                                radius: 18px;
-                                                angle: 145deg;
-                                                from: Theme.hero-from;
-                                                to: Theme.hero-to;
-                                              }
-                                              Rectangle {
-                                                border-radius: 18px;
-                                                border-width: 1px;
-                                                border-color: Theme.border;
-                                                Icon {
-                                                    source: Icons.copy;
-                                                    size: 26px;
-                                                    tint: Theme.border-strong;
-                                                }
-                                              }
+                                            Tile {
+                                                icon: Icons.copy;
+                                                on: true;
+                                                size: 64px;
                                             }
                                         }
-                                        Rectangle { height: 16px; }
+                                        Rectangle { height: 20px; }
                                         Text {
                                             text: "Nothing Copied Yet";
                                             color: Theme.text;
-                                            font-size: 15px;
-                                            font-weight: 620;
-                                            letter-spacing: -0.1px;
+                                            font-family: Theme.display;
+                                            font-size: 22px;
+                                            font-weight: 600;
                                             horizontal-alignment: center;
                                         }
-                                        Rectangle { height: 5px; }
+                                        Rectangle { height: 6px; }
                                         HorizontalLayout {
                                             alignment: center;
                                             Text {
-                                                width: min(300px, parent.width);
-                                                text: "Copy something on any paired device and it shows up here within a second.";
-                                                color: Theme.text-3;
-                                                font-size: 12.5px;
+                                                width: min(320px, parent.width);
+                                                text: "Copy something on any of your devices and it shows up here within a second.";
+                                                color: Theme.text-2;
+                                                font-size: 13px;
                                                 wrap: word-wrap;
                                                 horizontal-alignment: center;
                                             }
                                         }
-                                        Rectangle { height: 16px; }
+                                        Rectangle { height: 18px; }
                                         HorizontalLayout {
                                             alignment: center;
                                             Button {
                                                 text: "Add Another Device";
                                                 small: true;
+                                                icon: Icons.plus;
+                                                show-icon: true;
                                                 clicked => { root.open-screen(Screen.Token); }
                                             }
                                         }
                                     }
                                 }
-
                                 if root.history-enabled && root.history.length > 0: Scroller {
                                     vertical-stretch: 1;
                                     content-height: rows.preferred-height;
-
                                     rows := VerticalLayout {
-                                        padding-top: 12px;
-                                        padding-bottom: 20px;
-                                        padding-left: 24px;
-                                        padding-right: 24px;
+                                        padding-top: 4px;
+                                        padding-bottom: 22px;
+                                        padding-left: 28px;
+                                        padding-right: 28px;
                                         spacing: 8px;
                                         alignment: start;
 
-                                        for entry[index] in root.history: Rectangle {
-                                            height: entry.has-thumb ? 74px : 62px;
-                                            // Nothing a row holds may paint over the next one,
-                                            // whatever arrives in it. The preview is already one
-                                            // line; this is the backstop.
-                                            clip: true;
-                                            border-radius: 12px;
-                                            border-width: 1px;
-                                            background: row-touch.has-hover ? Theme.raised-2 : Theme.raised-1;
-                                            border-color: row-touch.has-hover ? Theme.border-strong : Theme.border-subtle;
-                                            transform-origin: { x: self.width / 2, y: self.height / 2 };
-                                            transform-scale-x: row-touch.pressed ? 99.5% : 100%;
-                                            transform-scale-y: row-touch.pressed ? 99.5% : 100%;
-                                            animate background, border-color { duration: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
-                                            animate transform-scale-x, transform-scale-y { duration: 80ms; }
-                                            accessible-role: list-item;
-                                            accessible-label: entry.is-image ? "Image" : entry.preview;
-                                            accessible-description: entry.meta;
-                                            accessible-action-default => { root.restore-entry(index); }
-
-                                            row-touch := TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { root.restore-entry(index); }
+                                        // The row just put back flashes, so the click visibly did something.
+                                        property <int> flashed: -1;
+                                        flash-timer := Timer {
+                                            interval: 900ms;
+                                            running: false;
+                                            triggered => {
+                                                rows.flashed = -1;
+                                                self.running = false;
                                             }
+                                        }
 
-                                            HorizontalLayout {
-                                                padding-top: 11px;
-                                                padding-bottom: 11px;
-                                                padding-left: 12px;
-                                                padding-right: 12px;
-                                                spacing: 12px;
-
-                                                // Type tile: blue for text, green for an image, and
-                                                // a different glyph for each, so the two are told
-                                                // apart by shape as well as by hue.
-                                                if !entry.has-thumb: VerticalLayout {
-                                                    alignment: center;
-                                                    Rectangle {
-                                                        width: 38px;
-                                                        height: 38px;
-                                                        border-radius: 9px;
-                                                        border-width: 1px;
-                                                        background: entry.is-image ? #3DD68C1A : #4C8DFF1A;
-                                                        border-color: entry.is-image ? Theme.success-border : Theme.accent-border;
-                                                        Icon {
-                                                            source: entry.is-image ? Icons.image : Icons.text;
-                                                            size: 16px;
-                                                            tint: entry.is-image ? Theme.success : Theme.link;
-                                                        }
-                                                    }
+                                        for entry[index] in root.history: VerticalLayout {
+                                            spacing: 8px;
+                                            if entry.section != "": HorizontalLayout {
+                                                padding-top: index == 0 ? 0px : 12px;
+                                                Text {
+                                                    text: entry.section;
+                                                    color: Theme.text;
+                                                    font-family: Theme.display;
+                                                    font-size: 15px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
                                                 }
-                                                // The thumbnail arrives with its corners already
-                                                // rounded: this renderer cannot clip to a radius.
-                                                if entry.has-thumb: VerticalLayout {
-                                                    alignment: center;
-                                                    Rectangle {
-                                                        width: 50px;
-                                                        height: 50px;
-                                                        Image {
-                                                            width: 100%;
-                                                            height: 100%;
-                                                            source: entry.thumb;
-                                                            image-fit: cover;
-                                                        }
-                                                        Rectangle {
-                                                            border-radius: 9px;
-                                                            border-width: 1px;
-                                                            border-color: Theme.border;
-                                                        }
-                                                    }
+                                            }
+                                            history-row := Rectangle {
+                                                property <color> kind-tone: entry.is-image ? Theme.accent-2
+                                                    : entry.mono ? #B98BFF : Theme.accent;
+                                                height: entry.has-thumb ? 78px : 64px;
+                                                // Nothing a row holds may paint over the next one.
+                                                clip: true;
+                                                border-radius: 16px;
+                                                border-width: 1px;
+                                                background: row-touch.has-hover ? #FFFFFF0E : #FFFFFF07;
+                                                border-color: row-touch.has-hover ? Theme.border-strong : Theme.border-subtle;
+                                                transform-origin: { x: self.width / 2, y: self.height / 2 };
+                                                transform-scale-x: row-touch.pressed ? 99.2% : 100%;
+                                                transform-scale-y: row-touch.pressed ? 99.2% : 100%;
+                                                animate background, border-color { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                                                animate transform-scale-x, transform-scale-y { duration: 200ms; easing: cubic-bezier(0.34, 1.32, 0.5, 1); }
+                                                accessible-role: list-item;
+                                                accessible-label: entry.is-image ? "Image" : entry.preview;
+                                                accessible-description: entry.source + ", " + entry.when;
+                                                accessible-action-default => { root.restore-entry(index); }
+
+                                                // Put back: a wash of the accent that fades.
+                                                Rectangle {
+                                                    background: @linear-gradient(90deg, #4FE3C140 0%, #6D7CFF26 100%);
+                                                    opacity: rows.flashed == index ? 1 : 0;
+                                                    animate opacity { duration: rows.flashed == index ? 120ms : 700ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
                                                 }
 
-                                                VerticalLayout {
-                                                    horizontal-stretch: 1;
-                                                    alignment: center;
-                                                    spacing: 2px;
-                                                    Text {
-                                                        height: 20px;
-                                                        vertical-alignment: center;
-                                                        text: entry.preview;
-                                                        color: Theme.text;
-                                                        font-size: entry.mono ? 12.5px : 13px;
-                                                        font-family: entry.mono ? Theme.mono : "";
-                                                        wrap: no-wrap;
-                                                        overflow: elide;
-                                                    }
-                                                    Text {
-                                                        height: 16px;
-                                                        vertical-alignment: center;
-                                                        text: entry.meta;
-                                                        color: Theme.text-3;
-                                                        font-size: 11.5px;
-                                                        letter-spacing: 0.1px;
-                                                        overflow: elide;
+                                                row-touch := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        rows.flashed = index;
+                                                        flash-timer.running = true;
+                                                        root.restore-entry(index);
                                                     }
                                                 }
 
                                                 HorizontalLayout {
-                                                    spacing: 2px;
-                                                    VerticalLayout {
+                                                    padding-left: 12px;
+                                                    padding-right: 10px;
+                                                    spacing: 13px;
+
+                                                    // What it is: by shape and hue, a tile for text and code,
+                                                    // the picture itself for an image.
+                                                    if !entry.has-thumb: VerticalLayout {
                                                         alignment: center;
-                                                        IconButton {
-                                                            icon: Icons.copy;
-                                                            label: "Copy on This Device Only";
-                                                            clicked => { root.copy-entry(index); }
+                                                        Rectangle {
+                                                            width: 40px;
+                                                            height: 40px;
+                                                            border-radius: 12px;
+                                                            background: history-row.kind-tone.with-alpha(0.14);
+                                                            border-width: 1px;
+                                                            border-color: history-row.kind-tone.with-alpha(0.35);
+                                                            Icon {
+                                                                source: entry.is-image ? Icons.image : Icons.text;
+                                                                size: 17px;
+                                                                tint: history-row.kind-tone;
+                                                            }
                                                         }
                                                     }
-                                                    VerticalLayout {
+                                                    if entry.has-thumb: VerticalLayout {
                                                         alignment: center;
-                                                        IconButton {
-                                                            icon: Icons.trash;
-                                                            destructive: true;
-                                                            label: "Delete";
-                                                            clicked => { root.forget-entry(index); }
+                                                        Rectangle {
+                                                            width: 58px;
+                                                            height: 58px;
+                                                            border-radius: 12px;
+                                                            clip: true;
+                                                            Image {
+                                                                width: 100%;
+                                                                height: 100%;
+                                                                source: entry.thumb;
+                                                                image-fit: cover;
+                                                            }
+                                                            Rectangle {
+                                                                border-radius: 12px;
+                                                                border-width: 1px;
+                                                                border-color: #FFFFFF26;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        min-width: 0px;
+                                                        alignment: center;
+                                                        spacing: 4px;
+                                                        Text {
+                                                            height: 20px;
+                                                            vertical-alignment: center;
+                                                            text: entry.preview;
+                                                            color: Theme.text;
+                                                            font-size: entry.mono ? 12.5px : 13.5px;
+                                                            font-weight: entry.mono ? 400 : 600;
+                                                            font-family: entry.mono ? Theme.mono : Theme.ui;
+                                                            wrap: no-wrap;
+                                                            overflow: elide;
+                                                        }
+                                                        HorizontalLayout {
+                                                            height: 18px;
+                                                            spacing: 8px;
+                                                            alignment: start;
+                                                            if entry.source != "": Rectangle {
+                                                                width: chip.preferred-width + 18px;
+                                                                height: 18px;
+                                                                border-radius: 6px;
+                                                                background: #FFFFFF0D;
+                                                                HorizontalLayout {
+                                                                    padding-left: 6px;
+                                                                    padding-right: 7px;
+                                                                    spacing: 5px;
+                                                                    VerticalLayout {
+                                                                        alignment: center;
+                                                                        Rectangle {
+                                                                            width: 6px;
+                                                                            height: 6px;
+                                                                            border-radius: 3px;
+                                                                            background: entry.source == "This Device" ? Theme.accent-2 : Theme.accent;
+                                                                        }
+                                                                    }
+                                                                    chip := Text {
+                                                                        text: entry.source;
+                                                                        color: Theme.text-2;
+                                                                        font-size: 11px;
+                                                                        font-weight: 600;
+                                                                        vertical-alignment: center;
+                                                                    }
+                                                                }
+                                                            }
+                                                            Text {
+                                                                text: entry.when + "  ·  " + entry.meta;
+                                                                color: Theme.text-3;
+                                                                font-size: 11.5px;
+                                                                vertical-alignment: center;
+                                                                overflow: elide;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // The row's own actions, there when the pointer is.
+                                                    HorizontalLayout {
+                                                        spacing: 2px;
+                                                        opacity: row-touch.has-hover ? 1 : 0.35;
+                                                        animate opacity { duration: 180ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            IconButton {
+                                                                icon: Icons.copy;
+                                                                label: "Copy on This Device Only";
+                                                                clicked => { root.copy-entry(index); }
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            IconButton {
+                                                                icon: Icons.trash;
+                                                                destructive: true;
+                                                                label: "Delete";
+                                                                clicked => { root.forget-entry(index); }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-
                                         if root.history-note != "": Caption {
                                             text: root.history-note;
                                             color: Theme.text-4;
                                             horizontal-alignment: center;
-                                            height: self.preferred-height + 4px;
+                                            height: self.preferred-height + 8px;
                                             vertical-alignment: bottom;
                                         }
                                     }
@@ -1975,7 +2020,6 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // ──────────────────────────── Status ─────────────────────────────
                         if root.screen == Screen.Status: ScreenFrame {
                             Scroller {
                                 content-height: status-screen.preferred-height;
