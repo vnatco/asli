@@ -333,20 +333,26 @@ component SendControl inherits Rectangle {
 
     // Under way: waiting for an answer, or sending.
     Rectangle {
-        border-radius: 9px;
-        background: #6D7CFF1A;
-        border-width: 1px;
-        border-color: #6D7CFF59;
         opacity: root.live ? 1 : 0;
         visible: self.opacity > 0.01;
-        clip: true;
         animate opacity { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
 
-        // A band of light that sweeps across while it waits, so waiting reads as alive.
-        if root.state == 1: Rectangle {
-            x: (mod(animation-tick(), 1800ms) / 1800ms) * (parent.width + 120px) - 120px;
-            width: 120px;
-            background: @linear-gradient(90deg, #4FE3C100 0%, #4FE3C126 50%, #4FE3C100 100%);
+        // The pill, with a band of light that sweeps across while it waits, so waiting reads as
+        // alive. Clipped to the pill on a layer of its own: the words are drawn over it, outside
+        // the clip, because a clipped layer is redrawn every frame the band moves and text drawn
+        // into it shimmers.
+        Rectangle {
+            border-radius: 9px;
+            background: #6D7CFF1A;
+            border-width: 1px;
+            border-color: #6D7CFF59;
+            clip: true;
+            if root.state == 1: Rectangle {
+                // Whole pixels, so the band itself does not shimmer either.
+                x: floor(((mod(animation-tick(), 1800ms) / 1800ms) * (parent.width + 120px) - 120px) / 1px) * 1px;
+                width: 120px;
+                background: @linear-gradient(90deg, #4FE3C100 0%, #4FE3C126 50%, #4FE3C100 100%);
+            }
         }
 
         HorizontalLayout {
@@ -357,7 +363,7 @@ component SendControl inherits Rectangle {
             if root.state == 1: VerticalLayout {
                 alignment: center;
                 Spinner {
-                    size: 13px;
+                    size: 14px;
                     tint: Theme.accent-2;
                 }
             }
@@ -813,6 +819,8 @@ export component AppWindow inherits Window {
     in-out property <Screen> screen: Screen.Status;
     in property <bool> has-account: false;
     property <bool> chrome: screen != Screen.FirstRun && screen != Screen.Join;
+    // The one gap around the content pane: to the window's edges, and to the sidebar.
+    property <length> gutter: 12px;
 
     // The connection, shared by the Status hero, the sidebar footer and the History banner.
     in property <SyncState> sync-state: SyncState.connecting;
@@ -1086,9 +1094,11 @@ export component AppWindow inherits Window {
                         double-clicked => { root.toggle-maximize(); }
                     }
 
+                    // The mark sits on the same centre line as the sidebar's tiles and the
+                    // connection dot, and the close button ends where the pane does.
                     HorizontalLayout {
-                        padding-left: 18px;
-                        padding-right: 8px;
+                        padding-left: root.gutter + 10px + 16px - 9px;
+                        padding-right: root.gutter;
                         spacing: 9px;
 
                         VerticalLayout {
@@ -1138,18 +1148,20 @@ export component AppWindow inherits Window {
                 }
 
                 HorizontalLayout {
-                    padding-right: root.chrome ? 10px : 0px;
-                    padding-bottom: root.chrome ? 10px : 0px;
+                    padding-right: root.chrome ? root.gutter : 0px;
+                    padding-bottom: root.chrome ? root.gutter : 0px;
 
                     // The sidebar. Absent on first run and join, which take the whole window.
                     if root.chrome: Rectangle {
                         width: 236px;
 
+                        // The first item's top meets the pane's top, the connection card's bottom
+                        // meets the pane's bottom, and the gutter on either side is the pane's.
                         VerticalLayout {
-                            padding-top: 8px;
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            padding-bottom: 14px;
+                            padding-top: 0px;
+                            padding-left: root.gutter;
+                            padding-right: root.gutter;
+                            padding-bottom: 0px;
 
                             // The items, with the one highlight that glides to the selected item.
                             Rectangle {
@@ -1219,11 +1231,13 @@ export component AppWindow inherits Window {
                                 background: #FFFFFF08;
                                 border-width: 1px;
                                 border-color: Theme.border-subtle;
+                                // The dot's centre is on the tiles' centre line: 10 px of item
+                                // padding and half a 32 px tile, less half the 14 px dot.
                                 HorizontalLayout {
                                     y: 1px;
                                     height: 48px;
-                                    padding-left: 14px;
-                                    padding-right: 14px;
+                                    padding-left: 10px + 16px - 7px;
+                                    padding-right: 10px + 16px - 7px;
                                     spacing: 9px;
                                     VerticalLayout {
                                         alignment: center;
@@ -1559,7 +1573,7 @@ export component AppWindow inherits Window {
 
                                 invite-screen := VerticalLayout {
                                     padding-top: 22px;
-                                    padding-bottom: 26px;
+                                    padding-bottom: 28px;
                                     padding-left: 28px;
                                     padding-right: 28px;
                                     spacing: 0px;
@@ -2153,7 +2167,7 @@ export component AppWindow inherits Window {
                                     content-height: rows.preferred-height;
                                     rows := VerticalLayout {
                                         padding-top: 4px;
-                                        padding-bottom: 22px;
+                                        padding-bottom: 28px;
                                         padding-left: 28px;
                                         padding-right: 28px;
                                         spacing: 8px;
@@ -2364,7 +2378,7 @@ export component AppWindow inherits Window {
 
                                 status-screen := VerticalLayout {
                                     padding-top: 22px;
-                                    padding-bottom: 26px;
+                                    padding-bottom: 28px;
                                     padding-left: 28px;
                                     padding-right: 28px;
                                     spacing: 0px;
@@ -2874,7 +2888,11 @@ export component AppWindow inherits Window {
                                     Rectangle { height: 22px; }
                                     Overline { text: "PAIRED DEVICES"; }
                                     Rectangle { height: 10px; }
+                                    // Not clipped: a clipped card is a layer of its own, redrawn on every
+                                    // frame of a row's sending animation, and the words in it shimmer as it
+                                    // is. The rows round their own tints into the corners instead.
                                     Card {
+                                        clip: false;
                                         height: device-list.preferred-height;
                                         device-list := VerticalLayout {
                                             // Inside the card's border, so a row's first pixel is not under it.
@@ -2891,10 +2909,17 @@ export component AppWindow inherits Window {
 
                                                 device-touch := TouchArea { }
 
-                                                // A row with something on its way to it glows a little.
+                                                // A row with something on its way to it glows a little. Inside
+                                                // the card's ring, and rounded into its corners at either end.
                                                 Rectangle {
+                                                    x: 1px;
                                                     y: 0px;
+                                                    width: parent.width - 2px;
                                                     height: 60px;
+                                                    border-top-left-radius: i == 0 ? 17px : 0px;
+                                                    border-top-right-radius: i == 0 ? 17px : 0px;
+                                                    border-bottom-left-radius: i == root.devices.length - 1 ? 17px : 0px;
+                                                    border-bottom-right-radius: i == root.devices.length - 1 ? 17px : 0px;
                                                     background: device.send-state == 1 || device.send-state == 2
                                                         ? #6D7CFF12 : device-touch.has-hover ? #FFFFFF06 : transparent;
                                                     animate background { duration: 300ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
@@ -3158,8 +3183,9 @@ export component AppWindow inherits Window {
 
                                 settings-screen := VerticalLayout {
                                     padding-top: 22px;
-                                    // Room for the save bar, which rises over the bottom.
-                                    padding-bottom: 84px;
+                                    // The same as the sides, plus room for the save bar while it is up, so the
+                                    // last card can always be scrolled clear of it.
+                                    padding-bottom: save-bar.up ? 28px + save-bar.height + 16px : 28px;
                                     padding-left: 28px;
                                     padding-right: 28px;
                                     spacing: 0px;

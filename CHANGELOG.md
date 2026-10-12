@@ -140,6 +140,14 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Icons sit exactly in the middle of their tiles. The device icon was drawn three and a half units
   left of centre, and the bell, network, offline and back icons up to two units off; every icon is
   now centred on its grid, and a tile sizes its icon to whole pixels.
+- One spacing around the content: the same 12 px gap from the pane to the window's edges and to the
+  sidebar, the first sidebar item level with the pane's top and the connection card level with its
+  bottom, and the logo, the sidebar's tiles and the connection dot on one centre line. Inside the
+  pane, every screen ends 28 px below its last card, the same as at the sides; Settings adds room
+  only while its save bar is up.
+- Waiting for Confirmation no longer shimmers. The device list was clipped to its rounded corners,
+  which made it a layer redrawn on every frame of the waiting animation, and its words moved by
+  up to a pixel as it was; the rows now round their own corners and the words hold still.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and
   returns to the first screen.
