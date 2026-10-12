@@ -91,6 +91,14 @@ export global Theme {
     out property <duration> quick: 180ms;
 }
 
+// A device's operating system, for its mark.
+export enum DeviceOs {
+    unknown,
+    linux,
+    mac,
+    windows,
+}
+
 // The icon set: 24 unit grid, 1.75 stroke, round caps, tinted at the point of use.
 export global Icons {
     out property <image> alert: @image-url("icons/alert.svg");
@@ -104,6 +112,18 @@ export global Icons {
     out property <image> bell: @image-url("icons/bell.svg");
     out property <image> network: @image-url("icons/network.svg");
     out property <image> power: @image-url("icons/power.svg");
+    // Operating system marks, from Simple Icons (CC0), scaled and centred on the same grid.
+    out property <image> os-linux: @image-url("icons/os-linux.svg");
+    out property <image> os-apple: @image-url("icons/os-apple.svg");
+    out property <image> os-windows: @image-url("icons/os-windows.svg");
+
+    // The mark for a device's operating system, or a plain screen when it is not known.
+    public pure function platform(p: DeviceOs) -> image {
+        p == DeviceOs.windows ? self.os-windows
+            : p == DeviceOs.mac ? self.os-apple
+            : p == DeviceOs.linux ? self.os-linux
+            : self.device
+    }
     out property <image> send: @image-url("icons/send.svg");
     out property <image> history: @image-url("icons/history.svg");
     out property <image> image: @image-url("icons/image.svg");
@@ -1129,7 +1149,9 @@ export component Tile inherits Rectangle {
         border-color: Theme.border-strong;
         Icon {
             source: root.icon;
-            size: root.size * 0.47;
+            // About half the tile, rounded to an even number of pixels so that, in a tile of even
+            // size, it sits on whole pixels rather than straddling them.
+            size: round(root.size * 0.47 / 2px) * 2px;
             tint: root.on ? Theme.on-accent : root.tint;
         }
     }

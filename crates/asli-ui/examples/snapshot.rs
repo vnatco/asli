@@ -368,7 +368,8 @@ fn sample_files(ui: &AppWindow) {
 }
 
 fn sample(ui: &AppWindow) {
-    ui.set_app_version("0.1.11".into());
+    ui.set_this_platform(asli_ui::DeviceOs::Linux);
+    ui.set_app_version("0.1.12".into());
     ui.set_has_account(true);
     ui.set_sync_state(SyncState::Connected);
     ui.set_state_label("Synced".into());
@@ -387,12 +388,14 @@ fn sample(ui: &AppWindow) {
     ui.set_invite_asking(ModelRc::new(VecModel::from(vec![AskRow {
         name: "DESKTOP-7Q".into(),
         os: "Windows 11".into(),
+        platform: asli_ui::DeviceOs::Windows,
         comparison: "482 913".into(),
     }])));
     ui.set_devices(ModelRc::new(VecModel::from(vec![
         DeviceRow {
             name: "ThinkPad X1".into(),
             os: "Arch Linux".into(),
+            platform: asli_ui::DeviceOs::Linux,
             id: "1695e3615162".into(),
             seen: "Now".into(),
             online: true,
@@ -409,6 +412,7 @@ fn sample(ui: &AppWindow) {
         DeviceRow {
             name: "MacBook Pro".into(),
             os: "macOS 15".into(),
+            platform: asli_ui::DeviceOs::Mac,
             id: "a71c0be4d930".into(),
             seen: "Now".into(),
             online: true,
@@ -423,8 +427,9 @@ fn sample(ui: &AppWindow) {
             send_progress: 0.45,
         },
         DeviceRow {
-            name: "fedora-desk".into(),
+            name: "Gaming PC".into(),
             os: "Windows 11".into(),
+            platform: asli_ui::DeviceOs::Windows,
             id: "c02f19aa7714".into(),
             seen: "2 Days Ago".into(),
             online: false,

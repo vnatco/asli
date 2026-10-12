@@ -11,10 +11,10 @@
 import {
     SoftShadow, GradientFill, Theme, Icons, SyncState, States, Icon, Spinner, ButtonKind, Button, IconButton, Overline,
     Title, Subtitle, Caption, Label, Card, Divider, BannerKind, Banner, TextField, JoinArea,
-    Toggle, Select, StateDot, Pill, Skeleton, Toast, Glow, Tile, ProgressBar
+    Toggle, Select, StateDot, Pill, Skeleton, Toast, Glow, Tile, ProgressBar, DeviceOs
 } from "design.slint";
 
-export { SyncState }
+export { SyncState, DeviceOs }
 
 // Which screen is showing. Held on the window so the tray can open any of them directly.
 export enum Screen {
@@ -47,6 +47,7 @@ export struct HistoryRow {
 export struct DeviceRow {
     name: string,
     os: string,
+    platform: DeviceOs,
     id: string,
     seen: string,
     online: bool,
@@ -103,6 +104,7 @@ export struct FileRow {
 export struct AskRow {
     name: string,
     os: string,
+    platform: DeviceOs,
     // The six digits the asking device shows, for a person to compare.
     comparison: string,
 }
@@ -834,6 +836,8 @@ export component AppWindow inherits Window {
     // Adding a device: the join code, its QR, how long it has left, and who is asking.
     in property <image> qr;
     in property <string> invite-code: "";
+    // This device's operating system, for its mark in Settings.
+    in property <DeviceOs> this-platform: DeviceOs.unknown;
     in property <string> invite-remaining: "";
     // How much of the join code's ten minutes is left, from 1 down to 0.
     in property <float> invite-left: 1;
@@ -1827,7 +1831,7 @@ export component AppWindow inherits Window {
                                                                 VerticalLayout {
                                                                     alignment: center;
                                                                     Tile {
-                                                                        icon: Icons.device;
+                                                                        icon: Icons.platform(ask.platform);
                                                                         on: true;
                                                                         size: 40px;
                                                                     }
@@ -2909,7 +2913,7 @@ export component AppWindow inherits Window {
                                                             width: 36px;
                                                             height: 36px;
                                                             Tile {
-                                                                icon: Icons.device;
+                                                                icon: Icons.platform(device.platform);
                                                                 on: device.this-device;
                                                                 size: 36px;
                                                                 tint: Theme.text-2;
@@ -3216,7 +3220,7 @@ export component AppWindow inherits Window {
                                         height: device-card.preferred-height;
                                         device-card := VerticalLayout {
                                             FieldRow {
-                                                icon: Icons.device;
+                                                icon: Icons.platform(root.this-platform);
                                                 title: "Device Name";
                                                 detail: "How your other devices list this one. Sent to them sealed, like a clip.";
                                                 TextField {

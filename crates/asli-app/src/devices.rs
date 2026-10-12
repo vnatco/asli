@@ -525,6 +525,36 @@ fn computer_name() -> String {
     String::new()
 }
 
+/// The family of operating system a device names, for the mark beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsFamily {
+    /// Nothing said, as from a device that has not yet announced itself.
+    Unknown,
+    /// Linux, under whatever its distribution calls itself.
+    Linux,
+    /// macOS.
+    Mac,
+    /// Windows.
+    Windows,
+}
+
+/// Which family an operating system name, as [`this_os`] makes it, belongs to. Asli runs on three
+/// systems and names Windows and macOS itself, so any other name is a Linux distribution's own:
+/// "Arch Linux", "Ubuntu 24.04", "Fedora Linux 42".
+#[must_use]
+pub fn os_family(os: &str) -> OsFamily {
+    let os = os.trim().to_ascii_lowercase();
+    if os.is_empty() {
+        OsFamily::Unknown
+    } else if os.starts_with("windows") {
+        OsFamily::Windows
+    } else if os.starts_with("macos") || os.starts_with("mac os") || os.starts_with("os x") {
+        OsFamily::Mac
+    } else {
+        OsFamily::Linux
+    }
+}
+
 /// This device's operating system, as a person would name it: "Windows 11", "macOS 15",
 /// "Fedora Linux 42".
 #[must_use]
@@ -730,5 +760,18 @@ mod tests {
             !ids.contains(&hex(&[2u8; 16])),
             "the old entry of the same machine goes"
         );
+    }
+
+    #[test]
+    fn an_operating_system_name_gives_its_family() {
+        assert_eq!(os_family("Windows 11"), OsFamily::Windows);
+        assert_eq!(os_family("Windows"), OsFamily::Windows);
+        assert_eq!(os_family("macOS 15"), OsFamily::Mac);
+        assert_eq!(os_family("macOS"), OsFamily::Mac);
+        assert_eq!(os_family("Arch Linux"), OsFamily::Linux);
+        assert_eq!(os_family("Ubuntu 24.04"), OsFamily::Linux);
+        assert_eq!(os_family("Debian GNU/Linux 13 (trixie)"), OsFamily::Linux);
+        assert_eq!(os_family(""), OsFamily::Unknown);
+        assert_eq!(os_family("  "), OsFamily::Unknown);
     }
 }

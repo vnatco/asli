@@ -135,6 +135,11 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - The scrollbar keeps clear of the content pane's rounded corners and border: a slim thumb inset
   from the edge, which shows while scrolling, when the pointer comes near, and briefly as a screen
   opens, then fades. Dragging it now keeps the thumb under the pointer instead of running ahead.
+- Each device shows the mark of its operating system: Windows, Apple or the Linux penguin, from
+  Simple Icons (CC0), scaled and centred on the same grid as the other icons.
+- Icons sit exactly in the middle of their tiles. The device icon was drawn three and a half units
+  left of centre, and the bell, network, offline and back icons up to two units off; every icon is
+  now centred on its grid, and a tile sizes its icon to whole pixels.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and
   returns to the first screen.

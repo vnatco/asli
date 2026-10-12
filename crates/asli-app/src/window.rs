@@ -50,8 +50,8 @@ use crate::{notify, qr, secrets, tray};
 // build. Keeping the generated code at arm's length is what lets every hand written crate in this
 // project keep the stronger annotation.
 pub use asli_ui::{
-    AppWindow, AskRow, DeviceRow, FileRow, HistoryRow, InviteState, ReadyFile, ReadyTarget, Screen,
-    SyncState, TokenCheck,
+    AppWindow, AskRow, DeviceOs, DeviceRow, FileRow, HistoryRow, InviteState, ReadyFile,
+    ReadyTarget, Screen, SyncState, TokenCheck,
 };
 
 use crate::enroll::{Invitation, InviteOutcome, JoinAttempt, JoinOutcome};
@@ -1166,6 +1166,7 @@ fn refresh_invite(window: &AppWindow) {
         .map(|asking| AskRow {
             name: asking.name.clone().into(),
             os: asking.os.clone().into(),
+            platform: platform(&asking.os),
             comparison: asking.comparison.clone().into(),
         })
         .collect();
@@ -1574,6 +1575,7 @@ fn device_rows(
                 can_send: !device.this_device && device.keyed && device.online,
                 removable: !device.this_device && device.keyed,
                 name: device.name.into(),
+                platform: platform(&device.os),
                 os: device.os.into(),
                 id: short(&device.id).into(),
                 seen: if device.online {
@@ -1589,6 +1591,17 @@ fn device_rows(
             }
         })
         .collect()
+}
+
+/// The mark for a device's operating system.
+fn platform(os: &str) -> DeviceOs {
+    use crate::devices::OsFamily;
+    match crate::devices::os_family(os) {
+        OsFamily::Unknown => DeviceOs::Unknown,
+        OsFamily::Linux => DeviceOs::Linux,
+        OsFamily::Mac => DeviceOs::Mac,
+        OsFamily::Windows => DeviceOs::Windows,
+    }
 }
 
 /// How a device row's sending control should look: its state, what it says, and how far.
@@ -2794,6 +2807,7 @@ fn load_settings(window: &AppWindow) {
     let name = crate::devices::display_name(&config.device_name);
     window.set_device_name(name.clone().into());
     window.set_saved_device_name(name.into());
+    window.set_this_platform(platform(&crate::devices::this_os()));
     window.set_notifications(config.notifications);
     window.set_keep_history(config.keep_history);
     window.set_same_network_only(config.same_network_only);
