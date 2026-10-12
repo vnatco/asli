@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "asli-app"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "asli-clipboard",
  "asli-core",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "asli-clipboard"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "asli-core",
  "clipboard-win",
@@ -275,14 +275,14 @@ dependencies = [
 
 [[package]]
 name = "asli-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "sha2 0.11.0",
 ]
 
 [[package]]
 name = "asli-crypto"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "asli-history"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "asli-crypto",
  "hkdf",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "asli-net"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "asli-core",
  "asli-crypto",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "asli-ui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "png",
  "slint",
@@ -1516,6 +1516,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "femtovg"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31eebf3ab1b76359ccd5f850c07a7c6b2722c64d9127c40e02358e83f3ff9b1a"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytemuck",
+ "fnv",
+ "glow",
+ "imgref",
+ "itertools 0.15.0",
+ "log",
+ "rgb",
+ "slotmap",
+ "swash",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1580,6 +1600,12 @@ name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -1770,6 +1796,28 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "gbm"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce852e998d3ca5e4a97014fb31c940dc5ef344ec7d364984525fd11e8a547e6a"
+dependencies = [
+ "bitflags 2.13.2",
+ "drm",
+ "drm-fourcc",
+ "gbm-sys",
+ "libc",
+]
+
+[[package]]
+name = "gbm-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13a5f2acc785d8fb6bf6b7ab6bfb0ef5dad4f4d97e8e70bb8e470722312f76f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -2088,11 +2136,15 @@ dependencies = [
  "calloop 0.14.4",
  "cfg_aliases",
  "drm",
+ "gbm",
+ "glutin",
  "i-slint-common",
  "i-slint-core",
+ "i-slint-renderer-femtovg",
  "i-slint-renderer-software",
  "memmap2",
  "nix",
+ "raw-window-handle",
 ]
 
 [[package]]
@@ -2109,6 +2161,7 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
+ "i-slint-renderer-femtovg",
 ]
 
 [[package]]
@@ -2141,6 +2194,7 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
+ "i-slint-renderer-femtovg",
  "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "imgref",
@@ -2279,6 +2333,27 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "i-slint-renderer-femtovg"
+version = "1.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d639b7c55640274d077f16136ad405ccf607bda1754cce3f02c47ec08d31f1d7"
+dependencies = [
+ "cfg-if",
+ "const-field-offset",
+ "femtovg",
+ "glow",
+ "i-slint-common",
+ "i-slint-core",
+ "i-slint-core-macros",
+ "imgref",
+ "lyon_path",
+ "pin-weak",
+ "rgb",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -4690,6 +4765,7 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
+ "i-slint-renderer-femtovg",
  "i-slint-renderer-software",
  "num-traits",
  "once_cell",

@@ -219,26 +219,18 @@ meaning the computer's own name). It never holds key material.
 
 ## 9. Drawing the window
 
-The window is drawn by Slint's **software renderer**, on a platform window from winit, presented
-through softbuffer. Slint's default features would add Qt and an OpenGL renderer; both are off
-(`crates/asli-ui/Cargo.toml`).
+The window is drawn by Slint's **FemtoVG renderer** on OpenGL, on a platform window from winit. The
+software renderer is built in as well, and Slint falls back to it by itself when no GL context can be
+had: a virtual machine without 3D, a remote desktop session, a missing or broken driver. So the
+window always opens, and looks its best wherever the machine allows.
 
-Why software: a tray application opens its window rarely and draws a few static screens, so a GPU
-buys nothing visible, and it costs a GL context, a driver dependency, and failures on exactly the
-machines least able to report them: virtual machines, remote desktop sessions, old or missing GPU
-drivers. The software renderer needs none of that and adds little to the binary. It has costs of
-its own, and each is handled in one place:
+The GPU renderer is what makes the design possible at all: real drop shadows and glows, gradients
+and clipping that follow rounded corners, and smooth animation. The software renderer ignores drop
+shadows, draws gradients and clips without their radius, and repaints only what changed, so
+`SoftShadow` and `GradientFill` in `design.slint`, and thumbnails rounded in Rust, still exist to keep
+the fallback presentable.
 
-- It ignores drop shadows, draws gradients and clips without their corner radius, and presents an
-  opaque surface. `SoftShadow` and `GradientFill` in `design.slint`, and thumbnails rounded in Rust,
-  exist for that, and the window's own corners are square.
-- It repaints only what changed since the last frame, trusting that the rest is still on screen.
-  After a window is hidden and shown again that is not true on Windows, which discards a hidden
-  window's pixels, while Slint 1.18 keeps believing its buffer is current: the reopened window
-  showed the text in its lists and nothing else. So a closed window is never shown again. It is
-  dropped at the next open and a new one built in its place (`window::show`), which starts from an
-  empty buffer and paints everything, on every platform. Wayland already destroyed hidden windows,
-  and X11 under a compositor keeps their pixels, so neither showed the fault; Windows did.
-
-A GPU renderer (femtovg or Skia) would avoid the second point, at the cost the paragraph above
-describes. It is not worth it for this window.
+A closed window is never shown again: it is dropped at the next open and a new one built in its
+place (`window::show`). The software renderer needed that on Windows, which discards a hidden
+window's pixels while Slint kept believing its buffer was current, and it costs nothing on the GPU
+path, so it stays for the fallback's sake.

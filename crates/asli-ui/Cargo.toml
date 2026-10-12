@@ -14,13 +14,17 @@ rust-version = "1.92"
 # Everything written by a person lives in the other crates, where those lints do apply.
 
 [dependencies]
-# Default features would pull Qt and an OpenGL renderer; both are off. What is left is winit for
-# the platform window and Slint's own software renderer, so the application draws every pixel
-# itself and never requires a GPU or a GL context.
+# Default features would pull Qt; it stays off. What is left is winit for the platform window, the
+# FemtoVG renderer on OpenGL for the real look, and the software renderer as the fallback where no
+# GL context can be had.
 slint = { version = "1.18.0", default-features = false, features = [
     "compat-1-18",
     "std",
     "backend-winit",
+    # Drawn on the GPU through OpenGL, which gives real shadows, glows, rounded gradients and
+    # rounded clipping. Where no GL context can be had (a virtual machine, a remote session, a
+    # missing driver), Slint falls back to the software renderer by itself.
+    "renderer-femtovg",
     "renderer-software",
 ] }
 

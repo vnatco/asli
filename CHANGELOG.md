@@ -103,6 +103,8 @@ Nothing is tagged yet and there are no downloads. What exists today:
   2 to 3 pixels high.
 - Clicking the tray icon, or launching Asli again while it runs, opens Status, the main page,
   instead of History.
+- The window is drawn on the GPU, which allows real shadows, glows and rounded gradients, and falls
+  back to the software renderer by itself where there is no working graphics driver.
 - Every label, button, title and menu item is in Title Case.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and

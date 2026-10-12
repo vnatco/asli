@@ -538,6 +538,7 @@ pub fn relative_time(then_ms: Option<u64>, now_ms: u64) -> String {
         120..=3599 => format!("{} minutes ago", seconds / 60),
         3600..=7199 => "an hour ago".to_owned(),
         7200..=86_399 => format!("{} hours ago", seconds / 3600),
+        86_400..=172_799 => "a day ago".to_owned(),
         _ => format!("{} days ago", seconds / 86_400),
     }
 }
