@@ -46,9 +46,10 @@ locally, which `--with-server` sets up.
    and the key crosses to it sealed so that only it can open it.
 3. From then on, whenever you copy something, the app encrypts it on your machine and sends it
    through a relay server to your other machines, which decrypt it and put it on their clipboard.
-4. To take a machine off the account, remove it on Status. Every other machine gets a new key, and
+4. To take a machine off the account, remove it on Home. Every other machine gets a new key, and
    the removed one can read nothing sent after.
-5. To send a file, drop it on the window, or use **Send File** beside a device on Status (`asli send
+5. To send files, drop them on the window, where they wait under **Ready to Send** for you to pick
+   the devices, or use **Send File** beside a device on Home (`asli send
    <device> <file>` in a terminal). The other machine asks before taking it. On the same network the
    file goes straight between the two machines; otherwise it goes through the relay encrypted like
    everything else, without being stored there.
@@ -108,8 +109,7 @@ either way, is read your clipboard.
 | Linux, GNOME Wayland | Works through an XWayland compatibility path, because GNOME declines to support clipboard managers |
 | Linux, river | Not supportable: it implements no clipboard manager protocol |
 
-Dropping a file on the window works on Windows, macOS and X11. Wayland gives the windowing library
-Asli uses no drop events yet, so there it is **Send File** on Status instead.
+Dropping files on the window works on Windows, macOS, X11 and Wayland.
 
 Details and the reasoning are in [docs/PLATFORM_NOTES.md](docs/PLATFORM_NOTES.md).
 

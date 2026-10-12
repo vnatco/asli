@@ -53,7 +53,7 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Every device has a key of its own, kept beside the account key. Devices sign a card saying who
   they are, and each device's key is pinned the first time it is seen, so one device cannot take
   another's place in the list.
-- Removing a device. **Remove** on Status, or `asli remove <name>`, gives every other device a new
+- Removing a device. **Remove** on Home, or `asli remove <name>`, gives every other device a new
   account key sealed to its own key, and the removed device forgets the account. Local history moves
   to the new key with everything else. Devices offline at the time, or still on an older version,
   have to join again, and the window names them before anything happens.
@@ -62,12 +62,11 @@ Nothing is tagged yet and there are no downloads. What exists today:
   terminal.
 - `asli devices` lists the devices on the account.
 - Sending a file to another device. Drop it on the window and pick the device, or press **Send
-  file** beside it on Status; `asli send <device> <file>` does the same from a terminal. The other
+  file** beside it on Home; `asli send <device> <file>` does the same from a terminal. The other
   device shows who it is from, by that device's own key, and asks before anything is written
   (`asli accept` and `asli decline` from a terminal). It moves through the relay in sealed pieces,
   is never stored there, is checked against the hash the sender signed, and is saved under a name
-  the receiver makes safe, marked as downloaded. Up to 4 GiB a file. Dropping files is not available
-  on Wayland yet. See protocol section 18.8.
+  the receiver makes safe, marked as downloaded. Up to 4 GiB a file. See protocol section 18.8.
 - Files between two devices on the same network go straight from one to the other, encrypted
   under a key made for that transfer and sealed to the receiver, at the speed of the network. When
   they cannot reach each other, the file goes through the relay instead. The first time it sends a
@@ -79,7 +78,7 @@ Nothing is tagged yet and there are no downloads. What exists today:
 - Paired devices shows which version of Asli each device runs, and Status says when another device
   runs a newer one than this. `asli devices` and `asli status` show it too, and the window shows its
   own version at the foot of the sidebar. The version goes up with every change. When this device is
-  behind, the warning on Status has Download New Version, which opens the latest release in the
+  behind, the warning on Home has Download New Version, which opens the latest release in the
   browser. A dropped file that no device can receive now says why, naming the devices
   that need updating.
 - A device that joins another account says goodbye first, and the devices of the account it left
@@ -90,7 +89,7 @@ Nothing is tagged yet and there are no downloads. What exists today:
   opens the file itself.
 - Add a Device has Copy Code, which copies the join code on this device only, and a request to join
   has room to read.
-- Something waiting for you shows everywhere until it is dealt with: a count on Status for a file
+- Something waiting for you shows everywhere until it is dealt with: a count on Home for a file
   offered here, a count on Add a Device for a device asking to join, a red dot on the tray icon, and
   a notification when a device asks to join. All of them clear as soon as it is answered.
 - Full screen captures sync. Images up to 32 MB go, in paced pieces on the relay's bulk allowance,
@@ -105,6 +104,18 @@ Nothing is tagged yet and there are no downloads. What exists today:
   instead of History.
 - The window is drawn on the GPU, which allows real shadows, glows and rounded gradients, and falls
   back to the software renderer by itself where there is no working graphics driver.
+- A new look: the window is lit by the accent colours, cards are glass with hairline rings, the
+  primary buttons are gradients with a coloured glow, and words are set in Figtree and headings and
+  numbers in Outfit, both bundled. The sidebar shows how each screen stands under its name, and its
+  highlight glides between items. Status is now Home.
+- Sending on Home. Send File on a device takes one file or several and sends them straight there;
+  that device's row turns into Waiting for Confirmation with Cancel, then a progress bar, then a
+  moment of Sent, Declined or Cancelled, then Send File again. Files dropped on the window gather
+  under Ready to Send, between the connection and the devices, with a button for each device, All
+  Devices, and Done. Dragging files over the window from any screen shows Home.
+- Several files offered at once by one device are one question, Accept All and Decline All, saved
+  into a folder you choose.
+- Dropping files on the window works on Wayland too.
 - Every label, button, title and menu item is in Title Case.
 - Leave This Account, in Settings, and `asli leave`: signs the device out, deleting its account key,
   device list and history, tells the other devices so they take it off their lists, and

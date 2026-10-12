@@ -134,7 +134,7 @@ main thread with a timer tolerance, and hands its result to the core over a chan
 
 The list is kept in a small file beside the configuration, tagged with the account it belongs to,
 so "last seen two days ago" survives a restart and joining another account starts it over. Only
-the Status screen and the history's "from" line read it.
+the Home screen and the history's "from" line read it.
 
 ## 5. Loop prevention, in three layers
 
