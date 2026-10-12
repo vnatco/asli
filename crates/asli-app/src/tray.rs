@@ -302,15 +302,23 @@ impl Tray {
         let wanted = (state, blink, attention);
         if *current != wanted {
             if let Ok(icon) = icon_for(state, blink, attention) {
-                let _ = self.icon.set_icon(Some(icon));
-                if current.2 != attention {
-                    let _ = self.icon.set_tooltip(Some(if attention {
+                let mut shown = self.icon.set_icon(Some(icon));
+                if shown.is_ok() && current.2 != attention {
+                    shown = self.icon.set_tooltip(Some(if attention {
                         format!("Asli: {waiting} Waiting for You")
                     } else {
                         "Asli".to_owned()
                     }));
                 }
-                *current = wanted;
+                // Remembered only once shown, so a tray host that refused it is asked again on
+                // the next refresh rather than left showing the old state.
+                match shown {
+                    Ok(()) => *current = wanted,
+                    Err(err) => eprintln!(
+                        "{}",
+                        crate::clipboard_io::log_line("tray_icon_failed", &err.to_string())
+                    ),
+                }
             }
         }
     }

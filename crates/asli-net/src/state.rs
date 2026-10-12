@@ -30,10 +30,10 @@ impl Fatal {
     pub const fn user_message(self) -> &'static str {
         match self {
             Self::BadSignature => {
-                "This device's key was rejected. Re-join with the token from another device."
+                "This device's key was rejected. Leave the account here and join it again with a code from another device."
             }
             Self::RoomMismatch => {
-                "The stored account is inconsistent. Re-join with the token from another device."
+                "The stored account is inconsistent. Leave the account here and join it again with a code from another device."
             }
             Self::UnsupportedVersion => "The relay is newer than this app. Please update Asli.",
         }

@@ -98,9 +98,9 @@ detect_distro() {
 linux_packages() {
     local distro="$1"
     case "$distro" in
-        *arch*)   echo "sudo pacman -S --needed base-devel pkgconf" ;;
-        *debian*|*ubuntu*) echo "sudo apt-get install -y build-essential pkg-config" ;;
-        *fedora*|*rhel*)   echo "sudo dnf install -y @c-development pkgconf-pkg-config" ;;
+        *arch*)   echo "sudo pacman -S --needed base-devel pkgconf fontconfig" ;;
+        *debian*|*ubuntu*) echo "sudo apt-get install -y build-essential pkg-config libfontconfig-dev" ;;
+        *fedora*|*rhel*)   echo "sudo dnf install -y @c-development pkgconf-pkg-config fontconfig-devel" ;;
         *) echo "" ;;
     esac
 }
@@ -225,6 +225,11 @@ install_macos_bundle() {
     run mkdir -p "$MAC_APP/Contents/MacOS"
     run install -m 755 "$built" "$MAC_APP/Contents/MacOS/asli"
     run install -m 644 "$REPO_ROOT/packaging/macos/Info.plist" "$MAC_APP/Contents/Info.plist"
+    # The template carries a placeholder version; Finder, About and the login item show this one.
+    local version
+    version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" | head -n 1)"
+    run /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$MAC_APP/Contents/Info.plist"
+    run /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$MAC_APP/Contents/Info.plist"
     run mkdir -p "$MAC_APP/Contents/Resources"
     run install -m 644 "$REPO_ROOT/packaging/macos/asli.icns" "$MAC_APP/Contents/Resources/asli.icns"
     # Apple Silicon refuses to run unsigned code, and a bundle whose contents changed needs its

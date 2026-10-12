@@ -11,8 +11,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-asli-core = { path = "../asli-core", version = "0.1.0" }
-asli-crypto = { path = "../asli-crypto", version = "0.1.0" }
+asli-core = { path = "../asli-core" }
+asli-crypto = { path = "../asli-crypto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Standard base64 with padding, decoded strictly. The protocol specifies exactly one encoding for

@@ -22,6 +22,8 @@ use crate::transfer::{OfferId, Transfers};
 const REACH: Duration = Duration::from_millis(1500);
 /// How long either side waits on the other once connected.
 const PATIENCE: Duration = Duration::from_secs(30);
+/// How long a receiver waits for the first piece before asking for the file through the relay.
+const FIRST_PIECE: Duration = Duration::from_secs(15);
 /// How long a sender listens for an offer nobody answers.
 const LISTEN_FOR: Duration = Duration::from_mins(15);
 /// Connections that fail to prove they hold the key before the sender stops listening.
@@ -217,7 +219,18 @@ pub(crate) fn fetch(
         return false;
     }
     let max = CHUNK_BYTES as usize + FRAME_OVERHEAD;
+    // Time for the sender to open the file and read its first piece, a waking disk included.
+    // Should it run out, the relay carries the file instead: the sender drops the direct path
+    // when the answer through the relay reaches it.
+    if socket.set_read_timeout(Some(FIRST_PIECE)).is_err() {
+        return false;
+    }
     let Some(first) = read_frame(&mut socket, max) else {
+        return false;
+    };
+    // Only a piece that opens with the transfer key commits to this path: whatever else answers
+    // at that address leaves the relay to carry the file.
+    let Ok(first_piece) = stream.open(&first) else {
         return false;
     };
     let _ = socket.set_read_timeout(Some(PATIENCE));
@@ -226,12 +239,8 @@ pub(crate) fn fetch(
         log_line("file_direct", "receiving on the local network")
     );
     transfers.direct_receiving(&offer_id);
-    let mut frame = first;
+    let mut piece = first_piece;
     loop {
-        let Ok(piece) = stream.open(&frame) else {
-            transfers.direct_receive_failed(&offer_id, "a piece arrived damaged.");
-            return true;
-        };
         match transfers.direct_piece(&offer_id, &piece) {
             Err(()) => return true,
             Ok(None) => {}
@@ -247,7 +256,11 @@ pub(crate) fn fetch(
             transfers.direct_receive_failed(&offer_id, "the other device stopped sending.");
             return true;
         };
-        frame = next;
+        let Ok(opened) = stream.open(&next) else {
+            transfers.direct_receive_failed(&offer_id, "a piece arrived damaged.");
+            return true;
+        };
+        piece = opened;
     }
 }
 

@@ -14,7 +14,7 @@ use asli_net::envelope::{encode_b64, Message};
 use asli_net::session::{Action, Session};
 
 fn unhex(text: &str) -> Vec<u8> {
-    assert!(text.len() % 2 == 0, "hex must have an even length");
+    assert!(text.len().is_multiple_of(2), "hex must have an even length");
     (0..text.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("valid hex"))

@@ -1,6 +1,6 @@
 [package]
 name = "asli-crypto"
-description = "Key derivation, sealing and join tokens for Asli, the encrypted clipboard sync tool"
+description = "Keys, sealing, join codes and signed device messages for Asli, the encrypted clipboard sync tool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

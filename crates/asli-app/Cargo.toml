@@ -8,7 +8,7 @@ repository.workspace = true
 # Not inherited from the workspace, which stays at 1.82 for the library crates. Only this crate
 # draws a window, and Slint requires 1.92, so the higher floor is confined to the one crate that
 # actually needs it rather than imposed on anyone building the protocol pieces.
-rust-version = "1.92"
+rust-version.workspace = true
 
 [lints]
 workspace = true
@@ -28,11 +28,11 @@ required-features = ["windowed"]
 windowed = []
 
 [dependencies]
-asli-clipboard = { path = "../asli-clipboard", version = "0.1.0" }
-asli-core = { path = "../asli-core", version = "0.1.0" }
-asli-crypto = { path = "../asli-crypto", version = "0.1.0" }
-asli-history = { path = "../asli-history", version = "0.1.0" }
-asli-net = { path = "../asli-net", version = "0.1.0" }
+asli-clipboard = { path = "../asli-clipboard" }
+asli-core = { path = "../asli-core" }
+asli-crypto = { path = "../asli-crypto" }
+asli-history = { path = "../asli-history" }
+asli-net = { path = "../asli-net" }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 # The system's own dialogs for choosing a file to send and a folder to keep one in: the native
@@ -55,7 +55,7 @@ serde_json = "1"
 # The compiled window markup. A crate of its own so this one keeps `forbid(unsafe_code)`: Slint's
 # generated code contains an inner `allow(unsafe_code)`, which a `forbid` at the crate root
 # overrules. See the documentation on asli-ui.
-asli-ui = { path = "../asli-ui", version = "0.1.0" }
+asli-ui = { path = "../asli-ui" }
 # The toolkit's runtime API, for the event loop, images and models. Same feature set as asli-ui,
 # so no second copy of a renderer is built.
 slint = { version = "1.18.0", default-features = false, features = [
@@ -131,6 +131,7 @@ assets = [
     ["target/release/asli", "usr/bin/", "755"],
     ["../../README.md", "usr/share/doc/asli/README.md", "644"],
     ["../../LICENSE", "usr/share/doc/asli/LICENSE", "644"],
+    ["../../packaging/THIRD_PARTY_LICENSES.txt", "usr/share/doc/asli/THIRD_PARTY_LICENSES.txt", "644"],
     ["../../packaging/linux/asli.desktop", "usr/share/applications/asli.desktop", "644"],
     ["../../packaging/linux/asli.svg", "usr/share/icons/hicolor/scalable/apps/asli.svg", "644"],
     ["../../packaging/icons/asli-256.png", "usr/share/icons/hicolor/256x256/apps/asli.png", "644"],
@@ -144,4 +145,4 @@ name = "asli"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Files dropped on the window under Wayland, where winit reports none.
-asli-dnd = { path = "../asli-dnd", version = "0.1.0" }
+asli-dnd = { path = "../asli-dnd" }

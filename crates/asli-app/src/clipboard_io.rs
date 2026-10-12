@@ -29,7 +29,7 @@ use crate::error::Result;
 /// Somewhere a received clip can be written.
 ///
 /// A trait rather than a concrete type so the daemon loop can be tested without a display server,
-/// which is what makes the "never echo our own write" test possible in CI.
+/// which is what makes the "never echo our own write" test possible in the test suite.
 pub trait ClipboardIo: Send + Sync {
     /// Writes text to the system clipboard.
     ///

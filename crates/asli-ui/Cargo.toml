@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 # Slint requires this. The library crates stay at the workspace floor of 1.82; only the two crates
 # that draw a window need the higher one.
-rust-version = "1.92"
+rust-version.workspace = true
 
 # Deliberately not `[lints] workspace = true`. This crate is one line of hand written code and
 # several thousand generated ones, and the workspace lint table would judge the generated ones.

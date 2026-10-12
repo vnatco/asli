@@ -838,14 +838,13 @@ export component AppWindow inherits Window {
     in property <string> relay-url-live: "";
     in property <string> room-id: "";
     in property <string> device-id: "";
+    // This device's operating system, for its mark in Settings.
+    in property <DeviceOs> this-platform: DeviceOs.unknown;
     in property <string> clipboard-backend: "";
 
-    // Join String screen.
     // Adding a device: the join code, its QR, how long it has left, and who is asking.
     in property <image> qr;
     in property <string> invite-code: "";
-    // This device's operating system, for its mark in Settings.
-    in property <DeviceOs> this-platform: DeviceOs.unknown;
     in property <string> invite-remaining: "";
     // How much of the join code's ten minutes is left, from 1 down to 0.
     in property <float> invite-left: 1;
@@ -854,7 +853,7 @@ export component AppWindow inherits Window {
     in property <[AskRow]> invite-asking: [];
     in property <string> invite-message: "";
     in property <bool> invite-good: true;
-    // Account security, on Status: whether the key was ever shown as an old style join string,
+    // Account security, on Home: whether the key was ever shown as an old style join string,
     // whether a key change is under way, and a question waiting for an answer.
     in property <bool> key-exposed: false;
     in property <bool> rekey-busy: false;
@@ -2002,7 +2001,7 @@ export component AppWindow inherits Window {
                                             alignment: start;
                                             spacing: 8px;
                                             Text {
-                                                text: "Clear " + root.history.length + (root.history.length == 1 ? " clip?" : " clips?");
+                                                text: "Clear " + root.history.length + (root.history.length == 1 ? " Clip?" : " Clips?");
                                                 color: Theme.text-2;
                                                 font-size: 12px;
                                                 font-weight: 500;

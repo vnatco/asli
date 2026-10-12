@@ -6,8 +6,8 @@
 //! ```
 //!
 //! A device sends one to the room when it connects, with `ask` set, and every device that hears
-//! that answers with its own to `reply_to` alone. `build` is the number of commits the build came
-//! from, higher meaning newer, and 0 when unknown. Believed only from a device whose key is pinned.
+//! that answers with its own to `reply_to` alone. `build` is always 0 now: the version says which
+//! build is newer, and the field stays only so older devices can still read the message. Believed only from a device whose key is pinned.
 //!
 //! A device leaving the account, to join another, says goodbye the same way, so the others take it
 //! off their lists:

@@ -1280,8 +1280,8 @@ impl Session {
         // Deliberately NOT remembered here. The echo guard exists to swallow the clipboard change
         // event caused by us writing a received clip, and that seeding happens on the receive path
         // just before the write. A local copy causes no self inflicted event, so recording it here
-        // would only swallow the user's next identical copy, which PLAN section 13 requires to
-        // sync. The relay echoing our own clip back is layer one's job: the device id check drops
+        // would only swallow the user's next identical copy, which must sync: copying the same
+        // text again is a deliberate act. The relay echoing our own clip back is layer one's job: the device id check drops
         // it regardless of any hash.
         self.seq = self.seq.saturating_add(1);
 

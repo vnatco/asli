@@ -484,7 +484,7 @@ pub fn default_name() -> String {
     let name = computer_name();
     let name = name.trim();
     if name.is_empty() {
-        "This computer".to_owned()
+        "This Computer".to_owned()
     } else {
         name.to_owned()
     }

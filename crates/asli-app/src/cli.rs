@@ -673,7 +673,7 @@ fn status(paths: &Paths) -> Result<()> {
             println!(
                 "               this account's key was shown as an old style join string, and"
             );
-            println!("               may still be in a screenshot. Replace it from Status in the window.");
+            println!("               may still be in a screenshot. Replace it from Home in the window.");
         }
     } else {
         println!("Account:       none yet. Run 'asli create' or 'asli join'");

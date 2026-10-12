@@ -372,6 +372,9 @@ fn listen_nearby(
 }
 
 /// What the approving device's listener on the local network needs.
+/// Devices on the network a Same Network Only invitation talks to at once.
+const MAX_NEARBY_TALKS: usize = 16;
+
 struct Nearby {
     code: Option<JoinCode>,
     room: [u8; 16],
@@ -390,18 +393,39 @@ impl Nearby {
     /// device holding the code can say anything.
     fn serve(self, listener: &std::net::TcpListener) {
         let this = Arc::new(self);
+        // Connections being talked to at once. Each lives a few seconds unless it holds the code,
+        // so a handful is plenty, and a flood from the network cannot pile up threads.
+        let talking = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         while !this.over() {
             match listener.accept() {
                 Ok((socket, _)) => {
+                    if talking.load(Ordering::Relaxed) >= MAX_NEARBY_TALKS {
+                        drop(socket);
+                        continue;
+                    }
+                    talking.fetch_add(1, Ordering::Relaxed);
                     let this = Arc::clone(&this);
-                    let _ = std::thread::Builder::new()
+                    let done = Arc::clone(&talking);
+                    let spawned = std::thread::Builder::new()
                         .name("asli-invite-peer".to_owned())
-                        .spawn(move || this.talk(socket));
+                        .spawn(move || {
+                            this.talk(socket);
+                            done.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    if let Err(err) = spawned {
+                        talking.fetch_sub(1, Ordering::Relaxed);
+                        eprintln!("{}", log_line("join_nearby_failed", &err.to_string()));
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(200));
                 }
-                Err(_) => return,
+                // A connection that failed on its way in, or the process short of descriptors for
+                // a moment: the code is still on show, so the listening goes on.
+                Err(err) => {
+                    eprintln!("{}", log_line("join_nearby_failed", &err.to_string()));
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
         }
     }

@@ -396,8 +396,10 @@ impl X11Clipboard {
         let bytes = self.convert_and_read(self.atoms.TARGETS, MAX_TEXT_BYTES)?;
         // TARGETS comes back as a list of 32 bit atoms.
         Ok(bytes
-            .chunks_exact(4)
-            .map(|c| Atom::from_be_bytes([c[3], c[2], c[1], c[0]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| Atom::from_le_bytes(*c))
             .collect())
     }
 

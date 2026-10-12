@@ -153,14 +153,15 @@ export function createRelay(config: Config): Relay {
       quota = new RollingQuota(config.roomTransferBytesPerDay, 24 * 60 * 60 * 1000, now);
       roomTransferQuotas.set(session.conn.roomId, quota);
     }
-    if (!globalTransferQuota.charge(bytes, now)) {
-      log.warn('quota_exceeded', { conn: session.conn.id, code: 'global_transfer' });
-      sendError(session, 'QUOTA_EXCEEDED', 'relay transfer budget exhausted', globalTransferQuota.retryAfterMs(now));
-      return false;
-    }
+    // The room first: a room past its own allowance must not keep drawing on everyone's.
     if (!quota.charge(bytes, now)) {
       log.warn('quota_exceeded', { conn: session.conn.id, room: roomLogId(session.conn.roomId) });
       sendError(session, 'QUOTA_EXCEEDED', 'room daily transfer quota exhausted', quota.retryAfterMs(now));
+      return false;
+    }
+    if (!globalTransferQuota.charge(bytes, now)) {
+      log.warn('quota_exceeded', { conn: session.conn.id, code: 'global_transfer' });
+      sendError(session, 'QUOTA_EXCEEDED', 'relay transfer budget exhausted', globalTransferQuota.retryAfterMs(now));
       return false;
     }
     return true;
@@ -605,16 +606,21 @@ export function createRelay(config: Config): Relay {
       return;
     }
 
-    if (!chargeBulk(session, raw.length)) return;
+    const recipients: Session[] = [];
+    for (const peer of sessions) {
+      if (peer === session) continue;
+      if (peer.state !== 'ready' || peer.conn.roomId !== session.conn.roomId) continue;
+      if (fields.to !== null && peer.conn.id !== fields.to) continue;
+      recipients.push(peer);
+    }
+    // Charged for what leaves the relay: a message to the whole room goes out once per device.
+    if (!chargeBulk(session, raw.length * Math.max(1, recipients.length))) return;
 
     if (registry.isDuplicate(session.conn.roomId, fields.msgIdText)) return;
 
     const frame = raw.toString('utf8');
     let delivered = 0;
-    for (const peer of sessions) {
-      if (peer === session) continue;
-      if (peer.state !== 'ready' || peer.conn.roomId !== session.conn.roomId) continue;
-      if (fields.to !== null && peer.conn.id !== fields.to) continue;
+    for (const peer of recipients) {
       deliverChunk(peer, frame);
       delivered += 1;
     }

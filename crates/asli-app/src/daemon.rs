@@ -200,13 +200,16 @@ impl Outbox {
     }
 
     /// A new connection is up: a key change the last one sent without the relay confirming it is
-    /// sent again. Never dropped: the relay may already have passed it on, and the devices that
-    /// got it have moved, so this device must follow them, not stay behind on the old key. The
-    /// devices that have moved are no longer in the old room to see it twice.
+    /// sent again. Kept until it is confirmed: the relay may already have passed it on, and the
+    /// devices that got it have moved, so this device must follow them, not stay behind on the old
+    /// key. The devices that have moved are no longer in the old room to see it twice. Should the
+    /// queue be full at this moment, it stays pending and goes on the next connection.
     fn resend_pending(&self) {
         if let Ok(state) = self.0.lock() {
             if let (Some(pending), Some(tx)) = (&state.rekey, &state.tx) {
-                let _ = tx.try_send(pending.event());
+                if let Err(err) = tx.try_send(pending.event()) {
+                    eprintln!("{}", log_line("rekey_resend_deferred", &err.to_string()));
+                }
             }
         }
     }
@@ -302,6 +305,11 @@ impl Status {
     /// The tray style status line.
     #[must_use]
     pub fn line(&self) -> String {
+        // Stopped for good: the reason is in the window and the notification; a menu line names
+        // the state.
+        if self.state.starts_with("Rejected: ") || self.state.starts_with("Stopped: ") {
+            return "Stopped Syncing".to_owned();
+        }
         match self.peers {
             0 => self.state.clone(),
             n => format!("{}, {n} Connected", self.state),
@@ -1038,7 +1046,7 @@ fn on_account_event(
         ClientEvent::Message { kind, body } => {
             if let Some((device, from, name, bytes)) = controls.transfers.on_message(*kind, body) {
                 if controls.settings.ask_right_away.load(Ordering::Relaxed) {
-                    crate::window::ask_about_offers(device);
+                    crate::window::ask_about_offers(device, &from, &name, bytes);
                 } else {
                     notify::file_offered(&from, &name, bytes);
                     crate::window::open_from_any_thread(crate::window::Screen::Status);
@@ -1515,14 +1523,27 @@ fn judge_outcome(
         }
         Ok(Disconnect::AuthFailed(code)) if code.is_permanent() => {
             eprintln!("{}", log_line("auth_failed", code.as_str()));
-            stop_with(controls, status, &format!("Rejected: {}", code.as_str()));
+            stop_with(
+                controls,
+                status,
+                &format!(
+                    "Rejected: the relay refused this device ({})",
+                    code.as_str()
+                ),
+            );
             return true;
         }
         Ok(Disconnect::Close(code)) => {
             backoff.on_close(code);
             if let Some(fatal) = asli_net::Fatal::from_close_code(code) {
                 eprintln!("{}", log_line("fatal_close", fatal.user_message()));
-                stop_with(controls, status, fatal.user_message());
+                // Prefixed like every other permanent stop, so the window says it stopped rather
+                // than that it is about to retry.
+                stop_with(
+                    controls,
+                    status,
+                    &format!("Stopped: {}", fatal.user_message()),
+                );
                 return true;
             }
             "Offline, Retrying".clone_into(&mut status.state);

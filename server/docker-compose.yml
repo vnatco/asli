@@ -1,6 +1,6 @@
-# The public relay runs this file unmodified. Self hosting is meant to be the same thing, not a
-# lesser variant, so if you change something here that the public relay needs, change it upstream
-# rather than keeping a private fork.
+# The public relay runs the same code as a systemd service on a small shared machine, with a lower
+# retention budget. Self hosting is meant to be the same thing, not a lesser variant, so if you
+# change something here that a relay needs, change it upstream rather than keeping a private fork.
 
 services:
   relay:

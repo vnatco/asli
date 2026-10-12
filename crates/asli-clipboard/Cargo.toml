@@ -11,7 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-asli-core = { path = "../asli-core", version = "0.1.0" }
+asli-core = { path = "../asli-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14", features = ["xfixes"] }

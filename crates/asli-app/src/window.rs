@@ -424,7 +424,7 @@ pub fn open(screen: Screen) {
             "{}",
             log_line("window_failed", "the event loop is not running")
         );
-        notify::action_failed("Could Not Open the Window", "the display is not available");
+        notify::action_failed("Could Not Open the Window", "The display is not available.");
     }
 }
 
@@ -612,7 +612,9 @@ fn wayland_session() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// Hides the window and stops everything that was running for it.
+/// Hides the window and stops everything that was running for it, apart from a join code on show
+/// or this device asking to join: those carry on, so a request is still noticed and an approval
+/// still completes with the window closed.
 ///
 /// The window is hidden rather than dropped. Dropping it here would mean destroying it from
 /// inside one of its own callbacks, which is how a close button turns into a crash. It is dropped
@@ -620,11 +622,13 @@ fn wayland_session() -> bool {
 /// matters for an idle device is that no window is built until somebody asks, and that still
 /// holds: this only runs after one has been opened.
 fn hide() {
-    TIMER.with_borrow_mut(|slot| {
-        if let Some(timer) = slot.take() {
-            timer.stop();
-        }
-    });
+    if !enrolling() {
+        TIMER.with_borrow_mut(|slot| {
+            if let Some(timer) = slot.as_ref() {
+                timer.stop();
+            }
+        });
+    }
     WINDOW.with_borrow(|slot| {
         if let Some(window) = slot.as_ref() {
             let _ = window.hide();
@@ -632,23 +636,46 @@ fn hide() {
     });
 }
 
-/// Refreshes status while the window is visible, and not otherwise.
+/// Whether a join code is on show or this device is asking to join, either of which needs the
+/// refresh to keep going with the window closed.
+fn enrolling() -> bool {
+    INVITE.with_borrow(Option::is_some) || JOINING.with_borrow(Option::is_some)
+}
+
+/// Refreshes status while the window is visible, and while a join is under way, and not
+/// otherwise.
 fn start_timer() {
     TIMER.with_borrow_mut(|slot| {
-        if slot.is_some() {
+        if let Some(timer) = slot.as_ref() {
+            if !timer.running() {
+                timer.restart();
+            }
             return;
         }
         let timer = slint::Timer::default();
         timer.start(slint::TimerMode::Repeated, REFRESH, || {
-            WINDOW.with_borrow(|window| {
-                if let Some(window) = window.as_ref() {
+            let hidden = WINDOW.with_borrow(|window| {
+                let Some(window) = window.as_ref() else {
+                    return true;
+                };
+                refresh_invite(window);
+                refresh_join(window);
+                let hidden = !window.window().is_visible();
+                if !hidden {
                     refresh_status(window);
                     refresh_history_if_stale(window);
-                    refresh_invite(window);
-                    refresh_join(window);
                     track_maximized(window);
                 }
+                hidden
             });
+            // Kept going for a join only: stops once it is over.
+            if hidden && !enrolling() {
+                TIMER.with_borrow(|slot| {
+                    if let Some(timer) = slot.as_ref() {
+                        timer.stop();
+                    }
+                });
+            }
         });
         *slot = Some(timer);
     });
@@ -785,7 +812,7 @@ fn wire_invite(window: &AppWindow) {
     window.on_decline_request(|index| answer_request(index, false));
 }
 
-/// Attaches the callbacks on Status that change the account key: removing a device, and retiring
+/// Attaches the callbacks on Home that change the account key: removing a device, and retiring
 /// a key that was once shown as an old style join string.
 fn wire_removal(window: &AppWindow) {
     window.on_forget_device(|index| {
@@ -1046,7 +1073,7 @@ fn wire_switches(window: &AppWindow) {
             }
             Err(err) => {
                 window.set_autostart(!on);
-                window.set_autostart_detail(format!("could not change this: {err}").into());
+                window.set_autostart_detail(format!("Could not change this: {err}").into());
             }
         }
     });
@@ -1094,6 +1121,31 @@ fn wire_switches(window: &AppWindow) {
         apply(&window, |config| config.same_network_only = on);
         if let Some(context) = CONTEXT.get() {
             context.controls.transfers.set_same_network_only(on);
+        }
+    });
+}
+
+/// Puts a join code still on show, or this device still asking to join, back on a window built
+/// after the last one was closed, which starts out knowing neither.
+fn restore_enrolling(window: &AppWindow) {
+    INVITE.with_borrow(|slot| {
+        if let Some(invitation) = slot.as_ref() {
+            if window.get_invite_state() != InviteState::Waiting {
+                window.set_invite_code(invitation.code().into());
+                match qr_image(invitation.code()) {
+                    Ok(image) => window.set_qr(image),
+                    Err(err) => eprintln!("{}", log_line("qr_failed", &err.to_string())),
+                }
+                window.set_invite_state(InviteState::Waiting);
+            }
+        }
+    });
+    JOINING.with_borrow(|slot| {
+        if let Some((attempt, _, _)) = slot.as_ref() {
+            if !window.get_join_waiting() {
+                window.set_join_comparison(attempt.comparison().into());
+                window.set_join_waiting(true);
+            }
         }
     });
 }
@@ -1175,7 +1227,9 @@ fn refresh_invite(window: &AppWindow) {
     if asking > before {
         if let Some(newest) = view.asking.last() {
             crate::notify::join_requested(&newest.name);
-            show(Screen::Token);
+            // Later, not now: this runs with the window borrowed, and showing it borrows it
+            // again, which would be a panic rather than a window.
+            open_from_any_thread(Screen::Token);
         }
     }
     set_rows(&window.get_invite_asking(), rows, |model| {
@@ -1356,6 +1410,7 @@ fn refresh(window: &AppWindow) {
     let Some(context) = CONTEXT.get() else {
         return;
     };
+    restore_enrolling(window);
 
     let account = secrets::load(&context.paths).ok().flatten();
     window.set_has_account(account.is_some());
@@ -1445,6 +1500,12 @@ fn present(status: &Status, paused: bool, relay_host: &str, now_ms: u64) -> Pres
         .strip_prefix("Rejected: ")
         .or_else(|| state.strip_prefix("Stopped: "))
     {
+        // A sentence of its own, whatever case and stop it came with.
+        let reason = reason.trim_end_matches('.');
+        let mut chars = reason.chars();
+        let reason = chars.next().map_or_else(String::new, |first| {
+            first.to_uppercase().chain(chars).collect::<String>()
+        });
         return Presented {
             state: SyncState::Error,
             label: "Stopped Syncing".to_owned(),
@@ -1830,9 +1891,10 @@ fn pick_many_then(then: impl FnOnce(Vec<std::path::PathBuf>) + Send + 'static) {
 }
 
 /// Offers files to a device. Its row shows how that goes; only a refusal is said here.
-fn send_files(paths: &[std::path::PathBuf], to: [u8; 16]) {
+/// Offers each file to a device. Returns whether any of them is on its way.
+fn send_files(paths: &[std::path::PathBuf], to: [u8; 16]) -> bool {
     let Some(context) = CONTEXT.get() else {
-        return;
+        return false;
     };
     // Every file is tried, whatever happens to the one before it.
     let refused: Vec<String> = paths
@@ -1847,6 +1909,7 @@ fn send_files(paths: &[std::path::PathBuf], to: [u8; 16]) {
             refresh_status(window);
         }
     });
+    refused.len() < paths.len()
 }
 
 /// Shows a kept file in its folder, from its row in the list.
@@ -1907,23 +1970,35 @@ static ASKING: std::sync::Mutex<Vec<[u8; 16]>> = std::sync::Mutex::new(Vec::new(
 /// Asks about the files a device just offered, right away: with a notification that carries the
 /// buttons where the desktop allows, or with a small window in the corner of the screen. From any
 /// thread. Waits a moment first, so several files sent together are one question.
-pub fn ask_about_offers(device: [u8; 16]) {
+///
+/// `from`, `name` and `bytes` describe the offer that started it, for the plain notification
+/// shown instead when there is no window to ask with.
+pub fn ask_about_offers(device: [u8; 16], from: &str, name: &str, bytes: u64) {
     if let Ok(mut asking) = ASKING.lock() {
         if asking.contains(&device) {
             return;
         }
         asking.push(device);
     }
-    let _ = std::thread::Builder::new()
+    let (from, name) = (from.to_owned(), name.to_owned());
+    let plain = move || crate::notify::file_offered(&from, &name, bytes);
+    let fallback = plain.clone();
+    let spawned = std::thread::Builder::new()
         .name("asli-ask-wait".to_owned())
         .spawn(move || {
             std::thread::sleep(Duration::from_millis(700));
             if slint::invoke_from_event_loop(move || ask_now(device)).is_err() {
                 // No window here at all: a plain notification has to do.
                 asked(device);
-                crate::notify::file_offered("Another device", "files", 0);
+                plain();
             }
         });
+    if let Err(err) = spawned {
+        // Not asked at all otherwise, and never again for this device while it stayed listed.
+        eprintln!("{}", log_line("offer_ask_failed", &err.to_string()));
+        asked(device);
+        fallback();
+    }
 }
 
 /// The question about a device's files is over, however it ended.
@@ -2187,7 +2262,9 @@ fn wire_files(window: &AppWindow) {
         };
         // One file or several, straight to that device. Nothing else on the screen changes: the
         // device's own row shows how it goes.
-        pick_many_then(move |paths| send_files(&paths, to));
+        pick_many_then(move |paths| {
+            send_files(&paths, to);
+        });
     });
 
     window.on_cancel_device_send(|index| {
@@ -2410,8 +2487,11 @@ fn refresh_ready(window: &AppWindow) {
 /// Sends what is ready to one device.
 fn send_ready_to(device: [u8; 16]) {
     let files = READY.with_borrow(|ready| ready.files().to_vec());
-    send_files(&files, device);
-    READY.with_borrow_mut(|ready| ready.sent(device));
+    // Marked as sent there only when something went: a device that refused everything, being
+    // offline say, keeps its button, so it can be tried again.
+    if send_files(&files, device) {
+        READY.with_borrow_mut(|ready| ready.sent(device));
+    }
 }
 
 /// Attaches the callbacks of Ready to Send.

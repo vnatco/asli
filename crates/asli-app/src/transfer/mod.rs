@@ -48,6 +48,12 @@ const PACE_BURST: f64 = 2.0 * 1024.0 * 1024.0;
 /// How long a transfer under way may go without progress before it is given up.
 const STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long a sender waits for the last word once every piece has gone: the receiver checks the
+/// whole file and flushes it to disk first, which takes a while for a large file on a slow disk.
+/// Longer than the two minutes a direct transfer waits for that word itself, so this never calls
+/// a file lost that is still being confirmed.
+const FINISHING: std::time::Duration = std::time::Duration::from_secs(150);
+
 /// A token bucket for outgoing pieces.
 #[derive(Debug, Default)]
 struct Pace {
@@ -195,6 +201,10 @@ struct Outgoing {
     moved: Instant,
     /// Going straight to the receiver on the local network, not through the relay.
     direct: bool,
+    /// The receiver's connection when it was offered, and since when the receiver has not been
+    /// on it: an offer to a device that went away is not left waiting for an answer forever.
+    offered_to: String,
+    gone_since: Option<Instant>,
 }
 
 struct Incoming {
@@ -212,6 +222,8 @@ struct Incoming {
     direct: bool,
     /// The person chose this exact name and agreed to replace a file already there.
     replace: bool,
+    /// Since when the sender has not been on the connection it offered from.
+    gone_since: Option<Instant>,
 }
 
 impl Transfers {
@@ -304,7 +316,12 @@ impl Transfers {
         let now = Instant::now();
         let mut gave_up = false;
         for outgoing in state.sending.values_mut() {
-            if matches!(outgoing.stage, Stage::Moving(_)) && now - outgoing.moved > STALL {
+            let limit = if u64::from(outgoing.next) >= outgoing.offer.chunk_count() {
+                FINISHING
+            } else {
+                STALL
+            };
+            if matches!(outgoing.stage, Stage::Moving(_)) && now - outgoing.moved > limit {
                 outgoing.stage = Stage::Failed("the other device stopped answering.".to_owned());
                 gave_up = true;
             }
@@ -314,6 +331,46 @@ impl Transfers {
                 discard_part(incoming);
                 incoming.stage = Stage::Failed("the other device stopped sending.".to_owned());
                 gave_up = true;
+            }
+        }
+        // An offer still waiting for an answer ends once the device at the other end has been
+        // off the connection it was made on for a while: gone offline, or restarted, which ends
+        // everything it had under way. Not checked while this device is offline itself, which
+        // ends every offer on its own.
+        if state
+            .link
+            .as_ref()
+            .is_some_and(|link| link.conn_id.is_some())
+        {
+            let devices = &state.devices;
+            for outgoing in state.sending.values_mut() {
+                if outgoing.stage == Stage::Offered {
+                    let here = devices.conn_of(&outgoing.offer.to_device_id);
+                    if went_away(
+                        here.as_deref(),
+                        &outgoing.offered_to,
+                        &mut outgoing.gone_since,
+                        now,
+                    ) {
+                        outgoing.stage = Stage::Failed("the other device went offline.".to_owned());
+                        gave_up = true;
+                    }
+                }
+            }
+            for incoming in state.receiving.values_mut() {
+                if incoming.stage == Stage::Offered {
+                    let here = devices.conn_of(&incoming.offer.from_device_id);
+                    let offered_from = incoming.offer.reply_to.clone();
+                    if went_away(
+                        here.as_deref(),
+                        &offered_from,
+                        &mut incoming.gone_since,
+                        now,
+                    ) {
+                        incoming.stage = Stage::Failed("the other device went offline.".to_owned());
+                        gave_up = true;
+                    }
+                }
             }
         }
         if gave_up {
@@ -584,6 +641,8 @@ impl Transfers {
                 stage: Stage::Offered,
                 moved: Instant::now(),
                 direct: false,
+                offered_to: conn.to_owned(),
+                gone_since: None,
             },
         );
         state.revision += 1;
@@ -757,7 +816,8 @@ impl Transfers {
         let Some(outgoing) = state.sending.get_mut(id) else {
             return false;
         };
-        if outgoing.stage.finished() {
+        // Finished, or taken over by the relay.
+        if outgoing.stage.finished() || !outgoing.direct {
             return false;
         }
         outgoing.acked = sent;
@@ -774,7 +834,7 @@ impl Transfers {
             return;
         };
         if let Some(outgoing) = state.sending.get_mut(id) {
-            if !outgoing.stage.finished() {
+            if !outgoing.stage.finished() && outgoing.direct {
                 outgoing.stage = if ended == AckState::Done {
                     eprintln!(
                         "{}",
@@ -795,7 +855,7 @@ impl Transfers {
             return;
         };
         if let Some(outgoing) = state.sending.get_mut(id) {
-            if !outgoing.stage.finished() {
+            if !outgoing.stage.finished() && outgoing.direct {
                 outgoing.stage = Stage::Failed(reason.to_owned());
             }
         }
@@ -854,13 +914,19 @@ impl Transfers {
         let State {
             link, receiving, ..
         } = &mut *state;
-        let (Some(link), Some(incoming)) = (link.as_ref(), receiving.get_mut(id)) else {
+        let Some(incoming) = receiving.get_mut(id) else {
             return;
         };
         if incoming.stage != Stage::Offered {
             return;
         }
-        let _ = answer(link, id, false, &incoming.offer.reply_to);
+        // Turned down here whatever happens. The sender is told when it can be; when it cannot,
+        // its offer ends on its own once this device is gone from where it was asked.
+        if let Some(link) = link.as_ref() {
+            if let Err(err) = answer(link, id, false, &incoming.offer.reply_to) {
+                eprintln!("{}", log_line("file_decline_unsent", &err));
+            }
+        }
         incoming.stage = Stage::Declined;
         state.revision += 1;
     }
@@ -965,6 +1031,25 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<([u8; 16], String, String,
         .into_iter()
         .find(|device| device.device_id == from)?;
     let offer = Offer::decode(body, &link.room, &pinned.sign_pub).ok()?;
+    // Signed, but possibly old: a relay could hold on to an offer and send it again later, to
+    // ask about a file that was settled long ago. Only one made recently, by the same rule as a
+    // card, is asked about.
+    let now_ms = asli_net::client::now_ms();
+    let fresh = now_ms.saturating_sub(offer.ts_ms) <= asli_core::replay::DEFAULT_MAX_AGE_MS
+        && offer.ts_ms.saturating_sub(now_ms) <= asli_core::replay::DEFAULT_FUTURE_SKEW_MS;
+    // Nor is one made on a connection the sender is known to have left: answered, it would go
+    // nowhere. When where the sender is now is not known yet, the offer is believed.
+    let moved_on = state
+        .devices
+        .conn_of(&from)
+        .is_some_and(|conn| conn != offer.reply_to);
+    if !fresh || moved_on {
+        eprintln!(
+            "{}",
+            log_line("file_offer_stale", "an old offer arrived again; ignored")
+        );
+        return None;
+    }
     if offer.to_device_id != link.device_id
         || offer.size > MAX_FILE_BYTES
         || state.receiving.contains_key(&offer.offer_id)
@@ -991,6 +1076,7 @@ fn on_offer(state: &mut State, body: &[u8]) -> Option<([u8; 16], String, String,
             moved: Instant::now(),
             direct: false,
             replace: false,
+            gone_since: None,
         },
     );
     Some((from, peer, name, size))
@@ -1017,9 +1103,27 @@ fn on_answer(state: &mut State, body: &[u8]) {
     let Some(outgoing) = state.sending.get_mut(&answer.offer_id) else {
         return;
     };
+    // The receiver asks through the relay only when nothing reached it directly, so an answer
+    // arriving while this device is sending directly means the direct path is not getting
+    // through: the relay takes the transfer over from the start, and the direct send stops.
+    let taking_over = outgoing.direct && !outgoing.stage.finished();
     // Only the device it was offered to may answer.
-    if outgoing.offer.to_device_id != answer.from_device_id || outgoing.stage != Stage::Offered {
+    if outgoing.offer.to_device_id != answer.from_device_id
+        || !(outgoing.stage == Stage::Offered || taking_over)
+    {
         return;
+    }
+    if taking_over {
+        eprintln!(
+            "{}",
+            log_line(
+                "file_direct_abandoned",
+                "the receiver asked through the relay"
+            )
+        );
+        outgoing.direct = false;
+        outgoing.next = 0;
+        outgoing.acked = 0;
     }
     if !answer.accepted {
         outgoing.stage = Stage::Declined;
@@ -1179,11 +1283,20 @@ fn finish_incoming(incoming: &mut Incoming) -> AckState {
     };
     let synced = file.sync_all();
     drop(file);
-    if digest != incoming.offer.sha256 || incoming.written != incoming.offer.size || synced.is_err()
-    {
+    if digest != incoming.offer.sha256 || incoming.written != incoming.offer.size {
         let _ = fs::remove_file(&part);
         incoming.stage = Stage::Failed("it arrived damaged, so it was thrown away".to_owned());
         crate::notify::file_failed(&safe_name(&incoming.offer.name), "it arrived damaged");
+        return AckState::Corrupt;
+    }
+    // Arrived whole, but the disk would not take it: a full disk, or one that went away.
+    if let Err(err) = synced {
+        let _ = fs::remove_file(&part);
+        incoming.stage = Stage::Failed(format!("it couldn't be written to disk: {err}"));
+        crate::notify::file_failed(
+            &safe_name(&incoming.offer.name),
+            &format!("it couldn't be written to disk: {err}"),
+        );
         return AckState::Corrupt;
     }
     // Checked again at the rename: something with the same name may have appeared meanwhile. Its
@@ -1200,6 +1313,10 @@ fn finish_incoming(incoming: &mut Incoming) -> AckState {
     if let Err(err) = fs::rename(&part, &target) {
         let _ = fs::remove_file(&part);
         incoming.stage = Stage::Failed(format!("couldn't keep it: {err}"));
+        crate::notify::file_failed(
+            &safe_name(&incoming.offer.name),
+            &format!("it couldn't be kept: {err}"),
+        );
         return AckState::Corrupt;
     }
     mark_downloaded(&target);
@@ -1261,6 +1378,27 @@ fn discard_part(incoming: &mut Incoming) {
         drop(file);
         let _ = fs::remove_file(part);
     }
+}
+
+/// How long the device at the other end of a waiting offer may be off its connection before the
+/// offer ends. Long enough to ride out the moment after any device leaves, when the others count
+/// as offline until they announce themselves again.
+const GONE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Whether the device at the other end of an offer has been off the connection the offer belongs
+/// to for longer than [`GONE`], keeping track of since when in `gone_since`.
+fn went_away(
+    here: Option<&str>,
+    offered_on: &str,
+    gone_since: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    if here == Some(offered_on) {
+        *gone_since = None;
+        return false;
+    }
+    let since = *gone_since.get_or_insert(now);
+    now.duration_since(since) > GONE
 }
 
 fn fail_all_live(state: &mut State, reason: &str) {
@@ -1389,11 +1527,26 @@ pub fn safe_name(raw: &str) -> String {
     if name.starts_with('.') {
         name.insert(0, '_');
     }
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    // Windows reserves these device names, whatever follows the first dot, with spaces before it
+    // ignored, and counts the superscript digits after COM and LPT as digits.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    };
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && stem.as_bytes()[3].is_ascii_digit());
+        || numbered("COM")
+        || numbered("LPT");
     if reserved {
         name.insert(0, '_');
     }
@@ -1485,6 +1638,30 @@ pub fn default_folder() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_offer_ends_only_once_the_other_device_has_been_gone_a_while() {
+        let start = Instant::now();
+        let mut gone = None;
+        // On its connection: nothing happens.
+        assert!(!went_away(Some("c_1"), "c_1", &mut gone, start));
+        assert!(gone.is_none());
+        // Off it, briefly, as in the moment after another device leaves: not yet.
+        assert!(!went_away(None, "c_1", &mut gone, start));
+        assert!(!went_away(None, "c_1", &mut gone, start + GONE / 2));
+        // Back on it: the clock starts over.
+        assert!(!went_away(Some("c_1"), "c_1", &mut gone, start + GONE / 2));
+        assert!(gone.is_none());
+        // Restarted, so on a different connection, for longer than the grace: it ends.
+        let later = start + GONE;
+        assert!(!went_away(Some("c_2"), "c_1", &mut gone, later));
+        assert!(went_away(
+            Some("c_2"),
+            "c_1",
+            &mut gone,
+            later + GONE + std::time::Duration::from_secs(1)
+        ));
+    }
     use super::*;
 
     #[test]
@@ -1492,6 +1669,10 @@ mod tests {
         for (given, kept) in [
             ("report.pdf", "report.pdf"),
             ("../../.config/autostart/evil.desktop", "evil.desktop"),
+            ("COM\u{b9}.txt", "_COM\u{b9}.txt"),
+            ("lpt3.log", "_lpt3.log"),
+            ("con .txt", "_con .txt"),
+            ("COM10.txt", "COM10.txt"),
             ("..\\..\\Startup\\run.lnk", "run.lnk"),
             ("C:\\Windows\\System32\\x.dll", "x.dll"),
             (".bashrc", "_.bashrc"),

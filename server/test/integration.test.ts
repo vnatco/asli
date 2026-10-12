@@ -581,6 +581,27 @@ test('a spent daily transfer budget is refused, and the connection carries on', 
   );
 });
 
+test('a message to the whole room is charged once for every device it goes to', async () => {
+  await withRelay(
+    async (port) => {
+      const a = await TestClient.open(port);
+      const b = await TestClient.open(port);
+      const c = await TestClient.open(port);
+      await a.handshake();
+      await b.handshake();
+      await c.handshake();
+      // About 546 KB on the wire: inside a 1 MiB allowance once, past it going out twice.
+      a.send({ ...msgFrame(randomBytes(16)), ct: Buffer.alloc(400 * 1024, 0x66).toString('base64') });
+      const err = await a.nextOfType('error');
+      assert.equal(err['code'], 'QUOTA_EXCEEDED');
+      a.close();
+      b.close();
+      c.close();
+    },
+    { ROOM_TRANSFER_BYTES_PER_DAY: String(1024 * 1024) },
+  );
+});
+
 function imageChunks(msgId: Buffer, count: number, bytes: number): Json[] {
   return Array.from({ length: count }, (_, idx) => ({
     v: 1,

@@ -47,7 +47,7 @@ pub struct Config {
     pub max_content_bytes: usize,
     /// Whether to show a notification when a clip arrives.
     pub notifications: bool,
-    /// Whether to start at login. Not yet implemented, stored so the setting survives.
+    /// Whether to start at login.
     pub autostart: bool,
     /// This device's id, as 32 lowercase hex characters.
     ///

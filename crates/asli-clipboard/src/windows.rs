@@ -46,7 +46,7 @@ const RETRY_BASE: Duration = Duration::from_millis(1);
 
 /// How many times to retry opening the clipboard.
 ///
-/// Doubling from 1 ms gives roughly 127 ms of waiting across eight attempts. Scintilla settled on
+/// Doubling from 1 ms gives at most 255 ms of waiting across eight attempts. Scintilla settled on
 /// this shape after finding that most contention clears within one or two retries, which makes a
 /// flat delay per attempt pure latency. Chromium uses five attempts at a flat 5 ms, and the .NET
 /// clipboard uses ten at 100 ms, which is far too slow to sit in a clipboard event path.
