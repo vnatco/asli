@@ -63,6 +63,12 @@ pub(super) fn on_about(state: &State, body: &[u8]) {
     state
         .devices
         .heard_version(&about.from_device_id, &about.version, about.build);
+    // Signed by the device, and naming the connection it is on now: proof it is online there.
+    state.devices.heard_alive(
+        &about.from_device_id,
+        &about.reply_to,
+        asli_net::client::now_ms(),
+    );
     if about.ask {
         announce(state, false, Some(&about.reply_to));
     }

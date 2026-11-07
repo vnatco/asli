@@ -195,6 +195,29 @@ impl DevicesHandle {
         }
     }
 
+    /// Records that a device is connected right now, at `conn`, on the word of a message it
+    /// signed with its pinned key.
+    ///
+    /// Presence alone cannot always say so: a device that drops and reconnects within the relay's
+    /// presence debounce leaves the count unchanged for everyone else, so nobody announces again,
+    /// and the reconnected device would go on listing them all as offline. Every device asks the
+    /// room which Asli it runs when it connects, and each answer comes from its sender's current
+    /// connection, which settles it.
+    pub fn heard_alive(&self, device_id: &[u8; 16], conn: &str, now_ms: u64) {
+        let Ok(mut registry) = self.0.lock() else {
+            return;
+        };
+        if !registry.connected {
+            return;
+        }
+        let id = hex(device_id);
+        let Some(device) = registry.stored.devices.get_mut(&id) else {
+            return;
+        };
+        device.last_seen_ms = device.last_seen_ms.max(now_ms);
+        registry.conns.insert(id, conn.to_owned());
+    }
+
     /// Records a signed card: the name and system, and the keys it pinned.
     pub fn heard_card(&self, card: &asli_net::session::KnownDevice, now_ms: u64) {
         let Ok(mut registry) = self.0.lock() else {
@@ -701,6 +724,23 @@ mod tests {
             "last seen is when it left, not when it last announced"
         );
         assert_eq!(list[1].name, "stays", "online devices sort first");
+    }
+
+    #[test]
+    fn a_device_that_answers_after_a_quick_reconnect_is_online_again() {
+        let devices = DevicesHandle::default();
+        devices.set_connected(true, 2, 1_000);
+        devices.heard(&[2u8; 16], "desktop", "Windows 11", 1_100);
+        // This device drops and is back within the relay's debounce: the count never changed for
+        // the desktop, so it does not announce again.
+        devices.set_connected(false, 0, 5_000);
+        devices.set_connected(true, 2, 5_400);
+        assert_eq!(devices.conn_of(&[2u8; 16]), None);
+        assert!(!devices.list(&this())[1].online);
+        // Its signed answer to "which Asli are you" names its connection.
+        devices.heard_alive(&[2u8; 16], "c_0000beef", 5_600);
+        assert_eq!(devices.conn_of(&[2u8; 16]).as_deref(), Some("c_0000beef"));
+        assert!(devices.list(&this())[1].online);
     }
 
     #[test]

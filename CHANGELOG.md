@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-11-07
+
+### Fixed
+
+- A device that drops off the relay and reconnects within a second or two no longer goes on
+  listing the others as offline, which kept it from sending them files while clips still synced.
+  Their answer to the question every device asks when it connects, which Asli they run, now also
+  counts as proof of where they are.
+
 ## [1.0.1] - 2026-10-12
 
 ### Fixed
