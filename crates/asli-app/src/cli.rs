@@ -306,7 +306,12 @@ fn known_devices(paths: &Paths) -> Result<Vec<crate::devices::Listed>> {
     let room = Identity::from_secret(&keys.account).room_id();
     let config = paths.load_config()?;
     let handle = crate::devices::DevicesHandle::default();
-    handle.load(paths, &room);
+    handle.load_saved(
+        paths,
+        &room,
+        instance::is_running(paths),
+        asli_net::client::now_ms(),
+    );
     Ok(handle.list(&crate::devices::Listed {
         id: config.device_id.clone(),
         name: crate::devices::display_name(&config.device_name),
@@ -325,6 +330,8 @@ fn devices(paths: &Paths) -> Result<()> {
     for device in known_devices(paths)? {
         let seen = if device.this_device {
             "this device".to_owned()
+        } else if device.online {
+            "online".to_owned()
         } else {
             tray::relative_time(device.last_seen_ms, now)
         };

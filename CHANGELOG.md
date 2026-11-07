@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-11-07
+
+### Fixed
+
+- `asli devices` in a terminal shows which devices are online right now, and when the others were
+  last seen, instead of what was saved when they last introduced themselves, which could be
+  hours old. The running Asli writes who is online every 30 seconds for it to read.
+
 ## [1.0.3] - 2026-11-07
 
 ### Fixed

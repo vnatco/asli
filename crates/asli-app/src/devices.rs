@@ -90,7 +90,26 @@ struct Stored {
     room: String,
     /// Keyed by device id in hex.
     devices: BTreeMap<String, Device>,
+    /// Who the running Asli last saw online, so `asli devices` in a terminal can tell. Absent
+    /// when Asli is not running, or wrote nothing since it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    live: Option<Live>,
 }
+
+/// A snapshot of who is online, written by the running Asli every [`LIVE_EVERY_MS`].
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct Live {
+    /// When it was written, in milliseconds since the Unix epoch.
+    at_ms: u64,
+    /// The devices online then, by id in hex.
+    online: Vec<String>,
+}
+
+/// How often the running Asli writes who is online.
+pub const LIVE_EVERY_MS: u64 = 30_000;
+
+/// How old a snapshot may be and still count. Past this the writer has stopped or stalled.
+const LIVE_FOR_MS: u64 = LIVE_EVERY_MS * 3;
 
 /// One row of the list, ready to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +151,9 @@ struct Registry {
     peers: u32,
     /// When the count last went down. Devices not heard from since are taken to have left.
     last_departure_ms: u64,
+    /// Loaded by a command in a terminal rather than the running Asli: who is online then comes
+    /// from the snapshot the running Asli wrote, not from a connection of its own.
+    from_disk: Option<u64>,
 }
 
 impl DevicesHandle {
@@ -145,11 +167,46 @@ impl DevicesHandle {
             .unwrap_or_else(|| Stored {
                 room: room.to_owned(),
                 devices: BTreeMap::new(),
+                live: None,
             });
         if let Ok(mut registry) = self.0.lock() {
             registry.paths = Some(paths.clone());
             registry.stored = stored;
         }
+    }
+
+    /// Loads the list for a command in a terminal, which reads who is online from what the
+    /// running Asli last wrote instead of connecting itself. `running` says whether an Asli is
+    /// running; without one, nobody is shown online.
+    pub fn load_saved(&self, paths: &Paths, room: &str, running: bool, now_ms: u64) {
+        self.load(paths, room);
+        if let Ok(mut registry) = self.0.lock() {
+            if !running {
+                registry.stored.live = None;
+            }
+            registry.from_disk = Some(now_ms);
+        }
+    }
+
+    /// Writes who is online now and moves their last seen to now, for `asli devices` and for
+    /// the next start. Called every [`LIVE_EVERY_MS`] by the running Asli.
+    pub fn write_live(&self, now_ms: u64) {
+        let Ok(mut registry) = self.0.lock() else {
+            return;
+        };
+        let registry = &mut *registry;
+        let mut online = Vec::new();
+        if registry.connected {
+            let since = registry.last_departure_ms;
+            for (id, device) in &mut registry.stored.devices {
+                if device.last_seen_ms >= since {
+                    device.last_seen_ms = device.last_seen_ms.max(now_ms);
+                    online.push(id.clone());
+                }
+            }
+        }
+        registry.stored.live = Some(Live { at_ms: now_ms, online });
+        registry.save();
     }
 
     /// Records an announcement.
@@ -391,6 +448,10 @@ impl DevicesHandle {
                     device.last_seen_ms = now_ms;
                 }
             }
+            registry.stored.live = Some(Live {
+                at_ms: now_ms,
+                online: Vec::new(),
+            });
             registry.save();
         }
         registry.connected = connected;
@@ -435,6 +496,15 @@ impl DevicesHandle {
         let Ok(registry) = self.0.lock() else {
             return vec![this.clone()];
         };
+        let live = registry.from_disk.map(|now_ms| {
+            registry
+                .stored
+                .live
+                .as_ref()
+                .filter(|live| now_ms.saturating_sub(live.at_ms) <= LIVE_FOR_MS)
+                .map(|live| live.online.clone())
+                .unwrap_or_default()
+        });
         let mut others: Vec<Listed> = registry
             .stored
             .devices
@@ -445,7 +515,10 @@ impl DevicesHandle {
                 name: device.name.clone(),
                 os: device.os.clone(),
                 last_seen_ms: Some(device.last_seen_ms),
-                online: registry.connected && device.last_seen_ms >= registry.last_departure_ms,
+                online: live.as_ref().map_or(
+                    registry.connected && device.last_seen_ms >= registry.last_departure_ms,
+                    |live| live.contains(id),
+                ),
                 this_device: false,
                 keyed: !device.box_pub.is_empty(),
                 version: device.version.clone(),
@@ -747,6 +820,45 @@ mod tests {
         devices.heard_alive(&[2u8; 16], "c_0000beef", 5_600);
         assert_eq!(devices.conn_of(&[2u8; 16]).as_deref(), Some("c_0000beef"));
         assert!(devices.list(&this())[1].online);
+    }
+
+    #[test]
+    fn a_terminal_reads_who_is_online_from_what_the_running_asli_wrote() {
+        let dir = std::env::temp_dir().join(format!(
+            "asli-devices-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let paths = Paths { dir: dir.clone() };
+        let running = DevicesHandle::default();
+        running.load(&paths, "room");
+        running.set_connected(true, 3, 1_000);
+        running.heard(&[2u8; 16], "desktop", "Windows 11", 1_100);
+        running.heard(&[3u8; 16], "laptop", "macOS 15", 1_200);
+        running.presence(2, 2_000);
+        running.heard(&[2u8; 16], "desktop", "Windows 11", 2_100);
+        running.write_live(60_000);
+
+        let online = |running_now: bool, now_ms: u64| {
+            let terminal = DevicesHandle::default();
+            terminal.load_saved(&paths, "room", running_now, now_ms);
+            terminal
+                .list(&this())
+                .into_iter()
+                .filter(|device| device.online && !device.this_device)
+                .map(|device| device.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(online(true, 70_000), ["desktop"]);
+        // The desktop was seen until the snapshot, not three hours before it.
+        let terminal = DevicesHandle::default();
+        terminal.load_saved(&paths, "room", true, 70_000);
+        assert_eq!(terminal.list(&this())[1].last_seen_ms, Some(60_000));
+        // Asli stopped, or stopped writing: nobody is claimed to be online.
+        assert!(online(false, 70_000).is_empty());
+        assert!(online(true, 60_000 + LIVE_FOR_MS + 1).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

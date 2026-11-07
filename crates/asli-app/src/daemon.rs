@@ -786,6 +786,20 @@ pub async fn run(
             }
         })
     };
+    // Who is online, written down for `asli devices` in a terminal, which cannot ask the
+    // connection itself.
+    let live_writer = {
+        let devices = controls.devices.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_millis(
+                crate::devices::LIVE_EVERY_MS,
+            ));
+            loop {
+                every.tick().await;
+                devices.write_live(client::now_ms());
+            }
+        })
+    };
     // The bridge consumes its sender, and the retained pump needs one of its own.
     let local_tx_for_retained = local_tx.clone();
     spawn_clipboard_bridge(
@@ -820,6 +834,7 @@ pub async fn run(
     .await;
     rekey_watch.abort();
     pacer.abort();
+    live_writer.abort();
     result
 }
 
