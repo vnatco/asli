@@ -215,7 +215,13 @@ impl DevicesHandle {
             return;
         };
         device.last_seen_ms = device.last_seen_ms.max(now_ms);
-        registry.conns.insert(id, conn.to_owned());
+        let known = registry.conns.insert(id.clone(), conn.to_owned());
+        if known.as_deref() != Some(conn) {
+            eprintln!(
+                "{}",
+                crate::clipboard_io::log_line("device_present", &id[..12])
+            );
+        }
     }
 
     /// Records a signed card: the name and system, and the keys it pinned.
